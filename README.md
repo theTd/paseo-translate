@@ -34,7 +34,7 @@ Then open the plugin's **Translate** settings screen in the app and configure:
 
 - **Endpoint base URL / API key / model** — any OpenAI-compatible `/chat/completions` endpoint
 - **Your language** and **Agent language** — e.g. `en` and `de`
-- **Inner agent command** — the ACP-speaking command to wrap (arguments are split on spaces; on Windows use the full executable path, e.g. `C:\...\agent.exe`, since no shell resolves `.cmd` shims)
+- **Inner agent command** — the ACP-speaking command to wrap. The settings screen lists the daemon's ACP providers and fills the command automatically: custom `extends: "acp"` providers use the command configured on the daemon, built-ins (Copilot, Cursor) use their configured override or the built-in default (`copilot --acp` / `cursor-agent acp`). Non-ACP providers are hidden. Manual entry remains the fallback (arguments are split on spaces; on Windows use the full executable path, e.g. `C:\...\agent.exe`, since no shell resolves `.cmd` shims)
 - **Translation timeout** — per-request bound, prompts fail closed past it
 
 Create agents against the **Translate (ACP)** provider. Each session spawns the

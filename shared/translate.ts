@@ -68,6 +68,40 @@ export const translateTextRpc = defineRpc({
   }),
 });
 
+/**
+ * Launch commands of the daemon's built-in ACP providers (from Paseo's
+ * provider registry defaults). The protocol snapshot deliberately does not
+ * expose custom providers' configured commands, so only these resolve
+ * automatically; everything else falls back to manual entry.
+ */
+export const KNOWN_ACP_COMMANDS: Readonly<Record<string, readonly string[]>> = {
+  copilot: ["copilot", "--acp"],
+  cursor: ["cursor-agent", "acp"],
+};
+
+export function knownAcpCommand(providerId: string): readonly string[] | null {
+  // Object.hasOwn guards prototype keys like "__proto__" from leaking
+  // Object.prototype through the record lookup.
+  return Object.hasOwn(KNOWN_ACP_COMMANDS, providerId) ? KNOWN_ACP_COMMANDS[providerId] : null;
+}
+
+export const translateProvidersRpc = defineRpc({
+  name: "translate.providers.list",
+  input: z.object({}),
+  output: z.object({
+    providers: z.array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        status: z.enum(["ready", "loading", "error", "unavailable"]),
+        /** Built-in providers with a known ACP command carry it here. */
+        command: z.array(z.string()).nullable(),
+      }),
+    ),
+  }),
+});
+export type TranslateProviderOption = z.output<typeof translateProvidersRpc.output>["providers"][number];
+
 /** Data shape the client transformer emits and the renderer validates. */
 export const translatedMessageDataSchema = z.object({
   text: z.string(),

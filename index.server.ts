@@ -1,7 +1,13 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createProvidersHandler } from "./server/providers";
 import { createTranslateProvider } from "./server/provider";
 import { createTranslateHandler } from "./server/translate";
-import { assertConfigured, translateSettings, translateTextRpc } from "./shared/translate";
+import {
+  assertConfigured,
+  translateProvidersRpc,
+  translateSettings,
+  translateTextRpc,
+} from "./shared/translate";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(translateSettings);
@@ -17,5 +23,6 @@ export default function contribute(server: PluginServerContext) {
   };
   server.registerProvider(createTranslateProvider({ loadConfig }));
   server.handle(translateTextRpc, createTranslateHandler({ loadConfig }));
+  server.handle(translateProvidersRpc, createProvidersHandler());
   return () => {};
 }

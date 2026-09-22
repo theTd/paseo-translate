@@ -1,14 +1,16 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import { Text } from "react-native";
-import { useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
+import { useQuery } from "@tanstack/react-query";
+import { useRpc, useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
 import {
   SettingsAction,
   SettingsCard,
   SettingsInput,
   SettingsSection,
+  SettingsSelect,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
-import { translateSettings } from "../shared/translate";
+import { translateProvidersRpc, translateSettings } from "../shared/translate";
 
 type ReadySettings = Extract<SettingsState<typeof translateSettings.schema>, { status: "ready" }>;
 
@@ -53,6 +55,24 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
   // Bumped only when the displayed form must reset (discard or save); editing
   // alone must not remount the inputs or the focused field loses focus.
   const [formResetCount, setFormResetCount] = useState(0);
+  const [pickedProvider, setPickedProvider] = useState("");
+  const [pickerNote, setPickerNote] = useState<string | null>(null);
+
+  const listProviders = useRpc(translateProvidersRpc);
+  const providersQuery = useQuery({
+    queryKey: ["translate", "providers"],
+    queryFn: () => listProviders({}),
+    staleTime: 30_000,
+    retry: 1,
+  });
+  const providerOptions = useMemo(
+    () =>
+      (providersQuery.data?.providers ?? []).map((provider) => ({
+        label: `${provider.label} (${provider.status})`,
+        value: provider.id,
+      })),
+    [providersQuery.data],
+  );
 
   const ready = settings.status === "ready" ? settings : null;
   // Latest snapshot for starting a draft on the first edit after a reload.
@@ -67,6 +87,22 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
       return base === null ? null : { ...base, ...changes };
     });
   }, []);
+
+  const pickProvider = useCallback(
+    (id: string) => {
+      setPickedProvider(id);
+      const option = providersQuery.data?.providers.find((provider) => provider.id === id) ?? null;
+      if (option?.command) {
+        patch({ commandText: option.command.join(" ") });
+        setPickerNote(`Filled the command for ${option.label}.`);
+        return;
+      }
+      setPickerNote(
+        `No usable ACP command found for '${id}'; enter its ACP launch command manually below.`,
+      );
+    },
+    [providersQuery.data, patch],
+  );
 
   const changeBaseUrl = useCallback(
     (endpointBaseUrl: string) => patch({ endpointBaseUrl }),
@@ -100,6 +136,8 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
   const discard = useCallback(() => {
     setDraft(null);
     setDraftError(null);
+    setPickedProvider("");
+    setPickerNote(null);
     setFormResetCount((count) => count + 1);
   }, []);
 
@@ -180,6 +218,34 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
 
   return (
     <SettingsSection title="Translate" info={sectionInfo}>
+      <SettingsCard>
+        {providersQuery.isPending ? (
+          <Text style={mutedStyle}>Loading daemon providers…</Text>
+        ) : null}
+        {providersQuery.isError ? (
+          <Text style={mutedStyle} accessibilityRole="alert">
+            Could not load providers:{" "}
+            {providersQuery.error instanceof Error ? providersQuery.error.message : "failed"}
+          </Text>
+        ) : null}
+        {providerOptions.length > 0 ? (
+          <SettingsSelect
+            label="Inner agent (pick a daemon provider)"
+            hint="ACP providers fill the command from the daemon configuration automatically"
+            value={pickedProvider}
+            options={providerOptions}
+            disabled={settings.saving || providersQuery.isPending}
+            onValueChange={pickProvider}
+          />
+        ) : null}
+        {pickerNote !== null ? <Text style={mutedStyle}>{pickerNote}</Text> : null}
+        <SettingsAction
+          label="Refresh the daemon provider list"
+          actionLabel="Refresh"
+          disabled={providersQuery.isFetching}
+          onPress={providersQuery.refetch}
+        />
+      </SettingsCard>
       <SettingsCard key={`endpoint-${formKey}`}>
         <SettingsInput
           label="Endpoint base URL"

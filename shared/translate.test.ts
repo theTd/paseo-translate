@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { assertConfigured, translateSettings, type TranslateSettingsValues } from "./translate";
+import {
+  assertConfigured,
+  knownAcpCommand,
+  translateProvidersRpc,
+  translateSettings,
+  type TranslateSettingsValues,
+} from "./translate";
 
 const configured: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
@@ -39,5 +45,24 @@ describe("translate settings schema", () => {
       /missing inner agent command/,
     );
     expect(() => assertConfigured(configured)).not.toThrow();
+  });
+
+  it("resolves known ACP provider commands and nulls the rest", () => {
+    expect(knownAcpCommand("copilot")).toEqual(["copilot", "--acp"]);
+    expect(knownAcpCommand("cursor")).toEqual(["cursor-agent", "acp"]);
+    expect(knownAcpCommand("kimi")).toBeNull();
+    expect(knownAcpCommand("__proto__")).toBeNull();
+  });
+
+  it("shapes the providers list RPC contract", () => {
+    expect(translateProvidersRpc.name).toBe("translate.providers.list");
+    expect(
+      translateProvidersRpc.output.parse({
+        providers: [{ id: "copilot", label: "Copilot", status: "ready", command: ["copilot", "--acp"] }],
+      }),
+    ).toEqual({
+      providers: [{ id: "copilot", label: "Copilot", status: "ready", command: ["copilot", "--acp"] }],
+    });
+    expect(translateProvidersRpc.output.safeParse({ providers: [{ id: "x" }] }).success).toBe(false);
   });
 });
