@@ -41,9 +41,15 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       const values = await deps.loadConfig();
       const pair = resolveLanguagePair(values, direction);
       // The key covers everything that changes the output: direction,
-      // language pair, model, and text. Editing settings invalidates old
-      // entries instead of serving stale translations from another language.
-      const key = cacheKey(text, direction, pair, values.endpointModel);
+      // language pair, model, reasoning effort, and text. Editing settings
+      // invalidates old entries instead of serving stale translations.
+      const key = cacheKey(
+        text,
+        direction,
+        pair,
+        values.endpointModel,
+        values.translationReasoningEffort,
+      );
       const cached = cache.get(key);
       if (cached !== undefined) {
         // Refresh recency so the cache stays least-recently-used.
@@ -57,6 +63,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
           apiKey: values.endpointApiKey,
           model: values.endpointModel,
           timeoutMs: values.translationTimeoutMs,
+          reasoningEffort: values.translationReasoningEffort,
         },
         { fetchFn: deps.fetchFn },
       );
@@ -95,7 +102,8 @@ function cacheKey(
   direction: TranslateDirection,
   pair: { source: string; target: string },
   model: string,
+  reasoningEffort: string,
 ): string {
   const digest = createHash("sha256").update(text, "utf8").digest("hex");
-  return `${direction}:${pair.source}>${pair.target}:${model}:${digest}`;
+  return `${direction}:${pair.source}>${pair.target}:${model}:${reasoningEffort}:${digest}`;
 }

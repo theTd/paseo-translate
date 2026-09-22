@@ -10,6 +10,7 @@ const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
+  translationReasoningEffort: "default" as const,
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
@@ -99,7 +100,9 @@ describe("translate service", () => {
     await translator.translate("Hello", "user-to-agent");
     current = { ...values, endpointModel: "mt-v2" };
     await translator.translate("Hello", "user-to-agent");
-    expect(calls).toHaveLength(3);
+    current = { ...values, translationReasoningEffort: "high" };
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls).toHaveLength(4);
     expect(calls[1].body?.messages[0]?.content).toContain("from en to fr");
     expect(calls[2].body?.messages[0]?.content).toContain("from en to de");
   });

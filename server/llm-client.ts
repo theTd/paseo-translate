@@ -13,6 +13,8 @@ export interface LlmEndpointConfig {
   apiKey: string;
   model: string;
   timeoutMs: number;
+  /** OpenAI-compatible reasoning effort; omit or "default" to send none. */
+  reasoningEffort?: string;
 }
 
 export interface LlmClient {
@@ -45,6 +47,11 @@ export function createLlmClient(
             messages,
             temperature: 0,
             stream: false,
+            ...(config.reasoningEffort !== undefined &&
+            config.reasoningEffort.length > 0 &&
+            config.reasoningEffort !== "default"
+              ? { reasoning_effort: config.reasoningEffort }
+              : {}),
           }),
           // The SDK dependency bundles DOM-style globals that clash with the
           // Node declarations; bridge them at this boundary through the

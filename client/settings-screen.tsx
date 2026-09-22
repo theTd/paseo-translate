@@ -19,6 +19,7 @@ interface Draft {
   endpointBaseUrl: string;
   endpointApiKey: string;
   endpointModel: string;
+  reasoningEffort: "default" | "minimal" | "low" | "medium" | "high";
   userLanguage: string;
   agentLanguage: string;
   commandText: string;
@@ -37,6 +38,7 @@ function draftFrom(settings: ReadySettings): Draft {
     endpointBaseUrl: values.endpointBaseUrl,
     endpointApiKey: values.endpointApiKey,
     endpointModel: values.endpointModel,
+    reasoningEffort: values.translationReasoningEffort,
     userLanguage: values.userLanguage,
     agentLanguage: values.agentLanguage,
     commandText: values.innerAgentCommand.join(" "),
@@ -118,6 +120,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
   );
   const changeApiKey = useCallback((endpointApiKey: string) => patch({ endpointApiKey }), [patch]);
   const changeModel = useCallback((endpointModel: string) => patch({ endpointModel }), [patch]);
+  const changeReasoningEffort = useCallback(
+    (reasoningEffort: Draft["reasoningEffort"]) => patch({ reasoningEffort: reasoningEffort }),
+    [patch],
+  );
   const changeUserLanguage = useCallback(
     (userLanguage: string) => patch({ userLanguage }),
     [patch],
@@ -171,6 +177,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         endpointBaseUrl: active.endpointBaseUrl,
         endpointApiKey: active.endpointApiKey,
         endpointModel: active.endpointModel,
+        translationReasoningEffort: active.reasoningEffort,
         userLanguage: active.userLanguage,
         agentLanguage: active.agentLanguage,
         innerAgentCommand: command,
@@ -278,6 +285,20 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           initialValue={active.endpointModel}
           onChangeText={changeModel}
           disabled={settings.saving}
+        />
+        <SettingsSelect
+          label="Reasoning effort"
+          hint="Thinking depth for translation requests; Default sends no parameter"
+          value={active.reasoningEffort}
+          options={[
+            { label: "Default", value: "default" },
+            { label: "Minimal", value: "minimal" },
+            { label: "Low", value: "low" },
+            { label: "Medium", value: "medium" },
+            { label: "High", value: "high" },
+          ]}
+          disabled={settings.saving}
+          onValueChange={changeReasoningEffort}
         />
       </SettingsCard>
       <SettingsCard key={`agent-${formKey}`}>

@@ -33,6 +33,7 @@ paseo plugin install E:\misc\paseo-translate-plugin
 Then open the plugin's **Translate** settings screen in the app and configure:
 
 - **Endpoint base URL / API key / model** — any OpenAI-compatible `/chat/completions` endpoint
+- **Reasoning effort** — thinking depth sent with each translation request as the standard `reasoning_effort` parameter (Default/minimal/low/medium/high; Default omits the parameter). Low or minimal keeps prompt translation fast since it sits on the fail-closed path of every turn
 - **Your language** and **Agent language** — e.g. `en` and `de`
 - **Inner agent command** — the ACP-speaking command to wrap. The settings screen lists the daemon's providers and fills the command automatically where an ACP mode is verified: custom `extends: "acp"` providers use the command configured on the daemon, and CLIs shipping an ACP subcommand (`copilot --acp`, `cursor-agent acp`, `omp acp`, `opencode acp`) use their configured override or the built-in default. Claude Code and Codex appear as adapter presets (`cmd /c npx …` on Windows). Providers marked unknown may still ship an ACP mode the picker cannot detect — if the CLI has one, enter it manually (arguments are split on spaces; on Windows avoid `.cmd` shims or prefix them with `cmd /c`).
 - **Translation timeout** — per-request bound, prompts fail closed past it

@@ -41,6 +41,10 @@ export const translateSettings = defineSettings({
     endpointBaseUrl: z.string().trim().default(""),
     endpointApiKey: z.string().default(""),
     endpointModel: z.string().trim().default(""),
+    /** Reasoning effort sent with each translation request (OpenAI-compatible). */
+    translationReasoningEffort: z
+      .enum(["default", "minimal", "low", "medium", "high"])
+      .default("default"),
     userLanguage: z.string().trim().min(1).default("en"),
     agentLanguage: z.string().trim().min(1).default("de"),
     innerAgentCommand: z.array(z.string().trim().min(1)).default([]),

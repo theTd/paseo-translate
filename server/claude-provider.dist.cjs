@@ -31595,7 +31595,8 @@ function createLlmClient(config2, options = {}) {
             model: config2.model,
             messages,
             temperature: 0,
-            stream: false
+            stream: false,
+            ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning_effort: config2.reasoningEffort } : {}
           }),
           // The SDK dependency bundles DOM-style globals that clash with the
           // Node declarations; bridge them at this boundary through the
@@ -51330,6 +51331,8 @@ var translateSettings = (0, import_plugin.defineSettings)({
     endpointBaseUrl: external_exports.string().trim().default(""),
     endpointApiKey: external_exports.string().default(""),
     endpointModel: external_exports.string().trim().default(""),
+    /** Reasoning effort sent with each translation request (OpenAI-compatible). */
+    translationReasoningEffort: external_exports.enum(["default", "minimal", "low", "medium", "high"]).default("default"),
     userLanguage: external_exports.string().trim().min(1).default("en"),
     agentLanguage: external_exports.string().trim().min(1).default("de"),
     innerAgentCommand: external_exports.array(external_exports.string().trim().min(1)).default([]),
@@ -51404,7 +51407,13 @@ function createTranslator(deps) {
       }
       const values = await deps.loadConfig();
       const pair = resolveLanguagePair(values, direction);
-      const key = cacheKey(text, direction, pair, values.endpointModel);
+      const key = cacheKey(
+        text,
+        direction,
+        pair,
+        values.endpointModel,
+        values.translationReasoningEffort
+      );
       const cached2 = cache.get(key);
       if (cached2 !== void 0) {
         cache.delete(key);
@@ -51416,7 +51425,8 @@ function createTranslator(deps) {
           baseUrl: values.endpointBaseUrl,
           apiKey: values.endpointApiKey,
           model: values.endpointModel,
-          timeoutMs: values.translationTimeoutMs
+          timeoutMs: values.translationTimeoutMs,
+          reasoningEffort: values.translationReasoningEffort
         },
         { fetchFn: deps.fetchFn }
       );
@@ -51433,9 +51443,9 @@ function createTranslator(deps) {
     }
   };
 }
-function cacheKey(text, direction, pair, model) {
+function cacheKey(text, direction, pair, model, reasoningEffort) {
   const digest = (0, import_node_crypto2.createHash)("sha256").update(text, "utf8").digest("hex");
-  return `${direction}:${pair.source}>${pair.target}:${model}:${digest}`;
+  return `${direction}:${pair.source}>${pair.target}:${model}:${reasoningEffort}:${digest}`;
 }
 
 // server/prompt-text.ts

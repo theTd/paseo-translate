@@ -13,6 +13,7 @@ const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
+  translationReasoningEffort: "default" as const,
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: [],

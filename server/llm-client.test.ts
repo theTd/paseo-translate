@@ -51,6 +51,33 @@ describe("translation endpoint client", () => {
       { role: "system", content: "sys" },
       { role: "user", content: "Hello" },
     ]);
+    // Default effort sends no parameter at all.
+    expect("reasoning_effort" in body).toBe(false);
+  });
+
+  it("sends reasoning_effort only when a non-default effort is configured", async () => {
+    const low: CapturedCall[] = [];
+    const minimal: CapturedCall[] = [];
+    const lowClient = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "", model: "mt", timeoutMs: 5_000, reasoningEffort: "low" },
+      { fetchFn: capturingFetch(low, () => jsonResponse({ choices: [{ message: { content: "ok" } }] })) },
+    );
+    const minimalClient = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "", model: "mt", timeoutMs: 5_000, reasoningEffort: "minimal" },
+      { fetchFn: capturingFetch(minimal, () => jsonResponse({ choices: [{ message: { content: "ok" } }] })) },
+    );
+    const defaultClient = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "", model: "mt", timeoutMs: 5_000, reasoningEffort: "default" },
+      { fetchFn: capturingFetch(low, () => jsonResponse({ choices: [{ message: { content: "ok" } }] })) },
+    );
+    await lowClient.complete([{ role: "user", content: "x" }]);
+    await minimalClient.complete([{ role: "user", content: "x" }]);
+    await defaultClient.complete([{ role: "user", content: "x" }]);
+    expect(requestBody(low[0]).reasoning_effort).toBe("low");
+    expect(requestBody(minimal[0]).reasoning_effort).toBe("minimal");
+    // The explicit "default" value lands in the shared capture array after
+    // the low call and must not carry the parameter.
+    expect("reasoning_effort" in requestBody(low[1])).toBe(false);
   });
 
   it("omits the authorization header for keyless endpoints", async () => {
