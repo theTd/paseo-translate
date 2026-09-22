@@ -68,9 +68,17 @@ the app after each turn.
 
 ```bash
 npm install
+npm run build      # regenerates server/claude-provider.dist.mjs (commit it)
 npm run typecheck
 npm test
 ```
+
+The direct Claude provider ships as a pre-built bundle
+(`server/claude-provider.dist.mjs`): the claude-agent-sdk's type surface
+contains defensive import fallbacks that the daemon's plugin compiler
+resolves strictly, so the SDK is bundled ahead of time and the entry imports
+only the bundle. Edit `server/claude-provider.ts`, re-run `npm run build`,
+and commit the regenerated bundle alongside the source.
 
 The connector tests spawn a real echo agent process and assert on what it
 received: translation order, untouched frames, command-prefix preservation,

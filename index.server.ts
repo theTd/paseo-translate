@@ -1,7 +1,9 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createProvidersHandler } from "./server/providers";
 import { createTranslateProvider } from "./server/provider";
-import { createTranslateClaudeProvider } from "./server/claude-provider";
+// Pre-bundled: keeps the claude-agent-sdk (and its defensive type fallbacks)
+// out of the daemon compiler's dependency walk. See server/claude-provider.dist.d.mts.
+import { createTranslateClaudeProvider } from "./server/claude-provider.dist.mjs";
 import { createTranslateHandler } from "./server/translate";
 import {
   assertConfigured,

@@ -3,5 +3,5 @@
   "requirements": {
     "paseo": ">=0.8.0"
   },
-  "build": [["npm", "ci"]]
+  "build": [["npm", "ci"], ["npm", "run", "build"]]
 }

@@ -400,6 +400,20 @@ describe("translate claude provider", () => {
   });
 });
 
+describe("claude provider bundle", () => {
+  it("ships a pre-bundled factory so the daemon compiler never walks the SDK types", async () => {
+    const dist = await import("./claude-provider.dist.mjs");
+    expect(typeof dist.createTranslateClaudeProvider).toBe("function");
+    // The bundle must stay external to the host SDK only: the single
+    // non-relative import face is checked in the build; here we assert the
+    // factory accepts the same deps shape the entry passes it.
+    const provider = dist.createTranslateClaudeProvider({
+      loadConfig: async () => ({}),
+    });
+    expect(provider.id).toBe("translate-claude");
+  });
+});
+
 describe("translatePromptFragment (shared prompt-text handling)", () => {
   it("keeps the command word and translates the remainder", async () => {
     const translate = async (text: string) => `DE(${text})`;
