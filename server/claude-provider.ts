@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { accessSync, constants as fsConstants } from "node:fs";
+import path from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -7,6 +9,8 @@ import {
   type ProviderConnection,
   type ProviderEvent,
   type ProviderInput,
+  type ProviderMode,
+  type ProviderModel,
   type ProviderPermissionResponse,
   type ProviderRegistration,
   type ProviderSessionConfig,
@@ -23,6 +27,20 @@ import {
 export interface ClaudeQueryHandle {
   interrupt(): Promise<unknown>;
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage>;
+  supportedModels?(): Promise<readonly ModelInfoLike[]>;
+  setModel?(model?: string): Promise<void>;
+  setPermissionMode?(mode: string): Promise<void>;
+  applyFlagSettings?(settings: Record<string, unknown>): Promise<void>;
+}
+
+/** Subset of the SDK's ModelInfo used for the dynamic catalog. */
+export interface ModelInfoLike {
+  value: string;
+  displayName?: string;
+  description?: string;
+  supportsEffort?: boolean;
+  supportedEffortLevels?: readonly string[];
+  supportsAdaptiveThinking?: boolean;
 }
 
 export type ClaudeQueryFactory = (params: {
@@ -35,7 +53,61 @@ export interface ClaudeProviderDeps extends TranslatorDeps {
   queryFactory?: ClaudeQueryFactory;
 }
 
-const CAPABILITIES = ["prompt.message", "permission", "session.persistence"] as const;
+const CAPABILITIES = [
+  "prompt.message",
+  "permission",
+  "session.persistence",
+  "session.configure",
+] as const;
+
+/** Mirrors the native Claude provider's modes (auto requires the API transport). */
+const STATIC_MODES: ProviderMode[] = [
+  { id: "plan", label: "Plan Mode", description: "Analyze the codebase without executing tools or edits" },
+  { id: "default", label: "Always Ask", description: "Prompts for permission the first time a tool is used" },
+  { id: "acceptEdits", label: "Accept File Edits", description: "Automatically approves edit-focused tools without prompting" },
+  { id: "bypassPermissions", label: "Bypass", description: "Skip all permission prompts (use with caution)" },
+];
+const VALID_MODES = new Set(STATIC_MODES.map((mode) => mode.id));
+
+/** Effort levels the SDK's Settings.effortLevel accepts at query start. */
+const START_EFFORT = new Set(["low", "medium", "high", "xhigh"]);
+
+/**
+ * Resolves the `claude` executable from PATH so the provider drives the
+ * user's own CLI install (and login) by default, exactly like running
+ * `claude` in a terminal. The SDK's own resolution anchors at the daemon's
+ * bundled copy, which is only the fallback here.
+ */
+export function scanPathForClaude(pathValue: string, platform: string): string | null {
+  const isWindows = platform === "win32";
+  const names = isWindows ? ["claude.exe", "claude.cmd", "claude.bat"] : ["claude"];
+  const delimiter = isWindows ? ";" : ":";
+  const directories = pathValue.split(delimiter);
+  // Name priority wins over PATH order: a native claude.exe later on PATH
+  // beats a claude.cmd shim earlier on it.
+  for (const name of names) {
+    for (const directory of directories) {
+      if (directory.length === 0) continue;
+      const candidate = path.join(directory, name);
+      try {
+        accessSync(candidate, fsConstants.X_OK);
+        return candidate;
+      } catch {
+        // Keep scanning; a directory named claude is not an executable.
+      }
+    }
+  }
+  return null;
+}
+
+let cachedPathClaude: string | null | undefined;
+
+function resolvePathClaude(): string | null {
+  if (cachedPathClaude === undefined) {
+    cachedPathClaude = scanPathForClaude(process.env.PATH ?? "", process.platform);
+  }
+  return cachedPathClaude;
+}
 
 type PermissionResultLike =
   | { behavior: "allow"; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }
@@ -45,6 +117,10 @@ interface ClaudeSession {
   id: string;
   config: ProviderSessionConfig;
   translatedSystemPrompt: string | null;
+  /** Configured overrides applied at query start and live where possible. */
+  desiredModel: string | null;
+  desiredMode: string | null;
+  desiredThinking: string | null;
   sink: PromptSink;
   query: ClaudeQueryHandle | null;
   abort: AbortController;
@@ -125,6 +201,18 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
     description:
       "Talks to Claude Code directly through the official SDK. Prompts are translated before Claude sees them; replies stream back in Claude's language and are translated in the app after the stream completes.",
     icon: "icon.svg",
+    async getCatalogCacheKey(options) {
+      const values = await deps.loadConfig();
+      // The catalog reflects the CLI build behind this executable; `force` is
+      // intentionally ignored, workspace discovery keys on the target cwd.
+      const executable =
+        values.claudeExecutablePath.length > 0
+          ? values.claudeExecutablePath
+          : (resolvePathClaude() ?? "bundled");
+      return options.scope === "workspace"
+        ? JSON.stringify({ executable, cwd: options.cwd })
+        : JSON.stringify({ executable });
+    },
     async connect(request) {
       if (!request.versions.includes(1)) {
         throw new Error("Translate Claude provider requires provider protocol version 1");
@@ -169,14 +257,8 @@ async function dispatch(
 ): Promise<void> {
   switch (input.type) {
     case "catalog": {
-      context.emit({
-        type: "catalog",
-        requestId: input.requestId,
-        catalog: {
-          models: [{ id: "default", label: "Claude (CLI default)", isDefault: true }],
-          modes: [],
-        },
-      });
+      const catalog = await probeCatalog(context);
+      context.emit({ type: "catalog", requestId: input.requestId, catalog });
       return;
     }
     case "session.open":
@@ -208,7 +290,19 @@ async function dispatch(
       context.emit({ type: "request.completed", requestId: input.requestId });
       return;
     }
-    case "session.configure":
+    case "session.configure": {
+      requireProviderCapabilities(capabilities, input);
+      const session = context.sessions.get(input.sessionId);
+      if (session === undefined) throw new Error(`Unknown session: ${input.sessionId}`);
+      await applyConfigChanges(session, input.changes);
+      context.emit({
+        type: "session.config",
+        sessionId: input.sessionId,
+        config: configStateFor(session),
+      });
+      context.emit({ type: "request.completed", requestId: input.requestId });
+      return;
+    }
     case "session.archive":
     case "session.unarchive":
     case "session.revert":
@@ -263,6 +357,9 @@ async function openSession(
     id: input.sessionId,
     config: input.config,
     translatedSystemPrompt,
+    desiredModel: readConfigured(input.config.model),
+    desiredMode: readConfigured(input.config.mode),
+    desiredThinking: readConfigured(input.config.thinkingOption),
     sink: createPromptSink(),
     query: null,
     abort: new AbortController(),
@@ -288,6 +385,37 @@ async function openSession(
     cwd: input.config.cwd,
   });
   context.emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
+  context.emit({
+    type: "session.config",
+    sessionId: input.sessionId,
+    config: configStateFor(session),
+  });
+}
+
+/** Normalizes a configured selection: empty/unknown/"default" means none. */
+function readConfigured(value: string | undefined): string | null {
+  if (typeof value !== "string" || value.length === 0 || value === "default") return null;
+  return value;
+}
+
+function configStateFor(session: ClaudeSession): {
+  model?: string;
+  mode?: string;
+  thinkingOption?: string;
+  models: ProviderModel[];
+  modes: ProviderMode[];
+  thinkingOptions: [];
+  settings: [];
+} {
+  return {
+    ...(session.desiredModel !== null ? { model: session.desiredModel } : {}),
+    ...(session.desiredMode !== null ? { mode: session.desiredMode } : {}),
+    ...(session.desiredThinking !== null ? { thinkingOption: session.desiredThinking } : {}),
+    models: catalogModelsCache ?? [],
+    modes: STATIC_MODES,
+    thinkingOptions: [],
+    settings: [],
+  };
 }
 
 function readStoredSessionId(persistence: { version: number; data: unknown } | undefined): string | null {
@@ -384,20 +512,30 @@ async function translatePromptContent(
 async function ensureQuery(session: ClaudeSession, context: DispatchContext): Promise<void> {
   if (session.query !== null) return;
   const values = await context.loadValues();
+  // Prefer the settings override, then the user's PATH claude (their own
+  // install and login); the daemon-bundled CLI is only the last resort.
+  const executable =
+    values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
+  const permissionMode = session.desiredMode ?? undefined;
   const options: Options = {
     cwd: session.config.cwd,
     env: { ...process.env, ...session.config.env },
     abortController: session.abort,
     ...(session.claudeSessionId !== null ? { resume: session.claudeSessionId } : {}),
-    ...(session.config.model !== undefined && session.config.model !== "default"
-      ? { model: session.config.model }
-      : {}),
+    ...(session.desiredModel !== null ? { model: session.desiredModel } : {}),
     ...(session.translatedSystemPrompt !== null
       ? { systemPrompt: session.translatedSystemPrompt }
       : {}),
-    ...(values.claudeExecutablePath.length > 0
-      ? { pathToClaudeCodeExecutable: values.claudeExecutablePath }
+    ...(permissionMode !== undefined
+      ? {
+          permissionMode: permissionMode as Options["permissionMode"],
+          ...(permissionMode === "bypassPermissions"
+            ? { allowDangerouslySkipPermissions: true }
+            : {}),
+        }
       : {}),
+    ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
+    ...thinkingStartOptions(session.desiredThinking),
     canUseTool: ((toolName: string, input: Record<string, unknown>, toolOptions: unknown) =>
       requestPermission(
         session,
@@ -410,6 +548,170 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
   session.pump = pumpQuery(session, query, context.emit);
+}
+
+/** Thinking selection → query-start options (none for "default"). */
+function thinkingStartOptions(thinking: string | null): Pick<Options, "thinking" | "settings"> {
+  if (thinking === null || thinking === "default") return {};
+  if (thinking === "adaptive") return { thinking: { type: "adaptive" } };
+  if (thinking === "off") return { thinking: { type: "disabled" } };
+  if (START_EFFORT.has(thinking)) {
+    return { settings: { effortLevel: thinking as "low" | "medium" | "high" | "xhigh" } };
+  }
+  // "max" is session-scoped in the SDK and cannot persist at query start;
+  // start at the closest persisted level instead.
+  if (thinking === "max") {
+    return { settings: { effortLevel: "xhigh" } };
+  }
+  return {};
+}
+
+/** Applies model/mode/thinking changes; live on the running query when possible. */
+async function applyConfigChanges(
+  session: ClaudeSession,
+  changes: { model?: string | null; mode?: string | null; thinkingOption?: string | null },
+): Promise<void> {
+  if (Object.hasOwn(changes, "model")) {
+    const model = changes.model ?? null;
+    session.desiredModel = model === null || model === "default" ? null : model;
+    if (session.query?.setModel !== undefined) {
+      await session.query.setModel(session.desiredModel ?? undefined).catch(() => undefined);
+    }
+  }
+  if (Object.hasOwn(changes, "mode")) {
+    const mode = changes.mode ?? null;
+    if (mode === null || mode === "default") {
+      session.desiredMode = null;
+    } else if (VALID_MODES.has(mode)) {
+      session.desiredMode = mode;
+    }
+    if (session.query?.setPermissionMode !== undefined) {
+      // Always apply live, including the return to "default": a stored-only
+      // clear would leave a running bypass session auto-approving while the
+      // UI already shows Always Ask.
+      await session.query
+        .setPermissionMode(session.desiredMode ?? "default")
+        .catch(() => undefined);
+    }
+  }
+  if (Object.hasOwn(changes, "thinkingOption")) {
+    const thinking = changes.thinkingOption ?? null;
+    session.desiredThinking =
+      thinking === null || thinking === "default" || thinking.length === 0 ? null : thinking;
+    if (session.query?.applyFlagSettings !== undefined) {
+      await session.query
+        .applyFlagSettings(thinkingFlagSettings(session.desiredThinking))
+        .catch(() => undefined);
+    }
+  }
+}
+
+/** Live thinking application through the flag-settings layer. */
+function thinkingFlagSettings(thinking: string | null): Record<string, unknown> {
+  // Null clears a flag-layer key (documented SDK contract), so every branch
+  // resets what the other modes may have set.
+  if (thinking === null || thinking === "default") {
+    return { effortLevel: null, alwaysThinkingEnabled: null };
+  }
+  if (thinking === "adaptive") return { effortLevel: null, alwaysThinkingEnabled: true };
+  if (thinking === "off") return { effortLevel: null, alwaysThinkingEnabled: false };
+  return { effortLevel: thinking };
+}
+
+/** Last catalog mapped from the CLI; reused for session.config states. */
+let catalogModelsCache: ProviderModel[] | null = null;
+
+/**
+ * Probes the CLI for its real model list (same data the native provider
+ * surface shows) through a throwaway query, then discards the process.
+ */
+async function probeCatalog(context: DispatchContext): Promise<{
+  models: ProviderModel[];
+  modes: ProviderMode[];
+  defaultMode: string;
+}> {
+  const models = await probeModels(context);
+  return { models, modes: STATIC_MODES, defaultMode: "default" };
+}
+
+async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
+  const values = await context.loadValues();
+  const executable =
+    values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
+  const abort = new AbortController();
+  const query = context.queryFactory({
+    prompt: createPromptSink().iterable,
+    options: {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      abortController: abort,
+      ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
+    },
+  });
+  try {
+    if (query.supportedModels === undefined) return fallbackModels();
+    const infos = await withTimeout(query.supportedModels(), 20_000, "model probe timed out");
+    const mapped = infos.map(modelInfoToProviderModel);
+    if (mapped.length === 0) return fallbackModels();
+    catalogModelsCache = mapped;
+    return mapped;
+  } catch {
+    return fallbackModels();
+  } finally {
+    abort.abort();
+  }
+}
+
+function fallbackModels(): ProviderModel[] {
+  return [
+    { id: "default", label: "Claude (CLI default)", isDefault: true },
+  ];
+}
+
+function modelInfoToProviderModel(info: ModelInfoLike): ProviderModel {
+  const thinkingOptions = thinkingOptionsForModel(info);
+  return {
+    id: info.value,
+    label: info.displayName ?? info.value,
+    ...(info.description !== undefined ? { description: info.description } : {}),
+    thinkingOptions,
+    defaultThinkingOptionId: thinkingOptions.find((option) => option.isDefault)?.id,
+  };
+}
+
+function thinkingOptionsForModel(
+  info: ModelInfoLike,
+): NonNullable<ProviderModel["thinkingOptions"]> {
+  const options: NonNullable<ProviderModel["thinkingOptions"]> = [
+    { id: "default", label: "Default", isDefault: true },
+  ];
+  if (info.supportsAdaptiveThinking === true) {
+    options.push({ id: "adaptive", label: "Adaptive" });
+  }
+  if (info.supportsEffort === true && Array.isArray(info.supportedEffortLevels)) {
+    for (const level of info.supportedEffortLevels) {
+      options.push({ id: level, label: labelForEffort(level) });
+    }
+  }
+  return options;
+}
+
+function labelForEffort(level: string): string {
+  return level === "xhigh" ? "Extra high" : level === "max" ? "Max" : level[0].toUpperCase() + level.slice(1);
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs) as unknown as NodeJS.Timeout;
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 interface CanUseToolOptions {
@@ -576,6 +878,25 @@ function handleSdkMessage(
             id: message.uuid,
             text,
             messageId: message.uuid,
+          },
+        });
+      } else if (
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "thinking" &&
+        typeof (block as { thinking?: unknown }).thinking === "string"
+      ) {
+        const thinking = (block as { thinking: string }).thinking;
+        if (thinking.trim().length === 0) continue;
+        // Reasoning streams in the agent language and is not translated;
+        // the daemon renders it through the built-in reasoning projection.
+        emit({
+          type: "timeline.item",
+          sessionId: session.id,
+          item: {
+            type: "reasoning",
+            id: message.uuid,
+            text: thinking,
           },
         });
       } else if (

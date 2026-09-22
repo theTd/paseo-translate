@@ -45,13 +45,28 @@ function createFakeFactory() {
   const state = {
     received: [] as SDKUserMessage[],
     options: null as Options | null,
+    allOptions: [] as Options[],
     interrupted: 0,
     spawnCount: 0,
+    setModelCalls: [] as Array<string | undefined>,
+    setPermissionModeCalls: [] as string[],
+    applyFlagSettingsCalls: [] as Array<Record<string, unknown>>,
+    supportedModels: null as
+      | Array<{
+          value: string;
+          displayName?: string;
+          description?: string;
+          supportsEffort?: boolean;
+          supportedEffortLevels?: string[];
+          supportsAdaptiveThinking?: boolean;
+        }>
+      | null,
   };
   let script: PromptScript = async function* () {};
   const factory = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => {
     state.spawnCount += 1;
     state.options = params.options;
+    state.allOptions.push(params.options);
     // Faithful to the real SDK: aborting the controller ends the iterator.
     const aborted = new Promise<void>((resolve) => {
       params.options.abortController?.signal.addEventListener("abort", () => resolve());
@@ -82,6 +97,19 @@ function createFakeFactory() {
       async interrupt() {
         state.interrupted += 1;
         return undefined;
+      },
+      async supportedModels() {
+        if (state.supportedModels === null) throw new Error("no models mocked");
+        return state.supportedModels;
+      },
+      async setModel(model?: string) {
+        state.setModelCalls.push(model);
+      },
+      async setPermissionMode(mode: string) {
+        state.setPermissionModeCalls.push(mode);
+      },
+      async applyFlagSettings(settings: Record<string, unknown>) {
+        state.applyFlagSettingsCalls.push(settings);
       },
       [Symbol.asyncIterator]: () => iterator,
     };
@@ -397,6 +425,233 @@ describe("translate claude provider", () => {
     await send({ type: "session.close", requestId: "r-close", sessionId: "s" });
     await waitFor(events, (event) => event.type === "session.closed");
     expect(fake.state.options?.abortController?.signal.aborted).toBe(true);
+  });
+
+  it("streams thinking blocks as reasoning items", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield {
+        type: "assistant",
+        message: { content: [{ type: "thinking", thinking: "Der Nutzer will…" }] },
+        parent_tool_use_id: null,
+        uuid: "t-1",
+        session_id: "cs-1",
+      } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Think"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const reasoning = events.find(
+      (event) => event.type === "timeline.item" && event.item.type === "reasoning",
+    );
+    expect(reasoning).toMatchObject({
+      sessionId: "s",
+      item: { type: "reasoning", id: "t-1", text: "Der Nutzer will…" },
+    });
+  });
+
+  it("builds the catalog from the CLI's reported models", async () => {
+    const { fake, events, send } = await createHarness();
+    fake.state.supportedModels = [
+      {
+        value: "claude-opus-5",
+        displayName: "Opus 5",
+        supportsEffort: true,
+        supportedEffortLevels: ["low", "high", "xhigh"],
+        supportsAdaptiveThinking: true,
+      },
+      { value: "claude-haiku-4-5", displayName: "Haiku 4.5" },
+    ];
+    await send({ type: "catalog", requestId: "r-cat" });
+    await waitFor(events, (event) => event.type === "catalog");
+    const catalogEvent = events.find((event) => event.type === "catalog");
+    if (catalogEvent?.type !== "catalog") throw new Error("catalog event missing");
+    expect(catalogEvent.requestId).toBe("r-cat");
+    expect(catalogEvent.catalog.defaultMode).toBe("default");
+    expect(catalogEvent.catalog.modes.map((mode) => mode.id)).toEqual([
+      "plan",
+      "default",
+      "acceptEdits",
+      "bypassPermissions",
+    ]);
+    const models = catalogEvent.catalog.models;
+    expect(models.map((model) => model.id)).toEqual(["claude-opus-5", "claude-haiku-4-5"]);
+    const opus = models[0];
+    expect(opus.label).toBe("Opus 5");
+    expect(opus.defaultThinkingOptionId).toBe("default");
+    expect(opus.thinkingOptions?.map((option) => option.id)).toEqual([
+      "default",
+      "adaptive",
+      "low",
+      "high",
+      "xhigh",
+    ]);
+    expect(opus.thinkingOptions?.find((option) => option.id === "xhigh")?.label).toBe("Extra high");
+    expect(models[1].thinkingOptions?.map((option) => option.id)).toEqual(["default"]);
+    // The probe query is discarded immediately.
+    expect(fake.state.options?.abortController?.signal.aborted).toBe(true);
+  });
+
+  it("applies model, mode, and thinking changes live on the running query", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    await send({
+      type: "session.configure",
+      requestId: "r-cfg",
+      sessionId: "s",
+      changes: { model: "claude-opus-5", mode: "acceptEdits", thinkingOption: "high" },
+    });
+    await waitFor(events, (event) => event.type === "request.completed");
+    expect(fake.state.setModelCalls).toEqual(["claude-opus-5"]);
+    expect(fake.state.setPermissionModeCalls).toEqual(["acceptEdits"]);
+    expect(fake.state.applyFlagSettingsCalls).toEqual([{ effortLevel: "high" }]);
+    const config = events.filter((event) => event.type === "session.config").at(-1);
+    expect(config).toMatchObject({
+      sessionId: "s",
+      config: { model: "claude-opus-5", mode: "acceptEdits", thinkingOption: "high" },
+    });
+  });
+
+  it("clears a live bypass mode back to default when switched", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    await send({
+      type: "session.configure",
+      requestId: "r-bypass",
+      sessionId: "s",
+      changes: { mode: "bypassPermissions" },
+    });
+    await waitFor(events, (event) => event.type === "request.completed");
+    await send({
+      type: "session.configure",
+      requestId: "r-back",
+      sessionId: "s",
+      changes: { mode: "default" },
+    });
+    await waitFor(
+      events,
+      (event) => event.type === "request.completed" && event !== undefined,
+    );
+    // The running query must be told to leave bypass; a stored-only clear
+    // would keep auto-approving while the UI shows Always Ask.
+    expect(fake.state.setPermissionModeCalls).toEqual(["bypassPermissions", "default"]);
+  });
+
+  it("resets thinking flags when switching off and back to default", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    await send({
+      type: "session.configure",
+      requestId: "r-off",
+      sessionId: "s",
+      changes: { thinkingOption: "off" },
+    });
+    await waitFor(events, (event) => event.type === "request.completed");
+    await send({
+      type: "session.configure",
+      requestId: "r-def",
+      sessionId: "s",
+      changes: { thinkingOption: "default" },
+    });
+    await waitFor(events, (event) => event.type === "request.completed");
+    expect(fake.state.applyFlagSettingsCalls).toEqual([
+      { effortLevel: null, alwaysThinkingEnabled: false },
+      { effortLevel: null, alwaysThinkingEnabled: null },
+    ]);
+  });
+
+  it("carries configured model, mode, and thinking into the next query", async () => {
+    const { fake, events, send } = await createHarness();
+    await send({
+      ...openInput,
+      config: {
+        ...openInput.config,
+        model: "claude-sonnet-5",
+        mode: "plan",
+        thinkingOption: "adaptive",
+      },
+    });
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hi"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(fake.state.options?.model).toBe("claude-sonnet-5");
+    expect(fake.state.options?.permissionMode).toBe("plan");
+    expect(fake.state.options?.thinking).toEqual({ type: "adaptive" });
+
+    // "max" is session-scoped in the SDK: at query start it falls back to
+    // the closest persisted effort level instead of being dropped silently.
+    const second = { ...openInput, sessionId: "s2", config: { ...openInput.config, thinkingOption: "max" } };
+    await send(second);
+    fake.use(async function* () {
+      yield resultSuccess("cs-2", "ok");
+    });
+    await send({ ...promptInput("Again", "m-2"), sessionId: "s2" });
+    await waitFor(
+      events,
+      (event) => event.type === "session.turn" && event.state === "completed" && event.sessionId === "s2",
+    );
+    const secondOptions = fake.state.allOptions.at(-1);
+    expect(secondOptions?.settings).toEqual({ effortLevel: "xhigh" });
+  });
+});
+
+describe("PATH claude resolution", () => {
+  it("resolves claude from PATH, preferring native executables over shell shims", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const { scanPathForClaude } = await import("./claude-provider");
+    const shimDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-shim-"));
+    const exeDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-exe-"));
+    await fs.writeFile(pathModule.join(shimDir, "claude.cmd"), "");
+    await fs.writeFile(pathModule.join(exeDir, "claude.exe"), "");
+    try {
+      // .exe wins over .cmd even when the shim comes first on PATH.
+      expect(scanPathForClaude(`Z:\\missing;${shimDir};${exeDir}`, "win32")).toBe(
+        pathModule.join(exeDir, "claude.exe"),
+      );
+      expect(scanPathForClaude(`Z:\\missing;${shimDir}`, "win32")).toBe(
+        pathModule.join(shimDir, "claude.cmd"),
+      );
+      // Unix looks for the bare name only.
+      expect(scanPathForClaude(`Z:\\missing;${exeDir}`, "linux")).toBeNull();
+      const unixDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-unix-"));
+      await fs.writeFile(pathModule.join(unixDir, "claude"), "");
+      try {
+        if (process.platform === "win32") {
+          // Windows never grants X_OK to an extensionless file, so the
+          // unix-style scan can only report a miss from a Windows host.
+          expect(scanPathForClaude(`/missing:${unixDir}`, "linux")).toBeNull();
+        } else {
+          expect(scanPathForClaude(`/missing:${unixDir}`, "linux")).toBe(
+            pathModule.join(unixDir, "claude"),
+          );
+        }
+      } finally {
+        await fs.rm(unixDir, { recursive: true, force: true });
+      }
+    } finally {
+      await fs.rm(shimDir, { recursive: true, force: true });
+      await fs.rm(exeDir, { recursive: true, force: true });
+    }
   });
 });
 

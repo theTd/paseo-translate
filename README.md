@@ -50,9 +50,20 @@ back in Claude's language, and the shared timeline renderer translates them in
 the app after each turn.
 
 - Requires the `claude` CLI installed and logged in on the daemon machine.
-- **Claude Code executable** (settings): optional full path, e.g.
-  `C:\...\claude.exe` — leave empty to resolve from PATH. Use it on Windows if
-  PATH resolution fails.
+- **Executable resolution**: the provider drives the `claude` found on PATH
+  (native `claude.exe`/`claude` preferred over `.cmd` shims), falling back to
+  the daemon's bundled copy. The **Claude Code executable** setting overrides
+  everything with an explicit path. PATH resolution is cached for the plugin
+  process lifetime: after installing or upgrading `claude` on PATH, run
+  `paseo plugin reload translate` to pick it up.
+- Reasoning (thinking) streams as reasoning timeline items; they stay in the
+  agent language untranslated.
+- Model switching, thinking intensity, and permission modes match the native
+  provider's surface: the catalog is probed live from the CLI's reported
+  models (effort levels become thinking options), modes are
+  Plan/Always Ask/Accept Edits/Bypass, and changes apply live through the
+  SDK's control surface. "Auto" mode is not offered (it requires the API
+  transport).
 - Session persistence uses Claude's own session id (resume survives daemon
   restarts). Permissions pass through to you with Allow/Deny; interrupt maps
   to Claude's interrupt. "Always allow" style permission upgrades from the

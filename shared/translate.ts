@@ -9,6 +9,12 @@ export const TRANSLATE_PROVIDER_LABEL = "Translate (ACP)";
 export const TRANSLATE_CLAUDE_PROVIDER_ID = "translate-claude";
 export const TRANSLATE_CLAUDE_PROVIDER_LABEL = "Translate (Claude Code)";
 
+/** Provider ids owned by this plugin; the timeline renderer gates on these. */
+export const TRANSLATE_PROVIDER_IDS = [
+  TRANSLATE_PROVIDER_ID,
+  TRANSLATE_CLAUDE_PROVIDER_ID,
+] as const;
+
 /** Timeline plugin item kind produced by the client transformer. */
 export const TRANSLATED_MESSAGE_KIND = "translated-message";
 export const TRANSLATED_MESSAGE_VERSION = 1;

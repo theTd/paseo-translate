@@ -8,7 +8,7 @@ import {
   type PluginTimelineItemProps,
 } from "@getpaseo/plugin/client";
 import {
-  TRANSLATE_PROVIDER_ID,
+  TRANSLATE_PROVIDER_IDS,
   translateSettings,
   translateTextRpc,
   type TranslatedMessageData,
@@ -36,7 +36,8 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
       : null;
   const translateAllTimelines =
     settings.status === "ready" && settings.values.translateAllTimelines;
-  const ownedByTranslateProvider = provider === TRANSLATE_PROVIDER_ID;
+  const ownedByTranslateProvider =
+    provider !== null && (TRANSLATE_PROVIDER_IDS as readonly string[]).includes(provider);
   // Empty assistant texts would fail the RPC's min(1) contract for nothing.
   const eligible =
     data.phase === "complete" &&

@@ -30,10 +30,13 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // server/claude-provider.ts
 var claude_provider_exports = {};
 __export(claude_provider_exports, {
-  createTranslateClaudeProvider: () => createTranslateClaudeProvider
+  createTranslateClaudeProvider: () => createTranslateClaudeProvider,
+  scanPathForClaude: () => scanPathForClaude
 });
 module.exports = __toCommonJS(claude_provider_exports);
 var import_node_crypto3 = require("node:crypto");
+var import_node_fs = require("node:fs");
+var import_node_path2 = __toESM(require("node:path"));
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_node_module = require("node:module");
@@ -32461,10 +32464,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path) {
-  if (!path)
+function getElementAtPath(obj, path2) {
+  if (!path2)
     return obj;
-  return path.reduce((acc, key) => acc?.[key], obj);
+  return path2.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -32804,11 +32807,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path, issues) {
+function prefixIssues(path2, issues) {
   return issues.map((iss) => {
     var _a4;
     (_a4 = iss).path ?? (_a4.path = []);
-    iss.path.unshift(path);
+    iss.path.unshift(path2);
     return iss;
   });
 }
@@ -33258,16 +33261,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path = []) => {
+  const processError = (error63, path2 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else {
-        const fullpath = [...path, ...issue2.path];
+        const fullpath = [...path2, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -33306,17 +33309,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path = []) => {
+  const processError = (error63, path2 = []) => {
     var _a4;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
       } else {
-        const fullpath = [...path, ...issue2.path];
+        const fullpath = [...path2, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -33355,8 +33358,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path) {
+  const path2 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path2) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -50458,13 +50461,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path = ref.slice(1).split("/").filter(Boolean);
-  if (path.length === 0) {
+  const path2 = ref.slice(1).split("/").filter(Boolean);
+  if (path2.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path[0] === defsKey) {
-    const key = path[1] === void 0 ? void 0 : decodeJSONPointerSegment(path[1]);
+  if (path2[0] === defsKey) {
+    const key = path2[1] === void 0 ? void 0 : decodeJSONPointerSegment(path2[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -51456,7 +51459,45 @@ async function translatePromptFragment(text, translate) {
 }
 
 // server/claude-provider.ts
-var CAPABILITIES = ["prompt.message", "permission", "session.persistence"];
+var CAPABILITIES = [
+  "prompt.message",
+  "permission",
+  "session.persistence",
+  "session.configure"
+];
+var STATIC_MODES = [
+  { id: "plan", label: "Plan Mode", description: "Analyze the codebase without executing tools or edits" },
+  { id: "default", label: "Always Ask", description: "Prompts for permission the first time a tool is used" },
+  { id: "acceptEdits", label: "Accept File Edits", description: "Automatically approves edit-focused tools without prompting" },
+  { id: "bypassPermissions", label: "Bypass", description: "Skip all permission prompts (use with caution)" }
+];
+var VALID_MODES = new Set(STATIC_MODES.map((mode) => mode.id));
+var START_EFFORT = /* @__PURE__ */ new Set(["low", "medium", "high", "xhigh"]);
+function scanPathForClaude(pathValue, platform) {
+  const isWindows = platform === "win32";
+  const names = isWindows ? ["claude.exe", "claude.cmd", "claude.bat"] : ["claude"];
+  const delimiter2 = isWindows ? ";" : ":";
+  const directories = pathValue.split(delimiter2);
+  for (const name of names) {
+    for (const directory of directories) {
+      if (directory.length === 0) continue;
+      const candidate = import_node_path2.default.join(directory, name);
+      try {
+        (0, import_node_fs.accessSync)(candidate, import_node_fs.constants.X_OK);
+        return candidate;
+      } catch {
+      }
+    }
+  }
+  return null;
+}
+var cachedPathClaude;
+function resolvePathClaude() {
+  if (cachedPathClaude === void 0) {
+    cachedPathClaude = scanPathForClaude(process.env.PATH ?? "", process.platform);
+  }
+  return cachedPathClaude;
+}
 function createPromptSink() {
   const queue = [];
   let wake = null;
@@ -51504,6 +51545,11 @@ function createTranslateClaudeProvider(deps) {
     label: TRANSLATE_CLAUDE_PROVIDER_LABEL,
     description: "Talks to Claude Code directly through the official SDK. Prompts are translated before Claude sees them; replies stream back in Claude's language and are translated in the app after the stream completes.",
     icon: "icon.svg",
+    async getCatalogCacheKey(options) {
+      const values = await deps.loadConfig();
+      const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude() ?? "bundled";
+      return options.scope === "workspace" ? JSON.stringify({ executable, cwd: options.cwd }) : JSON.stringify({ executable });
+    },
     async connect(request) {
       if (!request.versions.includes(1)) {
         throw new Error("Translate Claude provider requires provider protocol version 1");
@@ -51535,14 +51581,8 @@ function createTranslateClaudeProvider(deps) {
 async function dispatch(input2, context, capabilities) {
   switch (input2.type) {
     case "catalog": {
-      context.emit({
-        type: "catalog",
-        requestId: input2.requestId,
-        catalog: {
-          models: [{ id: "default", label: "Claude (CLI default)", isDefault: true }],
-          modes: []
-        }
-      });
+      const catalog = await probeCatalog(context);
+      context.emit({ type: "catalog", requestId: input2.requestId, catalog });
       return;
     }
     case "session.open":
@@ -51574,7 +51614,19 @@ async function dispatch(input2, context, capabilities) {
       context.emit({ type: "request.completed", requestId: input2.requestId });
       return;
     }
-    case "session.configure":
+    case "session.configure": {
+      (0, import_provider.requireProviderCapabilities)(capabilities, input2);
+      const session = context.sessions.get(input2.sessionId);
+      if (session === void 0) throw new Error(`Unknown session: ${input2.sessionId}`);
+      await applyConfigChanges(session, input2.changes);
+      context.emit({
+        type: "session.config",
+        sessionId: input2.sessionId,
+        config: configStateFor(session)
+      });
+      context.emit({ type: "request.completed", requestId: input2.requestId });
+      return;
+    }
     case "session.archive":
     case "session.unarchive":
     case "session.revert":
@@ -51624,6 +51676,9 @@ async function openSession(input2, context, capabilities) {
     id: input2.sessionId,
     config: input2.config,
     translatedSystemPrompt,
+    desiredModel: readConfigured(input2.config.model),
+    desiredMode: readConfigured(input2.config.mode),
+    desiredThinking: readConfigured(input2.config.thinkingOption),
     sink: createPromptSink(),
     query: null,
     abort: new AbortController(),
@@ -51647,6 +51702,26 @@ async function openSession(input2, context, capabilities) {
     cwd: input2.config.cwd
   });
   context.emit({ type: "session.ready", requestId: input2.requestId, sessionId: input2.sessionId });
+  context.emit({
+    type: "session.config",
+    sessionId: input2.sessionId,
+    config: configStateFor(session)
+  });
+}
+function readConfigured(value) {
+  if (typeof value !== "string" || value.length === 0 || value === "default") return null;
+  return value;
+}
+function configStateFor(session) {
+  return {
+    ...session.desiredModel !== null ? { model: session.desiredModel } : {},
+    ...session.desiredMode !== null ? { mode: session.desiredMode } : {},
+    ...session.desiredThinking !== null ? { thinkingOption: session.desiredThinking } : {},
+    models: catalogModelsCache ?? [],
+    modes: STATIC_MODES,
+    thinkingOptions: [],
+    settings: []
+  };
 }
 function readStoredSessionId(persistence) {
   if (persistence === void 0 || typeof persistence.data !== "object" || persistence.data === null) {
@@ -51719,14 +51794,21 @@ async function translatePromptContent(content, context) {
 async function ensureQuery(session, context) {
   if (session.query !== null) return;
   const values = await context.loadValues();
+  const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
+  const permissionMode = session.desiredMode ?? void 0;
   const options = {
     cwd: session.config.cwd,
     env: { ...process.env, ...session.config.env },
     abortController: session.abort,
     ...session.claudeSessionId !== null ? { resume: session.claudeSessionId } : {},
-    ...session.config.model !== void 0 && session.config.model !== "default" ? { model: session.config.model } : {},
+    ...session.desiredModel !== null ? { model: session.desiredModel } : {},
     ...session.translatedSystemPrompt !== null ? { systemPrompt: session.translatedSystemPrompt } : {},
-    ...values.claudeExecutablePath.length > 0 ? { pathToClaudeCodeExecutable: values.claudeExecutablePath } : {},
+    ...permissionMode !== void 0 ? {
+      permissionMode,
+      ...permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}
+    } : {},
+    ...executable !== null ? { pathToClaudeCodeExecutable: executable } : {},
+    ...thinkingStartOptions(session.desiredThinking),
     canUseTool: ((toolName, input2, toolOptions) => requestPermission(
       session,
       toolName,
@@ -51738,6 +51820,129 @@ async function ensureQuery(session, context) {
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
   session.pump = pumpQuery(session, query, context.emit);
+}
+function thinkingStartOptions(thinking) {
+  if (thinking === null || thinking === "default") return {};
+  if (thinking === "adaptive") return { thinking: { type: "adaptive" } };
+  if (thinking === "off") return { thinking: { type: "disabled" } };
+  if (START_EFFORT.has(thinking)) {
+    return { settings: { effortLevel: thinking } };
+  }
+  if (thinking === "max") {
+    return { settings: { effortLevel: "xhigh" } };
+  }
+  return {};
+}
+async function applyConfigChanges(session, changes) {
+  if (Object.hasOwn(changes, "model")) {
+    const model = changes.model ?? null;
+    session.desiredModel = model === null || model === "default" ? null : model;
+    if (session.query?.setModel !== void 0) {
+      await session.query.setModel(session.desiredModel ?? void 0).catch(() => void 0);
+    }
+  }
+  if (Object.hasOwn(changes, "mode")) {
+    const mode = changes.mode ?? null;
+    if (mode === null || mode === "default") {
+      session.desiredMode = null;
+    } else if (VALID_MODES.has(mode)) {
+      session.desiredMode = mode;
+    }
+    if (session.query?.setPermissionMode !== void 0) {
+      await session.query.setPermissionMode(session.desiredMode ?? "default").catch(() => void 0);
+    }
+  }
+  if (Object.hasOwn(changes, "thinkingOption")) {
+    const thinking = changes.thinkingOption ?? null;
+    session.desiredThinking = thinking === null || thinking === "default" || thinking.length === 0 ? null : thinking;
+    if (session.query?.applyFlagSettings !== void 0) {
+      await session.query.applyFlagSettings(thinkingFlagSettings(session.desiredThinking)).catch(() => void 0);
+    }
+  }
+}
+function thinkingFlagSettings(thinking) {
+  if (thinking === null || thinking === "default") {
+    return { effortLevel: null, alwaysThinkingEnabled: null };
+  }
+  if (thinking === "adaptive") return { effortLevel: null, alwaysThinkingEnabled: true };
+  if (thinking === "off") return { effortLevel: null, alwaysThinkingEnabled: false };
+  return { effortLevel: thinking };
+}
+var catalogModelsCache = null;
+async function probeCatalog(context) {
+  const models = await probeModels(context);
+  return { models, modes: STATIC_MODES, defaultMode: "default" };
+}
+async function probeModels(context) {
+  const values = await context.loadValues();
+  const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
+  const abort = new AbortController();
+  const query = context.queryFactory({
+    prompt: createPromptSink().iterable,
+    options: {
+      cwd: process.cwd(),
+      env: { ...process.env },
+      abortController: abort,
+      ...executable !== null ? { pathToClaudeCodeExecutable: executable } : {}
+    }
+  });
+  try {
+    if (query.supportedModels === void 0) return fallbackModels();
+    const infos = await withTimeout(query.supportedModels(), 2e4, "model probe timed out");
+    const mapped = infos.map(modelInfoToProviderModel);
+    if (mapped.length === 0) return fallbackModels();
+    catalogModelsCache = mapped;
+    return mapped;
+  } catch {
+    return fallbackModels();
+  } finally {
+    abort.abort();
+  }
+}
+function fallbackModels() {
+  return [
+    { id: "default", label: "Claude (CLI default)", isDefault: true }
+  ];
+}
+function modelInfoToProviderModel(info) {
+  const thinkingOptions = thinkingOptionsForModel(info);
+  return {
+    id: info.value,
+    label: info.displayName ?? info.value,
+    ...info.description !== void 0 ? { description: info.description } : {},
+    thinkingOptions,
+    defaultThinkingOptionId: thinkingOptions.find((option) => option.isDefault)?.id
+  };
+}
+function thinkingOptionsForModel(info) {
+  const options = [
+    { id: "default", label: "Default", isDefault: true }
+  ];
+  if (info.supportsAdaptiveThinking === true) {
+    options.push({ id: "adaptive", label: "Adaptive" });
+  }
+  if (info.supportsEffort === true && Array.isArray(info.supportedEffortLevels)) {
+    for (const level of info.supportedEffortLevels) {
+      options.push({ id: level, label: labelForEffort(level) });
+    }
+  }
+  return options;
+}
+function labelForEffort(level) {
+  return level === "xhigh" ? "Extra high" : level === "max" ? "Max" : level[0].toUpperCase() + level.slice(1);
+}
+async function withTimeout(promise2, timeoutMs, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise2,
+      new Promise((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer !== void 0) clearTimeout(timer);
+  }
 }
 function requestPermission(session, toolName, input2, toolOptions, emit) {
   return new Promise((resolve5) => {
@@ -51852,6 +52057,18 @@ function handleSdkMessage(session, message, emit) {
             messageId: message.uuid
           }
         });
+      } else if (typeof block === "object" && block !== null && block.type === "thinking" && typeof block.thinking === "string") {
+        const thinking = block.thinking;
+        if (thinking.trim().length === 0) continue;
+        emit({
+          type: "timeline.item",
+          sessionId: session.id,
+          item: {
+            type: "reasoning",
+            id: message.uuid,
+            text: thinking
+          }
+        });
       } else if (typeof block === "object" && block !== null && block.type === "tool_use") {
         const use2 = block;
         session.toolNames.set(use2.id, use2.name);
@@ -51955,7 +52172,8 @@ function describe3(error62) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  createTranslateClaudeProvider
+  createTranslateClaudeProvider,
+  scanPathForClaude
 });
 /*! Bundled license information:
 
