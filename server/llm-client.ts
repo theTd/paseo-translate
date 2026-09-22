@@ -46,7 +46,10 @@ export function createLlmClient(
             temperature: 0,
             stream: false,
           }),
-          signal: controller.signal,
+          // The SDK dependency bundles DOM-style globals that clash with the
+          // Node declarations; bridge them at this boundary through the
+          // fetch-side signal type.
+          signal: controller.signal as unknown as RequestInit["signal"],
         });
         status = response.status;
         ok = response.ok;

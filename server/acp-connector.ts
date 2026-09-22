@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
+import { translatePromptFragment } from "./prompt-text";
 
 export interface TranslatingConnectorConfig {
   /** argv of the inner ACP-speaking agent, e.g. ["node", "agent.js"]. */
@@ -89,7 +90,9 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
     teardownStarted = true;
     child.stdin.end();
     child.kill("SIGTERM");
-    killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS);
+    // The DOM-vs-Node timer declarations clash with the SDK dependency's
+    // bundled types; unify through the Node shape we actually run on.
+    killTimer = setTimeout(() => child.kill("SIGKILL"), KILL_GRACE_MS) as unknown as NodeJS.Timeout;
     killTimer.unref?.();
   };
 
@@ -287,39 +290,5 @@ async function translateBlock(
   }
   const text = (block as { text?: unknown }).text;
   if (typeof text !== "string") return block;
-  return { ...block, text: await translateTextFragment(text, config) };
-}
-
-/**
- * Detects content blocks that carry a serialized structured attachment. The
- * ACP adapter flattens non-text attachments (forge issues, reviews, uploaded
- * files) into JSON text blocks; translating that JSON would corrupt it, so
- * the block passes through verbatim. Free text inside such attachments is
- * documented as untranslated.
- */
-function isSerializedAttachment(text: string): boolean {
-  if (!text.startsWith("{")) return false;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-    return typeof (parsed as { mimeType?: unknown }).mimeType === "string";
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Slash-command prompts reach the wire as `/name args` text. The command word
- * must survive verbatim; only the free-text remainder is translated.
- */
-async function translateTextFragment(
-  text: string,
-  config: TranslatingConnectorConfig,
-): Promise<string> {
-  if (text.trim().length === 0) return text;
-  if (isSerializedAttachment(text)) return text;
-  if (!text.startsWith("/")) return config.translate(text);
-  const match = /^(\S+\s*)([\s\S]*)$/.exec(text);
-  if (match === null || match[2].trim().length === 0) return text;
-  return `${match[1]}${await config.translate(match[2])}`;
+  return { ...block, text: await translatePromptFragment(text, config.translate) };
 }

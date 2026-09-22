@@ -14,6 +14,7 @@ const values: TranslateSettingsValues = {
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
   innerAgentEnv: {},
+  claudeExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
   translateAllTimelines: false,

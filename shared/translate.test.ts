@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACP_ADAPTER_PRESETS,
   adapterCommand,
+  assertAcpConfigured,
   assertConfigured,
   knownAcpCommand,
   translateProvidersRpc,
@@ -17,6 +18,7 @@ const configured: TranslateSettingsValues = {
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
   innerAgentEnv: {},
+  claudeExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
   translateAllTimelines: false,
@@ -43,9 +45,13 @@ describe("translate settings schema", () => {
     expect(() => assertConfigured({ ...configured, endpointModel: "" })).toThrow(
       /missing endpoint model/,
     );
-    expect(() => assertConfigured({ ...configured, innerAgentCommand: [] })).toThrow(
-      /missing inner agent command/,
+    // The inner agent command is only required by the ACP provider; the
+    // direct Claude provider works without it.
+    expect(() => assertConfigured({ ...configured, innerAgentCommand: [] })).not.toThrow();
+    expect(() => assertAcpConfigured({ ...configured, innerAgentCommand: [] })).toThrow(
+      /Translate \(ACP\) needs an inner agent command/,
     );
+    expect(() => assertAcpConfigured(configured)).not.toThrow();
     expect(() => assertConfigured(configured)).not.toThrow();
   });
 
@@ -110,9 +116,8 @@ describe("translate settings schema", () => {
       ],
     });
     expect(
-      translateProvidersRpc.output.safeParse({
-        providers: [{ id: "x", command: null, acp: "known" }],
-      }).success,
+      translateProvidersRpc.output.safeParse({ providers: [{ id: "x", command: null, acp: "known" }] })
+        .success,
     ).toBe(false);
   });
 });

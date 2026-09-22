@@ -1,6 +1,7 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createProvidersHandler } from "./server/providers";
 import { createTranslateProvider } from "./server/provider";
+import { createTranslateClaudeProvider } from "./server/claude-provider";
 import { createTranslateHandler } from "./server/translate";
 import {
   assertConfigured,
@@ -22,6 +23,7 @@ export default function contribute(server: PluginServerContext) {
     return state.values;
   };
   server.registerProvider(createTranslateProvider({ loadConfig }));
+  server.registerProvider(createTranslateClaudeProvider({ loadConfig }));
   server.handle(translateTextRpc, createTranslateHandler({ loadConfig }));
   server.handle(translateProvidersRpc, createProvidersHandler());
   return () => {};

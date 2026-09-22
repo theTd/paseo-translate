@@ -56,7 +56,7 @@ async function readCount(
         throw new Error(`Timed out; got ${JSON.stringify(messages)}`);
       }
       const timeout = new Promise<never>((_, reject) => {
-        const timer = setTimeout(() => reject(new Error("read timeout")), remaining);
+        const timer = setTimeout(() => reject(new Error("read timeout")), remaining) as unknown as NodeJS.Timeout;
         timer.unref?.();
       });
       const next = (await Promise.race([reader.read(), timeout])) as

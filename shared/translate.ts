@@ -5,6 +5,10 @@ import { z } from "zod";
 export const TRANSLATE_PROVIDER_ID = "translate-acp";
 export const TRANSLATE_PROVIDER_LABEL = "Translate (ACP)";
 
+/** Direct Claude Code provider (claude-agent-sdk stream-json, no ACP layer). */
+export const TRANSLATE_CLAUDE_PROVIDER_ID = "translate-claude";
+export const TRANSLATE_CLAUDE_PROVIDER_LABEL = "Translate (Claude Code)";
+
 /** Timeline plugin item kind produced by the client transformer. */
 export const TRANSLATED_MESSAGE_KIND = "translated-message";
 export const TRANSLATED_MESSAGE_VERSION = 1;
@@ -35,6 +39,8 @@ export const translateSettings = defineSettings({
     agentLanguage: z.string().trim().min(1).default("de"),
     innerAgentCommand: z.array(z.string().trim().min(1)).default([]),
     innerAgentEnv: z.record(z.string(), z.string()).default({}),
+    /** Optional Claude Code executable path for the direct provider (Windows .cmd escape hatch). */
+    claudeExecutablePath: z.string().trim().default(""),
     translatePrompts: z.boolean().default(true),
     translateResponses: z.boolean().default(true),
     translateAllTimelines: z.boolean().default(false),
@@ -49,10 +55,18 @@ export function assertConfigured(values: TranslateSettingsValues): void {
   const missing: string[] = [];
   if (values.endpointBaseUrl.length === 0) missing.push("endpoint base URL");
   if (values.endpointModel.length === 0) missing.push("endpoint model");
-  if (values.innerAgentCommand.length === 0) missing.push("inner agent command");
   if (missing.length > 0) {
     throw new Error(
       `Translate plugin is not configured yet (missing ${missing.join(", ")}). Open the Translate settings screen before creating agents.`,
+    );
+  }
+}
+
+/** The ACP provider additionally needs its inner agent command. */
+export function assertAcpConfigured(values: TranslateSettingsValues): void {
+  if (values.innerAgentCommand.length === 0) {
+    throw new Error(
+      "Translate (ACP) needs an inner agent command. Pick a daemon provider or enter one in the Translate settings screen.",
     );
   }
 }

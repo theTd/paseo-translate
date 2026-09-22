@@ -2,7 +2,11 @@ import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import { createTranslatingAcpStream } from "./acp-connector";
 import { createTranslator, type TranslatorDeps } from "./translate";
-import { TRANSLATE_PROVIDER_ID, TRANSLATE_PROVIDER_LABEL } from "../shared/translate";
+import {
+  TRANSLATE_PROVIDER_ID,
+  TRANSLATE_PROVIDER_LABEL,
+  assertAcpConfigured,
+} from "../shared/translate";
 
 /**
  * Registers one ACP provider that wraps the configured inner agent command.
@@ -19,6 +23,7 @@ export function createTranslateProvider(deps: TranslatorDeps): ProviderRegistrat
     icon: "icon.svg",
     async connector() {
       const values = await deps.loadConfig();
+      assertAcpConfigured(values);
       return createTranslatingAcpStream({
         command: values.innerAgentCommand,
         env: values.innerAgentEnv,

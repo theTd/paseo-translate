@@ -40,6 +40,30 @@ Then open the plugin's **Translate** settings screen in the app and configure:
 Create agents against the **Translate (ACP)** provider. Each session spawns the
 inner agent through the translating proxy.
 
+## Direct Claude Code provider
+
+The plugin also registers **Translate (Claude Code)**: a direct provider that
+drives `claude` through the official `@anthropic-ai/claude-agent-sdk` in
+streaming-input mode — no ACP adapter layer. Prompts and the per-agent system
+prompt are translated before Claude sees them (fail closed), replies stream
+back in Claude's language, and the shared timeline renderer translates them in
+the app after each turn.
+
+- Requires the `claude` CLI installed and logged in on the daemon machine.
+- **Claude Code executable** (settings): optional full path, e.g.
+  `C:\...\claude.exe` — leave empty to resolve from PATH. Use it on Windows if
+  PATH resolution fails.
+- Session persistence uses Claude's own session id (resume survives daemon
+  restarts). Permissions pass through to you with Allow/Deny; interrupt maps
+  to Claude's interrupt. "Always allow" style permission upgrades from the
+  CLI's suggestions are not offered — every request is a plain Allow/Deny.
+- MVP surface: message prompts, streaming text, tool-call snapshots,
+  permissions, interrupt, persistence. Not supported (capability-gated, the
+  daemon will not offer them): steering, slash commands, image prompts,
+  sub-agent tracks, model discovery, rewind. Model selection passes the
+  daemon-configured model through; the default catalog entry uses the CLI's
+  default model.
+
 ## Develop
 
 ```bash

@@ -22,6 +22,7 @@ interface Draft {
   userLanguage: string;
   agentLanguage: string;
   commandText: string;
+  claudeExecutablePath: string;
   timeoutText: string;
   translatePrompts: boolean;
   translateResponses: boolean;
@@ -39,6 +40,7 @@ function draftFrom(settings: ReadySettings): Draft {
     userLanguage: values.userLanguage,
     agentLanguage: values.agentLanguage,
     commandText: values.innerAgentCommand.join(" "),
+    claudeExecutablePath: values.claudeExecutablePath,
     timeoutText: String(values.translationTimeoutMs),
     translatePrompts: values.translatePrompts,
     translateResponses: values.translateResponses,
@@ -125,6 +127,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     [patch],
   );
   const changeCommand = useCallback((commandText: string) => patch({ commandText }), [patch]);
+  const changeClaudePath = useCallback(
+    (claudeExecutablePath: string) => patch({ claudeExecutablePath }),
+    [patch],
+  );
   const changeTimeout = useCallback((timeoutText: string) => patch({ timeoutText }), [patch]);
   const togglePrompts = useCallback(
     (translatePrompts: boolean) => patch({ translatePrompts }),
@@ -154,14 +160,12 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
       setDraftError("Translation timeout must be a whole number of milliseconds.");
       return;
     }
+    // The inner agent command stays optional: the direct Claude provider does
+    // not use it, so only the translation endpoint is globally required.
     const command = active.commandText
       .trim()
       .split(/\s+/)
       .filter((part) => part.length > 0);
-    if (command.length === 0) {
-      setDraftError("Inner agent command is required.");
-      return;
-    }
     const saved = await ready.save(
       {
         endpointBaseUrl: active.endpointBaseUrl,
@@ -171,6 +175,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         agentLanguage: active.agentLanguage,
         innerAgentCommand: command,
         innerAgentEnv: active.innerAgentEnv,
+        claudeExecutablePath: active.claudeExecutablePath,
         translatePrompts: active.translatePrompts,
         translateResponses: active.translateResponses,
         translateAllTimelines: active.translateAllTimelines,
@@ -292,9 +297,16 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         />
         <SettingsInput
           label="Inner agent command"
-          hint="ACP-speaking command the provider spawns; arguments split on spaces"
+          hint="ACP-speaking command for the Translate (ACP) provider; filled automatically by the picker above"
           initialValue={active.commandText}
           onChangeText={changeCommand}
+          disabled={settings.saving}
+        />
+        <SettingsInput
+          label="Claude Code executable"
+          hint="Optional full path for the direct Translate (Claude Code) provider; leave empty to resolve from PATH"
+          initialValue={active.claudeExecutablePath}
+          onChangeText={changeClaudePath}
           disabled={settings.saving}
         />
         <SettingsInput
