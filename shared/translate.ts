@@ -69,15 +69,51 @@ export const translateTextRpc = defineRpc({
 });
 
 /**
- * Launch commands of the daemon's built-in ACP providers (from Paseo's
- * provider registry defaults). The protocol snapshot deliberately does not
- * expose custom providers' configured commands, so only these resolve
- * automatically; everything else falls back to manual entry.
+ * Launch commands of agent CLIs with a verified ACP stdio mode. A CLI's ACP
+ * capability is independent of how Paseo's built-in provider talks to it
+ * (e.g. omp/opencode are integrated through their native RPC but also ship
+ * `acp` subcommands). The protocol snapshot deliberately does not expose
+ * custom providers' configured commands; those resolve through the config
+ * face, everything else falls back to manual entry.
  */
 export const KNOWN_ACP_COMMANDS: Readonly<Record<string, readonly string[]>> = {
   copilot: ["copilot", "--acp"],
   cursor: ["cursor-agent", "acp"],
+  omp: ["omp", "acp"],
+  opencode: ["opencode", "acp"],
 };
+
+/**
+ * Adapter presets for agent CLIs without a native ACP mode. `npx` shims are
+ * `.cmd` scripts on Windows and cannot be spawned without a shell, so the
+ * Windows variant routes through `cmd /c`.
+ */
+export const ACP_ADAPTER_PRESETS: readonly {
+  id: string;
+  label: string;
+  command: readonly string[];
+  windowsCommand: readonly string[];
+}[] = [
+  {
+    id: "adapter:claude-code",
+    label: "Claude Code (ACP adapter)",
+    command: ["npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.31.4"],
+    windowsCommand: ["cmd", "/c", "npx", "--yes", "@agentclientprotocol/claude-agent-acp@0.31.4"],
+  },
+  {
+    id: "adapter:codex",
+    label: "Codex (ACP adapter)",
+    command: ["npx", "--yes", "@zed-industries/codex-acp@0.12.0"],
+    windowsCommand: ["cmd", "/c", "npx", "--yes", "@zed-industries/codex-acp@0.12.0"],
+  },
+];
+
+export function adapterCommand(
+  preset: (typeof ACP_ADAPTER_PRESETS)[number],
+  platform: NodeJS.Platform,
+): readonly string[] {
+  return platform === "win32" ? preset.windowsCommand : preset.command;
+}
 
 export function knownAcpCommand(providerId: string): readonly string[] | null {
   // Object.hasOwn guards prototype keys like "__proto__" from leaking
@@ -94,13 +130,21 @@ export const translateProvidersRpc = defineRpc({
         id: z.string(),
         label: z.string(),
         status: z.enum(["ready", "loading", "error", "unavailable"]),
-        /** Built-in providers with a known ACP command carry it here. */
+        /** Resolved ACP launch command, or null for manual entry. */
         command: z.array(z.string()).nullable(),
+        /**
+         * How the ACP capability was determined: verified command, adapter
+         * preset, or unknown (the CLI may still ship an ACP mode the picker
+         * cannot know about — manual entry applies).
+         */
+        acp: z.enum(["known", "adapter", "unknown"]),
       }),
     ),
   }),
 });
-export type TranslateProviderOption = z.output<typeof translateProvidersRpc.output>["providers"][number];
+export type TranslateProviderOption = z.output<
+  typeof translateProvidersRpc.output
+>["providers"][number];
 
 /** Data shape the client transformer emits and the renderer validates. */
 export const translatedMessageDataSchema = z.object({

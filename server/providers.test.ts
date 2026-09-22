@@ -16,30 +16,33 @@ function paseoWith(entries: unknown[], providers: Record<string, unknown> = {}) 
   };
 }
 
+const isWindows = process.platform === "win32";
+
 describe("translate providers handler", () => {
-  it("resolves built-in ACP commands and hides non-ACP built-ins", async () => {
+  it("resolves known ACP commands and keeps the rest visible as unknown", async () => {
     const handler = createProvidersHandler();
     const { providers } = await handler({}, {
       paseo: paseoWith([
         { provider: "claude", status: "ready", source: "builtin", label: "Claude" },
         { provider: "copilot", status: "ready", source: "builtin", label: "Copilot" },
-        { provider: "cursor", status: "loading", source: "builtin" },
-        { provider: "codex", status: "error", source: "builtin", label: "Codex" },
+        { provider: "omp", status: "ready", source: "builtin", label: "OMP" },
+        { provider: "opencode", status: "loading", source: "builtin" },
       ]),
     });
-    expect(providers.map((provider) => provider.id)).toEqual(["copilot", "cursor"]);
-    expect(providers[0]).toMatchObject({
-      id: "copilot",
-      label: "Copilot",
-      status: "ready",
-      command: ["copilot", "--acp"],
-    });
-    expect(providers[1]).toMatchObject({
-      id: "cursor",
-      label: "cursor",
-      status: "loading",
-      command: ["cursor-agent", "acp"],
-    });
+    // Known ACP commands lead; unknown-capability daemon providers stay
+    // listed after the adapter presets instead of being hidden.
+    expect(providers.map((provider) => `${provider.id}:${provider.acp}`)).toEqual([
+      "copilot:known",
+      "omp:known",
+      "opencode:known",
+      "adapter:claude-code:adapter",
+      "adapter:codex:adapter",
+      "claude:unknown",
+    ]);
+    expect(providers[0]).toMatchObject({ command: ["copilot", "--acp"] });
+    expect(providers[1]).toMatchObject({ command: ["omp", "acp"] });
+    expect(providers[2]).toMatchObject({ command: ["opencode", "acp"] });
+    expect(providers[5]).toMatchObject({ id: "claude", command: null, status: "ready" });
   });
 
   it("auto-fills custom extends:acp commands from the daemon config", async () => {
@@ -56,23 +59,51 @@ describe("translate providers handler", () => {
         },
       ),
     });
-    // Custom non-ACP overrides cannot be wrapped by an ACP proxy: dropped.
-    expect(providers.map((provider) => provider.id)).toEqual(["kimi"]);
-    expect(providers[0]).toMatchObject({ id: "kimi", command: ["kimi", "acp"] });
-    // Only id/label/status/command leave the handler — env and keys never do.
-    expect(Object.keys(providers[0]).sort()).toEqual(["command", "id", "label", "status"]);
+    const daemonProviders = providers.filter((provider) => !provider.id.startsWith("adapter:"));
+    // Custom non-ACP (my-claude) is still listed as unknown with no command.
+    expect(daemonProviders.map((provider) => `${provider.id}:${provider.acp}`)).toEqual([
+      "kimi:known",
+      "my-claude:unknown",
+    ]);
+    expect(daemonProviders[0]).toMatchObject({ command: ["kimi", "acp"] });
+    expect(daemonProviders[1]).toMatchObject({ command: null });
+    // Only id/label/status/command/acp leave the handler — env and keys never do.
+    expect(Object.keys(daemonProviders[0]).sort()).toEqual([
+      "acp",
+      "command",
+      "id",
+      "label",
+      "status",
+    ]);
     expect(JSON.stringify(providers)).not.toContain("secret");
   });
 
-  it("prefers a configured command over the built-in default", async () => {
+  it("prefers a configured command over the known default", async () => {
     const handler = createProvidersHandler();
     const { providers } = await handler({}, {
       paseo: paseoWith(
-        [{ provider: "cursor", status: "ready", source: "builtin", label: "Cursor" }],
-        { cursor: { command: ["node", "E:\\bin\\cursor-acp.js"] } },
+        [{ provider: "omp", status: "ready", source: "builtin", label: "OMP" }],
+        { omp: { command: ["omp", "acp", "--profile", "translate"] } },
       ),
     });
-    expect(providers[0].command).toEqual(["node", "E:\\bin\\cursor-acp.js"]);
+    const omp = providers.find((provider) => provider.id === "omp");
+    expect(omp?.command).toEqual(["omp", "acp", "--profile", "translate"]);
+    expect(omp?.acp).toBe("known");
+  });
+
+  it("appends adapter presets with a Windows-compatible npx shim", async () => {
+    const handler = createProvidersHandler();
+    const { providers } = await handler({}, { paseo: paseoWith([]) });
+    expect(providers.map((provider) => provider.id)).toEqual([
+      "adapter:claude-code",
+      "adapter:codex",
+    ]);
+    const claudeAdapter = providers[0];
+    expect(claudeAdapter).toMatchObject({ acp: "adapter", status: "ready" });
+    expect(claudeAdapter.command?.slice(0, isWindows ? 3 : 2)).toEqual(
+      isWindows ? ["cmd", "/c", "npx"] : ["npx", "--yes"],
+    );
+    expect(claudeAdapter.command).toContain("@agentclientprotocol/claude-agent-acp@0.31.4");
   });
 
   it("keeps a custom ACP provider without a usable command for manual entry", async () => {
@@ -86,24 +117,32 @@ describe("translate providers handler", () => {
         { broken: { extends: "acp", command: ["", "x"] }, empty: { extends: "acp" } },
       ),
     });
-    expect(providers.map((provider) => provider.id).sort()).toEqual(["broken", "empty"]);
-    expect(providers.every((provider) => provider.command === null)).toBe(true);
+    const customs = providers.filter(
+      (provider) => provider.id === "broken" || provider.id === "empty",
+    );
+    expect(customs.map((provider) => provider.id).sort()).toEqual(["broken", "empty"]);
+    expect(
+      customs.every((provider) => provider.command === null && provider.acp === "unknown"),
+    ).toBe(true);
   });
 
   it("skips malformed entries and maps unknown statuses to unavailable", async () => {
     const handler = createProvidersHandler();
     const { providers } = await handler({}, {
-      paseo: paseoWith([null, { status: "ready" }, { provider: "hermes", status: "weird", source: "custom" }], { hermes: { extends: "acp", command: ["hermes", "acp"] } }),
+      paseo: paseoWith(
+        [null, { status: "ready" }, { provider: "hermes", status: "weird", source: "custom" }],
+        { hermes: { extends: "acp", command: ["hermes", "acp"] } },
+      ),
     });
-    expect(providers).toHaveLength(1);
-    expect(providers[0]).toMatchObject({
-      id: "hermes",
+    const hermes = providers.find((provider) => provider.id === "hermes");
+    expect(hermes).toMatchObject({
       status: "unavailable",
       command: ["hermes", "acp"],
+      acp: "known",
     });
   });
 
-  it("degrades to built-in defaults when the config face is unavailable", async () => {
+  it("degrades to known defaults when the config face is unavailable", async () => {
     const handler = createProvidersHandler();
     const { providers } = await handler({}, {
       paseo: {
@@ -124,9 +163,13 @@ describe("translate providers handler", () => {
         },
       },
     });
-    // Custom ACP entries cannot be recognized without config; built-ins still
-    // resolve their default commands instead of failing the whole picker.
-    expect(providers.map((provider) => provider.id)).toEqual(["copilot"]);
-    expect(providers[0].command).toEqual(["copilot", "--acp"]);
+    const daemonProviders = providers.filter((provider) => !provider.id.startsWith("adapter:"));
+    // Custom ACP entries cannot be recognized without config and degrade to
+    // unknown; built-in known commands still resolve.
+    expect(daemonProviders.map((provider) => `${provider.id}:${provider.acp}`)).toEqual([
+      "copilot:known",
+      "kimi:unknown",
+    ]);
+    expect(daemonProviders[0].command).toEqual(["copilot", "--acp"]);
   });
 });

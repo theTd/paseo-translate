@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACP_ADAPTER_PRESETS,
+  adapterCommand,
   assertConfigured,
   knownAcpCommand,
   translateProvidersRpc,
@@ -50,19 +52,67 @@ describe("translate settings schema", () => {
   it("resolves known ACP provider commands and nulls the rest", () => {
     expect(knownAcpCommand("copilot")).toEqual(["copilot", "--acp"]);
     expect(knownAcpCommand("cursor")).toEqual(["cursor-agent", "acp"]);
+    expect(knownAcpCommand("omp")).toEqual(["omp", "acp"]);
+    expect(knownAcpCommand("opencode")).toEqual(["opencode", "acp"]);
     expect(knownAcpCommand("kimi")).toBeNull();
     expect(knownAcpCommand("__proto__")).toBeNull();
+  });
+
+  it("routes adapter presets through cmd /c on Windows only", () => {
+    const preset = ACP_ADAPTER_PRESETS[0];
+    expect(adapterCommand(preset, "win32")).toEqual(preset.windowsCommand);
+    expect(adapterCommand(preset, "linux")).toEqual(preset.command);
+    expect(adapterCommand(preset, "darwin")).toEqual(preset.command);
+    for (const candidate of ACP_ADAPTER_PRESETS) {
+      expect(candidate.windowsCommand.slice(0, 3)).toEqual(["cmd", "/c", "npx"]);
+    }
   });
 
   it("shapes the providers list RPC contract", () => {
     expect(translateProvidersRpc.name).toBe("translate.providers.list");
     expect(
       translateProvidersRpc.output.parse({
-        providers: [{ id: "copilot", label: "Copilot", status: "ready", command: ["copilot", "--acp"] }],
+        providers: [
+          {
+            id: "copilot",
+            label: "Copilot",
+            status: "ready",
+            command: ["copilot", "--acp"],
+            acp: "known",
+          },
+          { id: "claude", label: "Claude", status: "ready", command: null, acp: "unknown" },
+          {
+            id: "adapter:codex",
+            label: "Codex (ACP adapter)",
+            status: "ready",
+            command: ["npx", "--yes", "@zed-industries/codex-acp@0.12.0"],
+            acp: "adapter",
+          },
+        ],
       }),
     ).toEqual({
-      providers: [{ id: "copilot", label: "Copilot", status: "ready", command: ["copilot", "--acp"] }],
+      providers: [
+        {
+          id: "copilot",
+          label: "Copilot",
+          status: "ready",
+          command: ["copilot", "--acp"],
+          acp: "known",
+        },
+        { id: "claude", label: "Claude", status: "ready", command: null, acp: "unknown" },
+        {
+          id: "adapter:codex",
+          label: "Codex (ACP adapter)",
+          status: "ready",
+          command: ["npx", "--yes", "@zed-industries/codex-acp@0.12.0"],
+          acp: "adapter",
+        },
+      ],
     });
-    expect(translateProvidersRpc.output.safeParse({ providers: [{ id: "x" }] }).success).toBe(false);
+    expect(
+      translateProvidersRpc.output.safeParse({
+        providers: [{ id: "x", command: null, acp: "known" }],
+      }).success,
+    ).toBe(false);
   });
 });

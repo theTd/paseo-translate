@@ -92,13 +92,19 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     (id: string) => {
       setPickedProvider(id);
       const option = providersQuery.data?.providers.find((provider) => provider.id === id) ?? null;
-      if (option?.command) {
+      if (option === null) return;
+      if (option.command !== null) {
         patch({ commandText: option.command.join(" ") });
-        setPickerNote(`Filled the command for ${option.label}.`);
+        setPickerNote(
+          option.acp === "adapter"
+            ? `Filled the adapter command for ${option.label} (npx downloads it on first use).`
+            : `Filled the command for ${option.label}.`,
+        );
         return;
       }
       setPickerNote(
-        `No usable ACP command found for '${id}'; enter its ACP launch command manually below.`,
+        `Cannot confirm whether '${option.label}' ships an ACP mode. If its CLI has one ` +
+          "(like `omp acp` or `opencode acp`), enter that command manually below.",
       );
     },
     [providersQuery.data, patch],

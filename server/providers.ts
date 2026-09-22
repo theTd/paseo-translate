@@ -1,20 +1,34 @@
 import type { RpcInput } from "@getpaseo/plugin";
-import { knownAcpCommand, translateProvidersRpc } from "../shared/translate";
+import {
+  ACP_ADAPTER_PRESETS,
+  adapterCommand,
+  knownAcpCommand,
+  translateProvidersRpc,
+} from "../shared/translate";
 
 export type ProvidersHandlerInput = RpcInput<typeof translateProvidersRpc>;
 
+interface ListedProvider {
+  id: string;
+  label: string;
+  status: "ready" | "loading" | "error" | "unavailable";
+  command: string[] | null;
+  acp: "known" | "adapter" | "unknown";
+}
+
 /**
- * Lists the daemon's providers for the settings picker, resolving each
- * selectable entry's ACP launch command:
+ * Lists selectable inner agents for the settings picker.
  *
- * - custom `extends: "acp"` entries use the command configured on the daemon
- *   (read through the SDK's raw config surface; only the command is extracted
- *   — env and keys from the config entry never leave this handler),
- * - built-in ACP providers use their configured command when overridden and
- *   the built-in default otherwise.
- *
- * Custom non-ACP providers (SDK-based overrides like `extends: "claude"`)
- * cannot be wrapped by an ACP proxy and are filtered out.
+ * Daemon providers resolve their ACP launch command when one is known:
+ * custom `extends: "acp"` entries use the command configured on the daemon
+ * (read through the SDK's raw config surface — only the command is
+ * extracted, env and keys never leave this handler), and CLIs with a
+ * verified ACP subcommand (`copilot --acp`, `omp acp`, ...) use the table.
+ * A CLI's ACP capability is independent of Paseo's built-in integration
+ * protocol, so the remaining daemon providers stay listed as `unknown`:
+ * their CLI may still ship an ACP mode the picker cannot detect, and manual
+ * entry applies. Adapter presets for CLIs without a native ACP mode are
+ * appended with a Windows-compatible `cmd /c` npx shim.
  */
 export function createProvidersHandler() {
   return async function handleProviders(
@@ -35,36 +49,28 @@ export function createProvidersHandler() {
       context.paseo.config.get().catch(() => null),
     ]);
     const configured = readProvidersRecord(configResult?.config.providers);
-    const providers = snapshot.entries
-      .flatMap((entry) => {
-        const option = toOption(entry, configured);
-        return option === null ? [] : [option];
-      })
-      .filter((option) => option.selectable)
-      // One-tap entries (resolved command) first so they lead the picker.
-      .sort(
-        (a, b) =>
-          Number(b.command !== null) - Number(a.command !== null) || a.id.localeCompare(b.id),
-      )
-      .map((option) => ({
-        id: option.id,
-        label: option.label,
-        status: option.status,
-        command: option.command,
-      }));
+    const daemon = snapshot.entries.flatMap((entry) => {
+      const option = toOption(entry, configured);
+      return option === null ? [] : [option];
+    });
+    const presets: ListedProvider[] = ACP_ADAPTER_PRESETS.map((preset) => ({
+      id: preset.id,
+      label: preset.label,
+      status: "ready",
+      command: [...adapterCommand(preset, process.platform)],
+      acp: "adapter",
+    }));
+    // Resolved commands first, adapter presets next, unknown-capability
+    // daemon providers last; alphabetical within each tier.
+    const providers = [...daemon, ...presets].sort(byUsefulnessThenLabel);
     return { providers };
   };
 }
 
-interface ProviderOption {
-  id: string;
-  label: string;
-  status: "ready" | "loading" | "error" | "unavailable";
-  command: string[] | null;
-  selectable: boolean;
-}
-
-function toOption(entry: unknown, configured: Record<string, unknown>): ProviderOption | null {
+function toOption(
+  entry: unknown,
+  configured: Record<string, unknown>,
+): ListedProvider | null {
   if (typeof entry !== "object" || entry === null) return null;
   const record = entry as { provider?: unknown; status?: unknown; label?: unknown };
   if (typeof record.provider !== "string" || record.provider.length === 0) return null;
@@ -72,22 +78,32 @@ function toOption(entry: unknown, configured: Record<string, unknown>): Provider
   const configEntry = configured[id];
   const isCustomAcp = readExtends(configEntry) === "acp";
   const known = knownAcpCommand(id);
-  if (!isCustomAcp && known === null) {
-    // Built-in non-ACP provider or custom non-ACP override: an ACP proxy
-    // cannot wrap it, so it must not appear in the picker.
-    return null;
-  }
+  // Custom ACP entries use their configured command (or degrade to manual
+  // when unusable). Known-CLI entries prefer a configured override. Everyone
+  // else must never borrow an entry's command: an SDK override's command
+  // (e.g. bare `claude` without an ACP mode) does not speak ACP on stdio.
+  const command = isCustomAcp
+    ? readAcpCommand(configEntry)
+    : known === null
+      ? null
+      : (readAcpCommand(configEntry) ?? [...known]);
   return {
     id,
     label: typeof record.label === "string" && record.label.length > 0 ? record.label : id,
     status: readStatus(record.status),
-    // A configured command wins (custom ACP entry, or a built-in override);
-    // fall back to the built-in default. A custom ACP entry without a usable
-    // command stays selectable for manual entry.
-    command:
-      readAcpCommand(configEntry) ?? (isCustomAcp ? null : known === null ? null : [...known]),
-    selectable: true,
+    command,
+    acp: command !== null ? "known" : "unknown",
   };
+}
+
+function byUsefulnessThenLabel(a: ListedProvider, b: ListedProvider): number {
+  return tier(a) - tier(b) || a.label.localeCompare(b.label);
+}
+
+function tier(provider: ListedProvider): number {
+  if (provider.acp === "known") return 0;
+  if (provider.acp === "adapter") return 1;
+  return 2;
 }
 
 function readProvidersRecord(value: unknown): Record<string, unknown> {
@@ -109,7 +125,7 @@ function readAcpCommand(entry: unknown): string[] | null {
   return command.slice();
 }
 
-function readStatus(value: unknown): ProviderOption["status"] {
+function readStatus(value: unknown): ListedProvider["status"] {
   return value === "ready" || value === "loading" || value === "error" || value === "unavailable"
     ? value
     : "unavailable";
