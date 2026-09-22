@@ -1,114 +1,143 @@
+"use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
 };
+var __copyProps = (to2, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to2, key) && key !== except)
+        __defProp(to2, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to2;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // server/claude-provider.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
+var claude_provider_exports = {};
+__export(claude_provider_exports, {
+  createTranslateClaudeProvider: () => createTranslateClaudeProvider
+});
+module.exports = __toCommonJS(claude_provider_exports);
+var import_node_crypto3 = require("node:crypto");
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
-import { createRequire as $Q } from "node:module";
-import * as _r from "node:fs/promises";
-import * as In from "node:path";
-import { randomUUID as Nre } from "node:crypto";
-import * as Wn from "node:fs/promises";
-import * as FM from "node:fs";
-import * as hn from "node:path";
-import { execFile as $re } from "node:child_process";
-import { promisify as zre } from "node:util";
-import { Readable as Hre } from "node:stream";
-import { pipeline as Bre } from "node:stream/promises";
-import * as Yt from "node:fs/promises";
-import * as mg from "node:fs";
-import * as At from "node:path";
-import * as Dx from "node:child_process";
-import * as BM from "node:crypto";
-import * as KM from "node:readline";
-import Age from "url";
-import Tge from "crypto";
-import G_e from "stream";
-import q_e from "util";
-import { Readable as V_e } from "stream";
-import Q_e from "stream";
-import aye from "http";
-import cye from "https";
-import aH from "http2";
-import cH from "util";
-import { resolve as eH } from "path";
-import bi from "zlib";
-import _o from "stream";
-import { EventEmitter as lye } from "events";
-import { execFile as C8e } from "child_process";
-import { randomUUID as rD } from "crypto";
-import { createReadStream as k8e, realpathSync as R8e } from "fs";
-import { mkdir as QI, readdir as O8e, readFile as aQ, rm as P8e, writeFile as cQ } from "fs/promises";
-import { createRequire as I8e } from "module";
-import { homedir as eD, tmpdir as D8e } from "os";
-import { dirname as tD, isAbsolute as lQ, join as xn, relative as uQ, resolve as dh, sep as oD } from "path";
-import { fileURLToPath as M8e } from "url";
-import { setMaxListeners as BQ } from "events";
-import { realpathSync as RD } from "fs";
-import { homedir as qQ } from "os";
-import { basename as dXe, dirname as bD, isAbsolute as pXe, relative as fXe, resolve as gc, sep as is } from "path";
-import * as nE from "path";
-import { spawn as W0e } from "child_process";
-import { existsSync as q0e } from "fs";
-import { createInterface as V0e } from "readline";
-import { StringDecoder as Z0e } from "string_decoder";
-import { homedir as hne } from "os";
-import { basename as XQe, dirname as QQe, join as gne, resolve as $L } from "path";
-import { randomUUID as H0e } from "crypto";
-import { join as s2 } from "path";
-import { realpathSync as ZU } from "fs";
-import { cwd as qae } from "process";
-import { randomUUID as Bp } from "crypto";
-import { createHash as Goe, randomBytes as Oct } from "crypto";
-import { basename as tae, dirname as _U } from "path";
-import { AsyncLocalStorage as Sce } from "async_hooks";
-import { constants as Ece } from "fs";
-import { appendFile as xce, copyFile as vce, lstat as wce, mkdir as Ace, open as oF, readdir as sF, readFile as iF, stat as Tce, unlink as Cce, writeFile as Dw } from "fs/promises";
-import { randomBytes as Jae } from "crypto";
-import { closeSync as pht, constants as Tn, fchmodSync as fht, fstatSync as mht, ftruncateSync as hht, lstatSync as ght, openSync as _ht, readFileSync as yht, renameSync as bht, unlinkSync as Sht, writeFileSync as Eht } from "fs";
-import { lstat as Ow, open as t_, rename as Xae, stat as Qae, unlink as e_, writeFile as ece } from "fs/promises";
-import { constants as rF } from "fs";
-import { constants as _Se } from "fs";
-import { access as MT, readdir as ySe, readFile as bSe, readlink as SSe } from "fs/promises";
-import { homedir as ESe } from "os";
-import { delimiter as xSe, join as Df } from "path";
-import * as $e from "fs";
-import { appendFile as nfe, chmod as rfe, copyFile as ofe, link as sfe, lstat as ife, mkdir as afe, open as tj, readdir as cfe, readFile as nj, readlink as lfe, realpath as ufe, rename as dfe, rmdir as pfe, rm as ffe, stat as mfe, symlink as hfe, unlink as gfe } from "fs/promises";
-import * as sn from "path";
-import { appendFile as Ww, mkdir as WF, rename as qF, stat as zpe, symlink as Hpe, unlink as qw } from "fs/promises";
-import { dirname as Ul, isAbsolute as Bpe, join as mi, resolve as JF } from "path";
-import { readdir as cyt, readFile as gj } from "fs/promises";
-import { release as Lfe } from "os";
-import kt from "node:path";
-import uj from "node:os";
-import eA from "node:process";
-import { isAbsolute as Ufe } from "path";
-import { existsSync as oMe } from "fs";
-import { once as SW } from "events";
-import { createWriteStream as GUe } from "fs";
-import { execFile as HUe } from "child_process";
-import { promisify as BUe } from "util";
-import { copyFile as u1e, readFile as d1e, rm as t6, writeFile as n6 } from "fs/promises";
-import { homedir as e6 } from "os";
-import { join as bO } from "path";
-import { createHash as f1e } from "crypto";
-import { homedir as eIt, userInfo as m1e } from "os";
-import { join as dd } from "path";
-import { dirname as N6e } from "path";
-import { join as t3e } from "path";
-import { join as n7 } from "path";
-import { createHash as JX } from "crypto";
-import { posix as KX, win32 as GX } from "path";
-import { isAbsolute as $8 } from "path";
-import { posix as YZe, win32 as JZe } from "path";
-import { isIPv4 as XZe, isIPv6 as QZe } from "net";
-import { userInfo as cJe } from "os";
-import { execFile as f8e } from "child_process";
-import { existsSync as m8e } from "fs";
+var import_node_module = require("node:module");
+var _r = __toESM(require("node:fs/promises"), 1);
+var In = __toESM(require("node:path"), 1);
+var import_node_crypto = require("node:crypto");
+var Wn = __toESM(require("node:fs/promises"), 1);
+var FM = __toESM(require("node:fs"), 1);
+var hn = __toESM(require("node:path"), 1);
+var import_node_child_process = require("node:child_process");
+var import_node_util = require("node:util");
+var import_node_stream = require("node:stream");
+var import_promises = require("node:stream/promises");
+var Yt = __toESM(require("node:fs/promises"), 1);
+var mg = __toESM(require("node:fs"), 1);
+var At = __toESM(require("node:path"), 1);
+var Dx = __toESM(require("node:child_process"), 1);
+var BM = __toESM(require("node:crypto"), 1);
+var KM = __toESM(require("node:readline"), 1);
+var import_url = __toESM(require("url"), 1);
+var import_crypto = __toESM(require("crypto"), 1);
+var import_stream = __toESM(require("stream"), 1);
+var import_util = __toESM(require("util"), 1);
+var import_stream2 = require("stream");
+var import_stream3 = __toESM(require("stream"), 1);
+var import_http = __toESM(require("http"), 1);
+var import_https = __toESM(require("https"), 1);
+var import_http2 = __toESM(require("http2"), 1);
+var import_util2 = __toESM(require("util"), 1);
+var import_path = require("path");
+var import_zlib = __toESM(require("zlib"), 1);
+var import_stream4 = __toESM(require("stream"), 1);
+var import_events = require("events");
+var import_child_process = require("child_process");
+var import_crypto2 = require("crypto");
+var import_fs = require("fs");
+var import_promises2 = require("fs/promises");
+var import_module = require("module");
+var import_os = require("os");
+var import_path2 = require("path");
+var import_url2 = require("url");
+var import_events2 = require("events");
+var import_fs2 = require("fs");
+var import_os2 = require("os");
+var import_path3 = require("path");
+var nE = __toESM(require("path"), 1);
+var import_child_process2 = require("child_process");
+var import_fs3 = require("fs");
+var import_readline = require("readline");
+var import_string_decoder = require("string_decoder");
+var import_os3 = require("os");
+var import_path4 = require("path");
+var import_crypto3 = require("crypto");
+var import_path5 = require("path");
+var import_fs4 = require("fs");
+var import_process = require("process");
+var import_crypto4 = require("crypto");
+var import_crypto5 = require("crypto");
+var import_path6 = require("path");
+var import_async_hooks = require("async_hooks");
+var import_fs5 = require("fs");
+var import_promises3 = require("fs/promises");
+var import_crypto6 = require("crypto");
+var import_fs6 = require("fs");
+var import_promises4 = require("fs/promises");
+var import_fs7 = require("fs");
+var import_fs8 = require("fs");
+var import_promises5 = require("fs/promises");
+var import_os4 = require("os");
+var import_path7 = require("path");
+var $e = __toESM(require("fs"), 1);
+var import_promises6 = require("fs/promises");
+var sn = __toESM(require("path"), 1);
+var import_promises7 = require("fs/promises");
+var import_path8 = require("path");
+var import_promises8 = require("fs/promises");
+var import_os5 = require("os");
+var import_node_path = __toESM(require("node:path"), 1);
+var import_node_os = __toESM(require("node:os"), 1);
+var import_node_process = __toESM(require("node:process"), 1);
+var import_path9 = require("path");
+var import_fs9 = require("fs");
+var import_events3 = require("events");
+var import_fs10 = require("fs");
+var import_child_process3 = require("child_process");
+var import_util3 = require("util");
+var import_promises9 = require("fs/promises");
+var import_os6 = require("os");
+var import_path10 = require("path");
+var import_crypto7 = require("crypto");
+var import_os7 = require("os");
+var import_path11 = require("path");
+var import_path12 = require("path");
+var import_path13 = require("path");
+var import_path14 = require("path");
+var import_crypto8 = require("crypto");
+var import_path15 = require("path");
+var import_path16 = require("path");
+var import_path17 = require("path");
+var import_net = require("net");
+var import_os8 = require("os");
+var import_child_process4 = require("child_process");
+var import_fs11 = require("fs");
+var import_meta = { url: (typeof require === "function" && typeof process !== "undefined" && process.argv && process.argv[1] ? require("url").pathToFileURL(process.argv[1]) : { href: "file:///" }) };
 var PQ = Object.create;
 var { getPrototypeOf: IQ, defineProperty: QS, getOwnPropertyNames: DQ } = Object;
 var LQ = Object.prototype.hasOwnProperty;
@@ -140,7 +169,7 @@ var rn = (e, t) => {
   for (var n in t) QS(e, n, { get: t[n], enumerable: true, configurable: true, set: jQ.bind(t, n) });
 };
 var O = (e, t) => () => (e && (t = e(e = 0)), t);
-var ue = $Q(import.meta.url);
+var ue = (0, import_node_module.createRequire)(import_meta.url);
 var zQ = Symbol.dispose || /* @__PURE__ */ Symbol.for("Symbol.dispose");
 var HQ = Symbol.asyncDispose || /* @__PURE__ */ Symbol.for("Symbol.asyncDispose");
 var Ft = (e, t, n) => {
@@ -2905,7 +2934,7 @@ async function UM(e, t, n) {
   return i;
 }
 async function Cx(e, t) {
-  let n = In.dirname(e), r = In.join(n, `.tmp-${process.pid}-${Nre()}`), o;
+  let n = In.dirname(e), r = In.join(n, `.tmp-${process.pid}-${(0, import_node_crypto.randomUUID)()}`), o;
   try {
     o = await _r.open(r, "wx", Ure), await o.writeFile(t, "utf-8"), await o.sync(), await o.close(), o = void 0, await _r.rename(r, e);
   } catch (s) {
@@ -3015,7 +3044,7 @@ function qre(e) {
 async function Px(e, t) {
   let n = hn.join(t, `.skill-archive-${process.pid}-${Date.now()}`);
   if (!e.body) throw new z("skill download response had no body");
-  await Bre(Hre.fromWeb(e.body), FM.createWriteStream(n));
+  await (0, import_promises.pipeline)(import_node_stream.Readable.fromWeb(e.body), FM.createWriteStream(n));
   let r = hn.join(hn.dirname(t), `.skill-stage-${process.pid}-${Date.now()}`);
   try {
     let o = await Vre(n, 4), s = o.length >= 4 && o[0] === 80 && o[1] === 75 && o[2] === 3 && o[3] === 4, i = s ? "unzip" : "tar", a = await Rx(i, s ? ["-Z1", n] : ["-tf", n]);
@@ -3042,7 +3071,7 @@ var $M = O(() => {
   pt();
   Fo();
   kx();
-  Kre = zre($re);
+  Kre = (0, import_node_util.promisify)(import_node_child_process.execFile);
 });
 var QM = {};
 rn(QM, { BashSession: () => Lx, betaAgentToolset20260401: () => eoe, betaBashTool: () => qM, betaEditTool: () => YM, betaGlobTool: () => JM, betaGrepTool: () => XM, betaReadTool: () => VM, betaWriteTool: () => ZM, extractSkillArchive: () => Px, resolvePath: () => Hc, resolveSkillVersion: () => Ox, setupSkills: () => jM });
@@ -7004,14 +7033,14 @@ var df = O(() => {
 });
 var Jz;
 var Xz = O(() => {
-  Jz = Age.URLSearchParams;
+  Jz = import_url.default.URLSearchParams;
 });
 var PA = "abcdefghijklmnopqrstuvwxyz";
 var Qz = "0123456789";
 var e1;
 var Cge = (e = 16, t = e1.ALPHA_DIGIT) => {
   let n = "", { length: r } = t, o = new Uint32Array(e);
-  Tge.randomFillSync(o);
+  import_crypto.default.randomFillSync(o);
   for (let s = 0; s < e; s++) n += t[o[s] % r];
   return n;
 };
@@ -8059,7 +8088,7 @@ var sT;
 var N1 = O(() => {
   lt();
   oT = /* @__PURE__ */ Symbol("internals");
-  M1 = class M1 extends G_e.Transform {
+  M1 = class M1 extends import_stream.default.Transform {
     constructor(e) {
       e = w.toFlatObject(e, { maxRate: 0, chunkSize: 65536, minChunkSize: 100, timeWindow: 500, ticksRate: 2, samplesCount: 15 }, null, (n, r) => !w.isUndefined(r[n]));
       super({ readableHighWaterMark: e.chunkSize });
@@ -8158,7 +8187,7 @@ var X_e = (e, t, n) => {
   c += i.byteLength * l.length, c = w.toFiniteNumber(c);
   let u = { "Content-Type": `multipart/form-data; boundary=${s}` };
   if (Number.isFinite(c)) u["Content-Length"] = c;
-  return t && t(u), V_e.from((async function* () {
+  return t && t(u), import_stream2.Readable.from((async function* () {
     for (let p of l) yield i, yield* p.encode();
     yield a;
   })());
@@ -8168,13 +8197,13 @@ var $1 = O(() => {
   lt();
   iT();
   go();
-  Z_e = Ve.ALPHABET.ALPHA_DIGIT + "-_", Ef = typeof TextEncoder === "function" ? new TextEncoder() : new q_e.TextEncoder(), Y_e = Ef.encode(Pa);
+  Z_e = Ve.ALPHABET.ALPHA_DIGIT + "-_", Ef = typeof TextEncoder === "function" ? new TextEncoder() : new import_util.default.TextEncoder(), Y_e = Ef.encode(Pa);
   j1 = X_e;
 });
 var z1;
 var H1;
 var B1 = O(() => {
-  z1 = class z1 extends Q_e.Transform {
+  z1 = class z1 extends import_stream3.default.Transform {
     __transform(e, t, n) {
       this.push(e), n();
     }
@@ -8370,10 +8399,10 @@ var uH = class {
       let l = n.length;
       for (let u = 0; u < l; u++) {
         let [p, f] = n[u];
-        if (!p.destroyed && !p.closed && cH.isDeepStrictEqual(f, t)) return p;
+        if (!p.destroyed && !p.closed && import_util2.default.isDeepStrictEqual(f, t)) return p;
       }
     }
-    let r = aH.connect(e, t), o, s = () => {
+    let r = import_http2.default.connect(e, t), o, s = () => {
       if (o) return;
       o = true;
       let l = n, u = l.length, p = u;
@@ -8479,10 +8508,10 @@ var fH = O(() => {
   G1();
   Z1();
   N_();
-  lH = Hn(D1(), 1), tH = { flush: bi.constants.Z_SYNC_FLUSH, finishFlush: bi.constants.Z_SYNC_FLUSH }, uye = { flush: bi.constants.BROTLI_OPERATION_FLUSH, finishFlush: bi.constants.BROTLI_OPERATION_FLUSH }, nH = w.isFunction(bi.createBrotliDecompress), { http: dye, https: pye } = lH.default, fye = /https:?/, rH = /* @__PURE__ */ Symbol("axios.http.socketListener"), U_ = /* @__PURE__ */ Symbol("axios.http.currentReq"), oH = Ve.protocols.map((e) => e + ":");
+  lH = Hn(D1(), 1), tH = { flush: import_zlib.default.constants.Z_SYNC_FLUSH, finishFlush: import_zlib.default.constants.Z_SYNC_FLUSH }, uye = { flush: import_zlib.default.constants.BROTLI_OPERATION_FLUSH, finishFlush: import_zlib.default.constants.BROTLI_OPERATION_FLUSH }, nH = w.isFunction(import_zlib.default.createBrotliDecompress), { http: dye, https: pye } = lH.default, fye = /https:?/, rH = /* @__PURE__ */ Symbol("axios.http.socketListener"), U_ = /* @__PURE__ */ Symbol("axios.http.currentReq"), oH = Ve.protocols.map((e) => e + ":");
   mye = new uH();
   gye = typeof process < "u" && w.kindOf(process) === "process", bye = { request(e, t) {
-    let n = e.protocol + "//" + e.hostname + ":" + (e.port || (e.protocol === "https:" ? 443 : 80)), { http2Options: r, headers: o } = e, s = mye.getSession(n, r), { HTTP2_HEADER_SCHEME: i, HTTP2_HEADER_METHOD: a, HTTP2_HEADER_PATH: c, HTTP2_HEADER_STATUS: l } = aH.constants, u = { [i]: e.protocol.replace(":", ""), [a]: e.method, [c]: e.path };
+    let n = e.protocol + "//" + e.hostname + ":" + (e.port || (e.protocol === "https:" ? 443 : 80)), { http2Options: r, headers: o } = e, s = mye.getSession(n, r), { HTTP2_HEADER_SCHEME: i, HTTP2_HEADER_METHOD: a, HTTP2_HEADER_PATH: c, HTTP2_HEADER_STATUS: l } = import_http2.default.constants, u = { [i]: e.protocol.replace(":", ""), [a]: e.method, [c]: e.path };
     w.forEach(o, (f, m) => {
       m.charAt(0) !== ":" && (u[m] = f);
     });
@@ -8511,7 +8540,7 @@ var fH = O(() => {
           });
         };
       }
-      let x = new lye();
+      let x = new import_events.EventEmitter();
       function v(se) {
         try {
           x.emit("abort", !se || se.type ? new vr(null, t, S) : se);
@@ -8534,8 +8563,8 @@ var fH = O(() => {
           return;
         }
         let { data: te } = se;
-        if (te instanceof _o.Readable || te instanceof _o.Duplex) {
-          let je = _o.finished(te, () => {
+        if (te instanceof import_stream4.default.Readable || te instanceof import_stream4.default.Duplex) {
+          let je = import_stream4.default.finished(te, () => {
             je(), A();
           });
         } else A();
@@ -8555,7 +8584,7 @@ var fH = O(() => {
         }
         if (f === "text") {
           if (se = se.toString(m), !m || m === "utf8") se = w.stripBOM(se);
-        } else if (f === "stream") se = _o.Readable.from(se);
+        } else if (f === "stream") se = import_stream4.default.Readable.from(se);
         return Jo(r, o, { data: se, status: 200, statusText: "OK", headers: new Rt(), config: t });
       }
       if (oH.indexOf(F) === -1) return o(new G("Unsupported protocol " + F, G.ERR_BAD_REQUEST, t));
@@ -8569,11 +8598,11 @@ var fH = O(() => {
         }, { tag: `axios-${Oa}-boundary`, boundary: se && se[1] || void 0 });
       } else if (w.isFormData(a) && w.isFunction(a.getHeaders) && a.getHeaders !== Object.prototype.getHeaders) {
         if (K.set(a.getHeaders()), !K.hasContentLength()) try {
-          let se = await cH.promisify(a.getLength).call(a);
+          let se = await import_util2.default.promisify(a.getLength).call(a);
           Number.isFinite(se) && se >= 0 && K.setContentLength(se);
         } catch (se) {
         }
-      } else if (w.isBlob(a) || w.isFile(a)) a.size && K.setContentType(a.type || "application/octet-stream"), K.setContentLength(a.size || 0), a = _o.Readable.from(M_(a));
+      } else if (w.isBlob(a) || w.isFile(a)) a.size && K.setContentType(a.type || "application/octet-stream"), K.setContentLength(a.size || 0), a = import_stream4.default.Readable.from(M_(a));
       else if (a && !w.isStream(a)) {
         if (Buffer.isBuffer(a)) ;
         else if (w.isArrayBuffer(a)) a = Buffer.from(new Uint8Array(a));
@@ -8585,8 +8614,8 @@ var fH = O(() => {
       if (w.isArray(oe)) _e = oe[0], ke = oe[1];
       else _e = ke = oe;
       if (a && (V || _e)) {
-        if (!w.isStream(a)) a = _o.Readable.from(a, { objectMode: false });
-        a = _o.pipeline([a, new sT({ maxRate: w.toFiniteNumber(_e) })], w.noop), V && a.on("progress", sH(a, Yl(vt, Es(Jl(V), false, 3))));
+        if (!w.isStream(a)) a = import_stream4.default.Readable.from(a, { objectMode: false });
+        a = import_stream4.default.pipeline([a, new sT({ maxRate: w.toFiniteNumber(_e) })], w.noop), V && a.on("progress", sH(a, Yl(vt, Es(Jl(V), false, 3))));
       }
       let Z = void 0, Je = i("auth");
       if (Je) {
@@ -8610,8 +8639,8 @@ var fH = O(() => {
       if (!w.isUndefined(c) && (ht.lookup = c), t.socketPath) {
         if (typeof t.socketPath !== "string") return o(new G("socketPath must be a string", G.ERR_BAD_OPTION_VALUE, t));
         if (t.allowedSocketPaths != null) {
-          let se = Array.isArray(t.allowedSocketPaths) ? t.allowedSocketPaths : [t.allowedSocketPaths], Q = eH(t.socketPath);
-          if (!se.some((je) => typeof je === "string" && eH(je) === Q)) return o(new G(`socketPath "${t.socketPath}" is not permitted by allowedSocketPaths`, G.ERR_BAD_OPTION_VALUE, t));
+          let se = Array.isArray(t.allowedSocketPaths) ? t.allowedSocketPaths : [t.allowedSocketPaths], Q = (0, import_path.resolve)(t.socketPath);
+          if (!se.some((je) => typeof je === "string" && (0, import_path.resolve)(je) === Q)) return o(new G(`socketPath "${t.socketPath}" is not permitted by allowedSocketPaths`, G.ERR_BAD_OPTION_VALUE, t));
         }
         ht.socketPath = t.socketPath;
       } else ht.hostname = D.hostname.startsWith("[") ? D.hostname.slice(1, -1) : D.hostname, ht.port = D.port, dH(ht, t.proxy, F + "//" + D.hostname + (D.port ? ":" + D.port : "") + ht.path);
@@ -8620,7 +8649,7 @@ var fH = O(() => {
       else {
         let se = i("transport");
         if (se) cr = se;
-        else if (t.maxRedirects === 0) cr = Ot ? cye : aye;
+        else if (t.maxRedirects === 0) cr = Ot ? import_https.default : import_http.default;
         else {
           if (t.maxRedirects) ht.maxRedirects = t.maxRedirects;
           let Q = i("beforeRedirect");
@@ -8645,16 +8674,16 @@ var fH = O(() => {
             case "x-gzip":
             case "compress":
             case "x-compress":
-              te.push(bi.createUnzip(tH)), delete Q.headers["content-encoding"];
+              te.push(import_zlib.default.createUnzip(tH)), delete Q.headers["content-encoding"];
               break;
             case "deflate":
-              te.push(new H1()), te.push(bi.createUnzip(tH)), delete Q.headers["content-encoding"];
+              te.push(new H1()), te.push(import_zlib.default.createUnzip(tH)), delete Q.headers["content-encoding"];
               break;
             case "br":
-              if (nH) te.push(bi.createBrotliDecompress(uye)), delete Q.headers["content-encoding"];
+              if (nH) te.push(import_zlib.default.createBrotliDecompress(uye)), delete Q.headers["content-encoding"];
           }
         }
-        Re = te.length > 1 ? _o.pipeline(te, w.noop) : te[0];
+        Re = te.length > 1 ? import_stream4.default.pipeline(te, w.noop) : te[0];
         let Ut = { status: Q.statusCode, statusText: Q.statusMessage, headers: new Rt(Q.headers), config: t, request: Pt };
         if (f === "stream") {
           if (t.maxContentLength > -1) {
@@ -8666,7 +8695,7 @@ var fH = O(() => {
                 yield ph;
               }
             }
-            Re = _o.Readable.from(Gi(), { objectMode: false });
+            Re = import_stream4.default.Readable.from(Gi(), { objectMode: false });
           }
           Ut.data = Re, Jo(r, o, Ut);
         } else {
@@ -8734,7 +8763,7 @@ var fH = O(() => {
         let te = a;
         if (t.maxBodyLength > -1 && t.maxRedirects === 0) {
           let je = t.maxBodyLength, Re = 0;
-          te = _o.pipeline([a, new _o.Transform({ transform(Pt, Ut, gt) {
+          te = import_stream4.default.pipeline([a, new import_stream4.default.Transform({ transform(Pt, Ut, gt) {
             if (Re += Pt.length, Re > je) return gt(new G("Request body larger than maxBodyLength limit", G.ERR_BAD_REQUEST, t, S));
             gt(null, Pt);
           } })], w.noop), te.on("error", (Pt) => {
@@ -15776,7 +15805,7 @@ var BY = T(function(Bm, HY) {
 var KQ = 50;
 function md(e = KQ) {
   let t = new AbortController();
-  return BQ(e, t.signal), t;
+  return (0, import_events2.setMaxListeners)(e, t.signal), t;
 }
 var rXe = new FinalizationRegistry(({ parentSignalRef: e, handler: t }) => {
   e.deref()?.removeEventListener("abort", t);
@@ -15877,7 +15906,7 @@ var JQ = 50;
 var wD;
 function fh(e) {
   for (let t = 0; ; t++) try {
-    return sE(RD.native(e));
+    return sE(import_fs2.realpathSync.native(e));
   } catch (n) {
     let r = n != null && typeof n === "object" && "code" in n && typeof n.code === "string" ? n.code : void 0;
     if (r === void 0 || !ZQ.has(r) || t >= YQ - 1) return null;
@@ -15885,32 +15914,32 @@ function fh(e) {
   }
 }
 function gh(e, t) {
-  let n = gc(t).toLowerCase(), r = bD(gc(e)).toLowerCase();
+  let n = (0, import_path3.resolve)(t).toLowerCase(), r = (0, import_path3.dirname)((0, import_path3.resolve)(e)).toLowerCase();
   if (r === n || AD(r, n) || TD(r, n, "lexical")) return true;
   let o = fh(t)?.toLowerCase();
   if (o == null) return false;
-  let s = fh(bD(gc(e)))?.toLowerCase();
+  let s = fh((0, import_path3.dirname)((0, import_path3.resolve)(e)))?.toLowerCase();
   if (s == null) return true;
   return s === o || AD(s, o) || TD(s, o, "canonical");
 }
 var XQ = /* @__PURE__ */ new Set(["node_modules", ".venv", "venv", "env", ".env", "virtualenv", ".tox", ".nox", ".direnv", "__pypackages__"]);
 function AD(e, t) {
-  if (!e.startsWith(mh(t) + is)) return false;
-  return e.split(is).some((n) => XQ.has(n));
+  if (!e.startsWith(mh(t) + import_path3.sep)) return false;
+  return e.split(import_path3.sep).some((n) => XQ.has(n));
 }
 function mh(e) {
-  return e.endsWith(is) ? e.slice(0, -1) : e;
+  return e.endsWith(import_path3.sep) ? e.slice(0, -1) : e;
 }
 var eE;
 function TD(e, t, n) {
-  let r = qQ(), o = (process.env.LOCALAPPDATA ?? "").trim();
-  if (n === "lexical") return tE(CD(r, o, (c) => gc(c).toLowerCase()), e, t);
+  let r = (0, import_os2.homedir)(), o = (process.env.LOCALAPPDATA ?? "").trim();
+  if (n === "lexical") return tE(CD(r, o, (c) => (0, import_path3.resolve)(c).toLowerCase()), e, t);
   let s = r + "\0" + o;
   if (eE?.key === s) return tE(eE.aliasDirs, e, t);
   let i = true, a = CD(r, o, (c) => {
-    if (!QQ(c)) return gc(c).toLowerCase();
+    if (!QQ(c)) return (0, import_path3.resolve)(c).toLowerCase();
     let l = fh(c)?.toLowerCase();
-    if (l == null) return i = false, gc(c).toLowerCase();
+    if (l == null) return i = false, (0, import_path3.resolve)(c).toLowerCase();
     return l;
   });
   if (i) eE = { key: s, aliasDirs: a };
@@ -15918,9 +15947,9 @@ function TD(e, t, n) {
 }
 function CD(e, t, n) {
   let r = [];
-  if (e) r.push(mh(n(e)) + is + ["appdata", "local", "microsoft", "windowsapps"].join(is));
+  if (e) r.push(mh(n(e)) + import_path3.sep + ["appdata", "local", "microsoft", "windowsapps"].join(import_path3.sep));
   if (t) {
-    let o = mh(n(t)) + is + ["microsoft", "windowsapps"].join(is);
+    let o = mh(n(t)) + import_path3.sep + ["microsoft", "windowsapps"].join(import_path3.sep);
     if (!r.includes(o)) r.push(o);
   }
   return r;
@@ -15931,8 +15960,8 @@ function QQ(e) {
 function tE(e, t, n) {
   let r = mh(n);
   for (let o of e) {
-    if (!(o === r || o.startsWith(r + is))) continue;
-    if (t === o || t.startsWith(o + is)) return true;
+    if (!(o === r || o.startsWith(r + import_path3.sep))) continue;
+    if (t === o || t.startsWith(o + import_path3.sep)) return true;
   }
   return false;
 }
@@ -17016,9 +17045,9 @@ bd();
 function Ch() {
   return process.env.CLAUDE_CONFIG_DIR;
 }
-var Gt = Ed(() => (Ch() ?? gne(hne(), ".claude")).normalize("NFC"), Ch);
+var Gt = Ed(() => (Ch() ?? (0, import_path4.join)((0, import_os3.homedir)(), ".claude")).normalize("NFC"), Ch);
 function zL(e) {
-  return $L(Gt()) === $L(e);
+  return (0, import_path4.resolve)(Gt()) === (0, import_path4.resolve)(e);
 }
 function HL() {
   return process.env.CLAUDE_CODE_PROJECT_DIR_NAME;
@@ -17136,7 +17165,7 @@ var ON = "[\\w-]{1,63}";
 var Koe = new RegExp(`^${ON}$`);
 var Cct = new RegExp(`^a(?:${ON}-)?[0-9a-f]{16}$`);
 function PN(e, t) {
-  let n = Buffer.from(t.replace(/-/g, ""), "hex"), r = Goe("sha1").update(n).update(Buffer.from(e, "utf8")).digest();
+  let n = Buffer.from(t.replace(/-/g, ""), "hex"), r = (0, import_crypto5.createHash)("sha1").update(n).update(Buffer.from(e, "utf8")).digest();
   r[6] = r[6] & 15 | 80, r[8] = r[8] & 63 | 128;
   let o = r.subarray(0, 16).toString("hex");
   return `${o.slice(0, 8)}-${o.slice(8, 12)}-${o.slice(12, 16)}-${o.slice(16, 20)}-${o.slice(20, 32)}`;
@@ -17721,11 +17750,11 @@ var Wg = class {
     return true;
   }
   walkReadManagedFileIn(e, t) {
-    for (let [n, r] of this.parsedFiles) if (!n.includes("\0") && !this.primedFiles.has(n) && r.settings !== null && (n === e || _U(n) === t)) return true;
+    for (let [n, r] of this.parsedFiles) if (!n.includes("\0") && !this.primedFiles.has(n) && r.settings !== null && (n === e || (0, import_path6.dirname)(n) === t)) return true;
     return false;
   }
   hasParsedDropInOutside(e, t) {
-    for (let n of this.parsedFiles.keys()) if (!n.includes("\0") && !this.primedFiles.has(n) && _U(n) === e && !t.includes(tae(n))) return true;
+    for (let n of this.parsedFiles.keys()) if (!n.includes("\0") && !this.primedFiles.has(n) && (0, import_path6.dirname)(n) === e && !t.includes((0, import_path6.basename)(n))) return true;
     return false;
   }
   clearFolderListing(e, t) {
@@ -19999,15 +20028,15 @@ function VU() {
 }
 function Vae() {
   let e = "";
-  if (typeof process < "u" && typeof process.cwd === "function" && typeof ZU === "function") {
-    let t = qae();
+  if (typeof process < "u" && typeof process.cwd === "function" && typeof import_fs4.realpathSync === "function") {
+    let t = (0, import_process.cwd)();
     try {
-      e = YU(ZU(t));
+      e = YU((0, import_fs4.realpathSync)(t));
     } catch {
       e = YU(t);
     }
   }
-  return HU({ host: VU(), id: IN() ?? Bp(), project: { originalCwd: e, projectRoot: e, cwd: e } });
+  return HU({ host: VU(), id: IN() ?? (0, import_crypto4.randomUUID)(), project: { originalCwd: e, projectRoot: e, cwd: e } });
 }
 var Zae = Vae();
 function Tt() {
@@ -20035,7 +20064,7 @@ var cht = new tt(() => $t());
 var tce = /* @__PURE__ */ new Set(["EXDEV", "EPERM", "EEXIST", "EBUSY"]);
 var nce = /* @__PURE__ */ new Set(["EPERM", "EBUSY", "EACCES"]);
 function rce(e) {
-  return `${e}.tmp.${Jae(4).toString("hex")}`;
+  return `${e}.tmp.${(0, import_crypto6.randomBytes)(4).toString("hex")}`;
 }
 var oce = 4;
 var sce = 50;
@@ -20048,7 +20077,7 @@ function ice(e, t) {
 var ace = 128;
 async function cce(e) {
   try {
-    return ((await Ow(e)).mode & ace) === 0;
+    return ((await (0, import_promises4.lstat)(e)).mode & ace) === 0;
   } catch {
     return false;
   }
@@ -20066,15 +20095,15 @@ async function lce(e, t) {
     throw o;
   }
 }
-function uce(e, t, n = Xae) {
+function uce(e, t, n = import_promises4.rename) {
   return lce(() => n(e, t), t);
 }
 var dce = 67108864;
-var Pw = process.platform === "win32" ? 0 : Tn.O_NONBLOCK;
+var Pw = process.platform === "win32" ? 0 : import_fs6.constants.O_NONBLOCK;
 async function eF(e, t, n = process.platform) {
   if (n !== "win32") return true;
   try {
-    return (await Ow(e)).isFile();
+    return (await (0, import_promises4.lstat)(e)).isFile();
   } catch (r) {
     return t && Ne(r) === "ENOENT";
   }
@@ -20083,7 +20112,7 @@ async function pce(e, t = false) {
   if (!t && !await eF(e, true)) return { kind: "unavailable" };
   let n;
   try {
-    n = await t_(e, process.platform === "win32" ? Tn.O_RDONLY : Tn.O_RDONLY | (t ? 0 : Tn.O_NOFOLLOW) | Pw);
+    n = await (0, import_promises4.open)(e, process.platform === "win32" ? import_fs6.constants.O_RDONLY : import_fs6.constants.O_RDONLY | (t ? 0 : import_fs6.constants.O_NOFOLLOW) | Pw);
   } catch (r) {
     return Ne(r) === "ENOENT" ? { kind: "absent" } : { kind: "unavailable" };
   }
@@ -20102,7 +20131,7 @@ async function fce(e, t, n = false) {
   if (!n && !await eF(e, true)) return false;
   let r;
   try {
-    r = await t_(e, process.platform === "win32" ? "w" : Tn.O_WRONLY | Tn.O_CREAT | Tn.O_TRUNC | (n ? 0 : Tn.O_NOFOLLOW) | Pw, t.mode);
+    r = await (0, import_promises4.open)(e, process.platform === "win32" ? "w" : import_fs6.constants.O_WRONLY | import_fs6.constants.O_CREAT | import_fs6.constants.O_TRUNC | (n ? 0 : import_fs6.constants.O_NOFOLLOW) | Pw, t.mode);
   } catch {
     return false;
   }
@@ -20131,7 +20160,7 @@ var QU = 3;
 async function mce(e, t) {
   if (t !== "win32") return false;
   try {
-    return await Ow(e), true;
+    return await (0, import_promises4.lstat)(e), true;
   } catch (n) {
     return Ne(n) === "ENOENT" ? false : { cause: n };
   }
@@ -20157,23 +20186,23 @@ async function tF(e, t, n) {
 async function gce(e, t, n, r = process.platform) {
   return tF(e, r, async (o) => {
     try {
-      return await ece(o, t, { encoding: "utf8", mode: n, flag: "wx" }), o;
+      return await (0, import_promises4.writeFile)(o, t, { encoding: "utf8", mode: n, flag: "wx" }), o;
     } catch (s) {
-      if (Ne(s) !== "EEXIST") await e_(o).catch(() => {
+      if (Ne(s) !== "EEXIST") await (0, import_promises4.unlink)(o).catch(() => {
       });
       throw s;
     }
   });
 }
 async function _ce(e, t, n = process.platform) {
-  return tF(e, n, async (r) => ({ fh: await t_(r, n === "win32" ? "wx" : Tn.O_WRONLY | Tn.O_CREAT | Tn.O_EXCL, t), tmp: r }));
+  return tF(e, n, async (r) => ({ fh: await (0, import_promises4.open)(r, n === "win32" ? "wx" : import_fs6.constants.O_WRONLY | import_fs6.constants.O_CREAT | import_fs6.constants.O_EXCL, t), tmp: r }));
 }
 async function nF(e, t, n, r) {
   return yce(e, t, { mode: n, renameFn: r });
 }
 async function yce(e, t, n) {
-  let { mode: r, createMode: o, exactMode: s, flush: i, followSymlinks: a, inPlaceOnTempCreateRefused: c, renameFn: l } = n, u = r ?? o, p = a === true || process.platform === "win32" ? 0 : Tn.O_NOFOLLOW, f, m = false, h = false, g = async (y) => {
-    let S = await pce(e, a === true), b = S.kind === "snapshot" ? S : void 0, x = await t_(e, process.platform === "win32" ? Tn.O_WRONLY | Tn.O_CREAT : Tn.O_WRONLY | Tn.O_CREAT | p | Pw, s ?? u), v;
+  let { mode: r, createMode: o, exactMode: s, flush: i, followSymlinks: a, inPlaceOnTempCreateRefused: c, renameFn: l } = n, u = r ?? o, p = a === true || process.platform === "win32" ? 0 : import_fs6.constants.O_NOFOLLOW, f, m = false, h = false, g = async (y) => {
+    let S = await pce(e, a === true), b = S.kind === "snapshot" ? S : void 0, x = await (0, import_promises4.open)(e, process.platform === "win32" ? import_fs6.constants.O_WRONLY | import_fs6.constants.O_CREAT : import_fs6.constants.O_WRONLY | import_fs6.constants.O_CREAT | p | Pw, s ?? u), v;
     try {
       v = await x.stat();
     } catch (F) {
@@ -20200,11 +20229,11 @@ async function yce(e, t, n) {
       if (await x.close().catch(() => {
       }), !U) throw m = y !== void 0, Qg(F, y, "untouched");
       m = y !== void 0;
-      let V = b !== void 0 && await fce(e, b, a === true) ? "restored" : await e_(e).then(() => true, (ne) => Ne(ne) === "ENOENT") ? "removed" : "partial";
+      let V = b !== void 0 && await fce(e, b, a === true) ? "restored" : await (0, import_promises4.unlink)(e).then(() => true, (ne) => Ne(ne) === "ENOENT") ? "removed" : "partial";
       throw Qg(F, y, V);
     }
     let D = y ?? f;
-    if (D !== void 0) await e_(D).catch(() => {
+    if (D !== void 0) await (0, import_promises4.unlink)(D).catch(() => {
     });
   };
   try {
@@ -20239,7 +20268,7 @@ async function yce(e, t, n) {
       if (c !== true) throw S;
       if (h) throw S;
       if (Ne(S) !== "EACCES") throw S;
-      if (!await Qae(e).then(() => true, () => false)) throw S;
+      if (!await (0, import_promises4.stat)(e).then(() => true, () => false)) throw S;
       await g(void 0);
       return;
     }
@@ -20253,26 +20282,26 @@ async function yce(e, t, n) {
       await g(y);
     }
   } catch (y) {
-    if (f !== void 0 && !m) await e_(f).catch(() => {
+    if (f !== void 0 && !m) await (0, import_promises4.unlink)(f).catch(() => {
     });
     throw y;
   }
 }
-var bce = process.platform === "win32" ? 0 : rF.O_NONBLOCK;
-var Iw = process.platform === "win32" ? 0 : rF.O_NOFOLLOW | bce;
+var bce = process.platform === "win32" ? 0 : import_fs7.constants.O_NONBLOCK;
+var Iw = process.platform === "win32" ? 0 : import_fs7.constants.O_NOFOLLOW | bce;
 var cF = class {
   read(e) {
-    return iF(e, "utf8");
+    return (0, import_promises3.readFile)(e, "utf8");
   }
   readBytes(e) {
-    return iF(e);
+    return (0, import_promises3.readFile)(e);
   }
   write(e, t, n) {
-    return Dw(e, t, { encoding: "utf8", mode: n });
+    return (0, import_promises3.writeFile)(e, t, { encoding: "utf8", mode: n });
   }
   async mkdir(e, t) {
     try {
-      await Ace(e, { recursive: true, mode: t });
+      await (0, import_promises3.mkdir)(e, { recursive: true, mode: t });
     } catch (n) {
       if (Ne(n) !== "EEXIST") throw n;
     }
@@ -20281,29 +20310,29 @@ var cF = class {
     return nF(e, t, n);
   }
   delete(e) {
-    return Cce(e);
+    return (0, import_promises3.unlink)(e);
   }
   list(e) {
-    return sF(e);
+    return (0, import_promises3.readdir)(e);
   }
   append(e, t, n) {
-    return xce(e, t, { encoding: "utf8", mode: n });
+    return (0, import_promises3.appendFile)(e, t, { encoding: "utf8", mode: n });
   }
   writeExclusive(e, t, n) {
-    return Dw(e, t, { encoding: "utf8", flag: "wx", mode: n });
+    return (0, import_promises3.writeFile)(e, t, { encoding: "utf8", flag: "wx", mode: n });
   }
   writeBytes(e, t) {
-    return Dw(e, t);
+    return (0, import_promises3.writeFile)(e, t);
   }
   copy(e, t) {
-    return vce(e, t);
+    return (0, import_promises3.copyFile)(e, t);
   }
   async stat(e) {
-    return { mtimeMs: (await Tce(e)).mtimeMs };
+    return { mtimeMs: (await (0, import_promises3.stat)(e)).mtimeMs };
   }
   async lstat(e) {
     try {
-      let t = await wce(e);
+      let t = await (0, import_promises3.lstat)(e);
       return { isSymbolicLink: t.isSymbolicLink(), isFile: t.isFile(), isDirectory: t.isDirectory(), mtimeMs: t.mtimeMs };
     } catch (t) {
       if (Ne(t) === "ENOENT") return;
@@ -20311,11 +20340,11 @@ var cF = class {
     }
   }
   async listEntries(e) {
-    return (await sF(e, { withFileTypes: true })).map((n) => ({ name: n.name, isDirectory: n.isDirectory(), isFile: n.isFile() }));
+    return (await (0, import_promises3.readdir)(e, { withFileTypes: true })).map((n) => ({ name: n.name, isDirectory: n.isDirectory(), isFile: n.isFile() }));
   }
   async readRange(e, t, n) {
     Lw("readRange", "offset", t), Lw("readRange", "length", n);
-    let r = await oF(e, "r");
+    let r = await (0, import_promises3.open)(e, "r");
     try {
       return await aF(r, t, n);
     } finally {
@@ -20324,7 +20353,7 @@ var cF = class {
   }
   async readTail(e, t, n) {
     Lw("readTail", "maxBytes", t);
-    let r = n?.noFollow ? Ece.O_RDONLY | Iw : "r", o = await oF(e, r);
+    let r = n?.noFollow ? import_fs5.constants.O_RDONLY | Iw : "r", o = await (0, import_promises3.open)(e, r);
     try {
       let s = await o.stat();
       if (n?.noFollow && !s.isFile()) throw Object.assign(Error("ENXIO: not a regular file"), { code: "ENXIO", path: e });
@@ -20348,7 +20377,7 @@ async function aF(e, t, n) {
   }
   return o === n ? r : Buffer.from(r.subarray(0, o));
 }
-var kce = new Sce();
+var kce = new import_async_hooks.AsyncLocalStorage();
 function Sl() {
   return kce.getStore() ?? new cF();
 }
@@ -22713,21 +22742,21 @@ function Gpe(e) {
   return Object.hasOwn(Zw, e);
 }
 function VF(e) {
-  return DD(e) ? null : JF(e);
+  return DD(e) ? null : (0, import_path8.resolve)(e);
 }
 function ZF() {
 }
 var Wpe = { sessionId: "", fromBackend: false };
 function YF(e, t, n, r) {
-  let o = mi(t, "debug"), s = mi(o, `${e.sessionId}.txt`), i;
+  let o = (0, import_path8.join)(t, "debug"), s = (0, import_path8.join)(o, `${e.sessionId}.txt`), i;
   if (n === null) i = s;
-  else if (r !== null && n === r) i = mi(r, `${e.sessionId}.txt`);
+  else if (r !== null && n === r) i = (0, import_path8.join)(r, `${e.sessionId}.txt`);
   else i = n;
   let a = !e.fromBackend && i === s ? "v5" : "raw";
-  return { target: i, arm: a, configHome: t, rotate: a === "raw" && !(Ul(i) === o && i.endsWith(".txt")) };
+  return { target: i, arm: a, configHome: t, rotate: a === "raw" && !((0, import_path8.dirname)(i) === o && i.endsWith(".txt")) };
 }
 function Vw(e) {
-  return kF.userNamed(Bpe(e) ? e : JF(e));
+  return kF.userNamed((0, import_path8.isAbsolute)(e) ? e : (0, import_path8.resolve)(e));
 }
 function qpe(e) {
   return e.code === "Failed" && e.telemetryCode === "ENOENT";
@@ -22798,10 +22827,10 @@ var XF = class {
     return this.runtimeDebugEnabled = true, e;
   }
   logPath() {
-    return this.filePath ?? (this.overrideDirectory !== null && this.overrideDirectory === this.deps.env.CLAUDE_CODE_DEBUG_LOGS_DIR ? mi(this.overrideDirectory, `${this.deps.sessionId()}.txt`) : null) ?? this.resolvedLogPath ?? this.deps.env.CLAUDE_CODE_DEBUG_LOGS_DIR ?? this.defaultLogPath();
+    return this.filePath ?? (this.overrideDirectory !== null && this.overrideDirectory === this.deps.env.CLAUDE_CODE_DEBUG_LOGS_DIR ? (0, import_path8.join)(this.overrideDirectory, `${this.deps.sessionId()}.txt`) : null) ?? this.resolvedLogPath ?? this.deps.env.CLAUDE_CODE_DEBUG_LOGS_DIR ?? this.defaultLogPath();
   }
   defaultLogPath(e = this.deps.sessionId()) {
-    return mi(this.deps.configHomeDir(), "debug", `${e}.txt`);
+    return (0, import_path8.join)(this.deps.configHomeDir(), "debug", `${e}.txt`);
   }
   learnedOverrideDirectory() {
     return this.overrideDirectory;
@@ -22859,7 +22888,7 @@ var XF = class {
     if (this.writtenBytes < 0) if (r) {
       let o = await r.stat(Vw(e));
       this.writtenBytes = o.ok && o.value.kind !== "absent" ? o.value.size : 0;
-    } else this.writtenBytes = await zpe(e).then((o) => o.size).catch(() => 0);
+    } else this.writtenBytes = await (0, import_promises7.stat)(e).then((o) => o.size).catch(() => 0);
     else this.writtenBytes += t;
     if (this.writtenBytes <= n || this.rotating) return;
     this.rotating = true;
@@ -22871,10 +22900,10 @@ var XF = class {
           if (await r.delete(i, { missingOk: true }), !(await r.rename(s, i)).ok) await r.delete(s, { missingOk: true });
         }
       } else try {
-        await qF(e, o);
+        await (0, import_promises7.rename)(e, o);
       } catch (s) {
-        if (!br(s)) await qw(o).catch(() => {
-        }), await qF(e, o).catch(() => qw(e).catch(() => {
+        if (!br(s)) await (0, import_promises7.unlink)(o).catch(() => {
+        }), await (0, import_promises7.rename)(e, o).catch(() => (0, import_promises7.unlink)(e).catch(() => {
         }));
       }
       this.writtenBytes = 0;
@@ -22889,30 +22918,30 @@ var XF = class {
     return MF(e, this.filter);
   }
   resolveDirToFile(e) {
-    return this.resolvedLogPath = mi(e, `${this.deps.sessionId()}.txt`), this.resolvedLogPath;
+    return this.resolvedLogPath = (0, import_path8.join)(e, `${this.deps.sessionId()}.txt`), this.resolvedLogPath;
   }
   async appendGroup(e, t, n, r) {
     if (this.storageV5 !== void 0 && e.arm === "v5") {
       await this.appendV5AndMark(this.storageV5, t, n);
       return;
     }
-    if (r) await WF(Ul(e.target), { recursive: true }).catch(() => {
+    if (r) await (0, import_promises7.mkdir)((0, import_path8.dirname)(e.target), { recursive: true }).catch(() => {
     });
     let o = e;
     try {
-      await Ww(e.target, n);
+      await (0, import_promises7.appendFile)(e.target, n);
     } catch (s) {
       if (!Dv(s)) throw s;
-      if (this.storageV5 === void 0) o = { ...e, target: this.resolveDirToFile(e.target) }, await Ww(o.target, n);
+      if (this.storageV5 === void 0) o = { ...e, target: this.resolveDirToFile(e.target) }, await (0, import_promises7.appendFile)(o.target, n);
       else {
         if (this.overrideDirectory = e.target, o = YF(t, e.configHome, e.target, e.target), o.arm === "v5") {
           await this.appendV5AndMark(this.storageV5, t, n);
           return;
         }
-        await WF(Ul(o.target), { recursive: true }).catch(() => {
+        await (0, import_promises7.mkdir)((0, import_path8.dirname)(o.target), { recursive: true }).catch(() => {
         });
         try {
-          await Ww(o.target, n);
+          await (0, import_promises7.appendFile)(o.target, n);
         } catch {
           return;
         }
@@ -22944,7 +22973,7 @@ var XF = class {
     for (let { target: t, armed: n, parts: r } of e) {
       let o = n ? t : this.logPath(), s = r.map((i) => i.content).join("");
       try {
-        Qe().mkdirSync(Ul(o));
+        Qe().mkdirSync((0, import_path8.dirname)(o));
       } catch {
       }
       try {
@@ -22955,7 +22984,7 @@ var XF = class {
           else {
             let a = (u, p) => {
               try {
-                Qe().appendFileSync(mi(o, `${u}.txt`), p);
+                Qe().appendFileSync((0, import_path8.join)(o, `${u}.txt`), p);
               } catch {
               }
             }, c = r[0]?.sessionId, l = "";
@@ -22996,7 +23025,7 @@ var XF = class {
         return;
       }
       for (let r of this.groupLines(n)) {
-        let o = r.lines.map((a) => a.content).join(""), s = Ul(r.decision.target), i = r.decision.arm === "raw" && (r.origin.fromBackend || e !== s);
+        let o = r.lines.map((a) => a.content).join(""), s = (0, import_path8.dirname)(r.decision.target), i = r.decision.arm === "raw" && (r.origin.fromBackend || e !== s);
         if (r.decision.arm === "raw") e = s;
         this.unflushedChunks.push({ target: r.decision.target, sessionId: r.origin.sessionId, armed: t, content: o }), this.pendingWrite = this.pendingWrite.then(this.appendGroup.bind(this, r.decision, r.origin, o, i)).catch(ZF).then(this.shiftUnflushedChunk.bind(this));
       }
@@ -23007,9 +23036,9 @@ var XF = class {
   }
   async updateLatestSymlink() {
     try {
-      let e = this.logPath(), t = mi(Ul(e), "latest");
-      await qw(t).catch(() => {
-      }), await Hpe(e, t);
+      let e = this.logPath(), t = (0, import_path8.join)((0, import_path8.dirname)(e), "latest");
+      await (0, import_promises7.unlink)(t).catch(() => {
+      }), await (0, import_promises7.symlink)(e, t);
     } catch {
     }
   }
@@ -23217,36 +23246,36 @@ var lj = { cwd() {
     jt(n, o, s);
   }
 }, async stat(e) {
-  return mfe(e);
+  return (0, import_promises6.stat)(e);
 }, async lstat(e) {
-  return ife(e);
+  return (0, import_promises6.lstat)(e);
 }, async readdir(e) {
-  return cfe(e, { withFileTypes: true });
+  return (0, import_promises6.readdir)(e, { withFileTypes: true });
 }, async unlink(e) {
-  return gfe(e);
+  return (0, import_promises6.unlink)(e);
 }, async rmdir(e) {
-  return pfe(e);
+  return (0, import_promises6.rmdir)(e);
 }, async rm(e, t) {
-  return ffe(e, t);
+  return (0, import_promises6.rm)(e, t);
 }, async mkdir(e, t) {
   try {
-    await afe(e, { recursive: true, ...t });
+    await (0, import_promises6.mkdir)(e, { recursive: true, ...t });
   } catch (n) {
     if (Ne(n) !== "EEXIST") throw n;
   }
 }, async readFile(e, t) {
-  return nj(e, { encoding: t.encoding });
+  return (0, import_promises6.readFile)(e, { encoding: t.encoding });
 }, async rename(e, t) {
-  return dfe(e, t);
+  return (0, import_promises6.rename)(e, t);
 }, async realpath(e) {
-  return ct(await ufe(e));
+  return ct(await (0, import_promises6.realpath)(e));
 }, async readlink(e) {
-  return lfe(e);
+  return (0, import_promises6.readlink)(e);
 }, async copyFile(e, t) {
-  return ofe(e, t);
+  return (0, import_promises6.copyFile)(e, t);
 }, async appendFile(e, t, n) {
   if (n?.mode !== void 0) try {
-    let r = await tj(e, "ax", n.mode);
+    let r = await (0, import_promises6.open)(e, "ax", n.mode);
     try {
       await r.appendFile(t);
     } finally {
@@ -23256,13 +23285,13 @@ var lj = { cwd() {
   } catch (r) {
     if (Ne(r) !== "EEXIST") throw r;
   }
-  return nfe(e, t);
+  return (0, import_promises6.appendFile)(e, t);
 }, async symlink(e, t, n) {
-  return hfe(e, t, n);
+  return (0, import_promises6.symlink)(e, t, n);
 }, async link(e, t) {
-  return sfe(e, t);
+  return (0, import_promises6.link)(e, t);
 }, async chmod(e, t) {
-  return rfe(e, t);
+  return (0, import_promises6.chmod)(e, t);
 }, statSync(e) {
   let n = [];
   try {
@@ -23410,8 +23439,8 @@ var lj = { cwd() {
 }, createWriteStream(e) {
   return $e.createWriteStream(e);
 }, async readFileBytes(e, t) {
-  if (t === void 0) return nj(e);
-  let n = await tj(e, "r");
+  if (t === void 0) return (0, import_promises6.readFile)(e);
+  let n = await (0, import_promises6.open)(e, "r");
   try {
     let { size: r } = await n.stat(), o = Math.min(r, t), s = Buffer.allocUnsafe(o), i = 0;
     while (i < o) {
@@ -23431,26 +23460,26 @@ var Tfe = "finished";
 var E_t = `" ${Tfe}`;
 var Cfe = "channel";
 var x_t = `<${Cfe} source="`;
-var hi = uj.homedir();
-var tA = uj.tmpdir();
-var { env: Fl } = eA;
+var hi = import_node_os.default.homedir();
+var tA = import_node_os.default.tmpdir();
+var { env: Fl } = import_node_process.default;
 var kfe = (e) => {
-  let t = kt.join(hi, "Library");
-  return { data: kt.join(t, "Application Support", e), config: kt.join(t, "Preferences", e), cache: kt.join(t, "Caches", e), log: kt.join(t, "Logs", e), temp: kt.join(tA, e) };
+  let t = import_node_path.default.join(hi, "Library");
+  return { data: import_node_path.default.join(t, "Application Support", e), config: import_node_path.default.join(t, "Preferences", e), cache: import_node_path.default.join(t, "Caches", e), log: import_node_path.default.join(t, "Logs", e), temp: import_node_path.default.join(tA, e) };
 };
 var Rfe = (e) => {
-  let t = Fl.APPDATA || kt.join(hi, "AppData", "Roaming"), n = Fl.LOCALAPPDATA || kt.join(hi, "AppData", "Local");
-  return { data: kt.join(n, e, "Data"), config: kt.join(t, e, "Config"), cache: kt.join(n, e, "Cache"), log: kt.join(n, e, "Log"), temp: kt.join(tA, e) };
+  let t = Fl.APPDATA || import_node_path.default.join(hi, "AppData", "Roaming"), n = Fl.LOCALAPPDATA || import_node_path.default.join(hi, "AppData", "Local");
+  return { data: import_node_path.default.join(n, e, "Data"), config: import_node_path.default.join(t, e, "Config"), cache: import_node_path.default.join(n, e, "Cache"), log: import_node_path.default.join(n, e, "Log"), temp: import_node_path.default.join(tA, e) };
 };
 var Ofe = (e) => {
-  let t = kt.basename(hi);
-  return { data: kt.join(Fl.XDG_DATA_HOME || kt.join(hi, ".local", "share"), e), config: kt.join(Fl.XDG_CONFIG_HOME || kt.join(hi, ".config"), e), cache: kt.join(Fl.XDG_CACHE_HOME || kt.join(hi, ".cache"), e), log: kt.join(Fl.XDG_STATE_HOME || kt.join(hi, ".local", "state"), e), temp: kt.join(tA, t, e) };
+  let t = import_node_path.default.basename(hi);
+  return { data: import_node_path.default.join(Fl.XDG_DATA_HOME || import_node_path.default.join(hi, ".local", "share"), e), config: import_node_path.default.join(Fl.XDG_CONFIG_HOME || import_node_path.default.join(hi, ".config"), e), cache: import_node_path.default.join(Fl.XDG_CACHE_HOME || import_node_path.default.join(hi, ".cache"), e), log: import_node_path.default.join(Fl.XDG_STATE_HOME || import_node_path.default.join(hi, ".local", "state"), e), temp: import_node_path.default.join(tA, t, e) };
 };
 function nA(e, { suffix: t = "nodejs" } = {}) {
   if (typeof e !== "string") throw TypeError(`Expected a string, got ${typeof e}`);
   if (t) e += `-${t}`;
-  if (eA.platform === "darwin") return kfe(e);
-  if (eA.platform === "win32") return Rfe(e);
+  if (import_node_process.default.platform === "darwin") return kfe(e);
+  if (import_node_process.default.platform === "win32") return Rfe(e);
   return Ofe(e);
 }
 function rA(e) {
@@ -23623,7 +23652,7 @@ var _j = class {
 };
 var Mfe;
 function Nfe() {
-  return Mfe ??= new _j({ platform: process.platform, env: process.env, readProcVersionSync: mj, readProcVersion: () => gj("/proc/version", { encoding: "utf8" }), osRelease: Lfe, readOsRelease: () => gj("/etc/os-release", "utf8") });
+  return Mfe ??= new _j({ platform: process.platform, env: process.env, readProcVersionSync: mj, readProcVersion: () => (0, import_promises8.readFile)("/proc/version", { encoding: "utf8" }), osRelease: import_os5.release, readOsRelease: () => (0, import_promises8.readFile)("/etc/os-release", "utf8") });
 }
 function jr() {
   return Nfe().getPlatform();
@@ -23635,7 +23664,7 @@ function Ffe(e) {
 function yj(e) {
   let t = Bun.which(e);
   if (!t || process.platform !== "win32") return t;
-  if (Ufe(e)) return t;
+  if ((0, import_path9.isAbsolute)(e)) return t;
   return Ffe([t])[0] ?? null;
 }
 var bj = async (e) => yj(e);
@@ -23657,12 +23686,12 @@ function vj() {
   return Qe().existsSync("/.dockerenv");
 }
 function vSe() {
-  if (Qe().existsSync(Df(Gt(), ".config.json"))) return Df(Gt(), ".config.json");
+  if (Qe().existsSync((0, import_path7.join)(Gt(), ".config.json"))) return (0, import_path7.join)(Gt(), ".config.json");
   return wSe();
 }
 function wSe() {
   let e = `.claude${AF()}.json`;
-  return Df(process.env.CLAUDE_CONFIG_DIR || ESe(), e);
+  return (0, import_path7.join)(process.env.CLAUDE_CONFIG_DIR || (0, import_os4.homedir)(), e);
 }
 async function ASe() {
   try {
@@ -23700,17 +23729,17 @@ var QB = ["git", "node", "npm", "npx", "yarn", "pnpm", "bun", "deno", "tsc", "py
 var RSe = 1e3;
 async function OSe(e) {
   try {
-    return /appinstaller/i.test(await SSe(e));
+    return /appinstaller/i.test(await (0, import_promises5.readlink)(e));
   } catch {
     return false;
   }
 }
 async function PSe(e, t) {
-  let n = jr() === "windows", r = new Set(e), o = n ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").toLowerCase().split(";").filter(Boolean) : [], s = Ss((process.env.PATH ?? "").split(xSe).map((i) => i.replace(/^"|"$/g, "")).filter(Boolean));
+  let n = jr() === "windows", r = new Set(e), o = n ? (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").toLowerCase().split(";").filter(Boolean) : [], s = Ss((process.env.PATH ?? "").split(import_path7.delimiter).map((i) => i.replace(/^"|"$/g, "")).filter(Boolean));
   await Promise.all(s.map(async (i) => {
     let a;
     try {
-      a = await ySe(i, { withFileTypes: true });
+      a = await (0, import_promises5.readdir)(i, { withFileTypes: true });
     } catch {
       return;
     }
@@ -23725,9 +23754,9 @@ async function PSe(e, t) {
       }
       if (!r.has(u) || t.has(u)) continue;
       if (n) {
-        if (c && await OSe(Df(i, l.name))) continue;
+        if (c && await OSe((0, import_path7.join)(i, l.name))) continue;
       } else try {
-        await MT(Df(i, l.name), _Se.X_OK);
+        await (0, import_promises5.access)((0, import_path7.join)(i, l.name), import_fs8.constants.X_OK);
       } catch {
         continue;
       }
@@ -23867,9 +23896,9 @@ var t2 = class {
   }
   async prime() {
     if (this.primedWslInteropExists !== void 0 || process.platform !== "linux") return;
-    let [e, t, n] = await Promise.all([MT("/proc/sys/fs/binfmt_misc/WSLInterop").then(() => true, () => false), bSe("/sys/hypervisor/uuid", { encoding: "utf8" }).then((r) => r.trim().toLowerCase(), () => {
+    let [e, t, n] = await Promise.all([(0, import_promises5.access)("/proc/sys/fs/binfmt_misc/WSLInterop").then(() => true, () => false), (0, import_promises5.readFile)("/sys/hypervisor/uuid", { encoding: "utf8" }).then((r) => r.trim().toLowerCase(), () => {
       return;
-    }), MT("/.dockerenv").then(() => true, () => false)]);
+    }), (0, import_promises5.access)("/.dockerenv").then(() => true, () => false)]);
     this.primedWslInteropExists = e, this.primedHypervisorUuid = t ?? "", this.primedDockerenvExists = n, this.wslEnvironment = void 0, this.npmFromWindowsPath = void 0, this.deploymentEnvironment = void 0;
   }
 };
@@ -24790,8 +24819,8 @@ function a2() {
 function c2(e) {
   if (e.initPromise) return e.initPromise;
   if (!Mn.DEBUG_CLAUDE_AGENT_SDK) return e.debugFilePath = null, e.initPromise = Promise.resolve(), e.initPromise;
-  let t = s2(Gt(), "debug");
-  return e.logStem = `sdk-${H0e()}`, e.debugFilePath = s2(t, `${e.logStem}.txt`), process.stderr.write(`SDK debug logs: ${e.debugFilePath}
+  let t = (0, import_path5.join)(Gt(), "debug");
+  return e.logStem = `sdk-${(0, import_crypto3.randomUUID)()}`, e.debugFilePath = (0, import_path5.join)(t, `${e.logStem}.txt`), process.stderr.write(`SDK debug logs: ${e.debugFilePath}
 `), e.initPromise = Sl().mkdir(t).catch(() => {
   }), e.initPromise;
 }
@@ -24938,7 +24967,7 @@ var qT = class {
     return Sc() ? "bun" : "node";
   }
   spawnLocalProcess(e) {
-    let { command: t, args: n, cwd: r, env: o, signal: s } = e, i = W0e(t, n, { cwd: r, stdio: ["pipe", "pipe", "pipe"], signal: s, env: o, windowsHide: true }), a = new Z0e("utf8"), c = false, l = false, u = false, p, f = Ie(o.DEBUG_CLAUDE_AGENT_SDK) || this.options.stderr !== void 0;
+    let { command: t, args: n, cwd: r, env: o, signal: s } = e, i = (0, import_child_process2.spawn)(t, n, { cwd: r, stdio: ["pipe", "pipe", "pipe"], signal: s, env: o, windowsHide: true }), a = new import_string_decoder.StringDecoder("utf8"), c = false, l = false, u = false, p, f = Ie(o.DEBUG_CLAUDE_AGENT_SDK) || this.options.stderr !== void 0;
     i.stderr.on("data", (g) => {
       if (u) return;
       let y = a.write(g);
@@ -25156,7 +25185,7 @@ var qT = class {
     if (this.spawnPromise) await this.spawnPromise, this.spawnPromise = void 0;
     if (!this.processStdout) throw Error("ProcessTransport output stream not available");
     if (this.exitError) throw this.exitError;
-    let e = V0e({ input: this.processStdout }), t = this.process ? (() => {
+    let e = (0, import_readline.createInterface)({ input: this.processStdout }), t = this.process ? (() => {
       let n = this.process, r = () => e.close();
       return n.on("error", r), () => n.off("error", r);
     })() : void 0;
@@ -25229,7 +25258,7 @@ function eMe(e) {
 }
 function tMe(e, t) {
   let n = t ? "native binary" : "executable", r = vd(e);
-  if (q0e(e)) return { message: t ? `Claude Code native binary at ${r} exists but failed to launch. This usually means the binary does not match this system's libc \u2014 e.g. spawning a musl-linked binary on a glibc Linux host fails because the musl dynamic loader (/lib/ld-musl-*) is missing. Specify a matching binary with options.pathToClaudeCodeExecutable.` : `Claude Code executable at ${r} exists but failed to launch.`, telemetryMessage: `Claude Code ${n} exists at the configured path but failed to launch`, errorClass: "executable_launch_failed" };
+  if ((0, import_fs3.existsSync)(e)) return { message: t ? `Claude Code native binary at ${r} exists but failed to launch. This usually means the binary does not match this system's libc \u2014 e.g. spawning a musl-linked binary on a glibc Linux host fails because the musl dynamic loader (/lib/ld-musl-*) is missing. Specify a matching binary with options.pathToClaudeCodeExecutable.` : `Claude Code executable at ${r} exists but failed to launch.`, telemetryMessage: `Claude Code ${n} exists at the configured path but failed to launch`, errorClass: "executable_launch_failed" };
   return { message: t ? `Claude Code native binary not found at ${r}. Please ensure Claude Code is installed via native installer or specify a valid path with options.pathToClaudeCodeExecutable.` : `Claude Code executable not found at ${r}. Is options.pathToClaudeCodeExecutable set?`, telemetryMessage: `Claude Code ${n} not found at the configured path`, errorClass: "executable_not_found" };
 }
 function WT(e) {
@@ -25260,7 +25289,7 @@ function sMe() {
   return e != null && e.header?.glibcVersionRuntime === void 0;
 }
 function h2(e, t = {}) {
-  let n = t.platform ?? process.platform, r = t.arch ?? process.arch, o = t.exists ?? oMe, s = t.preferMusl ?? sMe(), i = "claude", a = n === "win32" ? ".exe" : "", l = (n === "android" ? [`${lu}-linux-${r}-android`] : n === "linux" ? s ? [`${lu}-linux-${r}-musl`, `${lu}-linux-${r}`] : [`${lu}-linux-${r}`, `${lu}-linux-${r}-musl`] : [`${lu}-${n}-${r}`]).map((u) => `${u}/claude${a}`);
+  let n = t.platform ?? process.platform, r = t.arch ?? process.arch, o = t.exists ?? import_fs9.existsSync, s = t.preferMusl ?? sMe(), i = "claude", a = n === "win32" ? ".exe" : "", l = (n === "android" ? [`${lu}-linux-${r}-android`] : n === "linux" ? s ? [`${lu}-linux-${r}-musl`, `${lu}-linux-${r}`] : [`${lu}-linux-${r}`, `${lu}-linux-${r}-musl`] : [`${lu}-${n}-${r}`]).map((u) => `${u}/claude${a}`);
   for (let u of l) try {
     let p = e(u);
     if (o(p)) return p;
@@ -25416,7 +25445,7 @@ var ay = class _ay {
     this.transcriptMirrorBatcher = e;
   }
   reportMirrorError(e, t) {
-    let n = { type: "system", subtype: "mirror_error", error: t, key: e, uuid: Bp(), session_id: e.sessionId };
+    let n = { type: "system", subtype: "mirror_error", error: t, key: e, uuid: (0, import_crypto4.randomUUID)(), session_id: e.sessionId };
     this.inputStream.enqueue(n);
   }
   addCleanupCallback(e) {
@@ -25941,7 +25970,7 @@ var ay = class _ay {
         return;
       }
     }
-    let n = { type: "control_request", request_id: Bp(), request: { subtype: "mcp_message", server_name: e, message: t } };
+    let n = { type: "control_request", request_id: (0, import_crypto4.randomUUID)(), request: { subtype: "mcp_message", server_name: e, message: t } };
     Promise.resolve(this.transport.write(me(n) + `
 `)).catch((r) => {
       de(`[Query.sendMcpServerMessageToCli] Transport write failed: ${r}`, { level: "error" });
@@ -26055,7 +26084,7 @@ var yW = class {
   }
 };
 var NUe = new tt(() => new yW());
-var KUe = BUe(HUe);
+var KUe = (0, import_util3.promisify)(import_child_process3.execFile);
 var YUe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function rt(e) {
   if (typeof e !== "string") return null;
@@ -26066,11 +26095,11 @@ async function Kf(e, t, n) {
 }
 async function JUe(e, t, n, r) {
   if (r !== void 0 && r.hoverRestOn && (n === "w" || t.length > 0)) return XUe(r.source, t, n);
-  let o = GUe(e, { mode: 384, flags: n });
+  let o = (0, import_fs10.createWriteStream)(e, { mode: 384, flags: n });
   try {
     for (let s of t) if (!o.write(JSON.stringify(s) + `
-`)) await SW(o, "drain");
-    o.end(), await SW(o, "finish");
+`)) await (0, import_events3.once)(o, "drain");
+    o.end(), await (0, import_events3.once)(o, "finish");
   } catch (s) {
     throw o.destroy(), s;
   }
@@ -28131,7 +28160,7 @@ function gze(e) {
 nr(pR());
 var Tze = M(() => C({ customTitle: _() }));
 function r6(e) {
-  return { globalConfig: bO(e || e6(), ".claude.json"), userSettings: bO(e || bO(e6(), ".claude"), "settings.json") };
+  return { globalConfig: (0, import_path10.join)(e || (0, import_os6.homedir)(), ".claude.json"), userSettings: (0, import_path10.join)(e || (0, import_path10.join)((0, import_os6.homedir)(), ".claude"), "settings.json") };
 }
 function SO(e, t, n, r) {
   return e !== void 0 && t === n ? { backend: e, key: r } : void 0;
@@ -28139,11 +28168,11 @@ function SO(e, t, n, r) {
 async function tb(e, t, n, r) {
   if (r) return p1e(r, e, t, n);
   try {
-    if (n) await n6(t, n(await d1e(e)), { mode: 384 });
-    else await u1e(e, t);
+    if (n) await (0, import_promises9.writeFile)(t, n(await (0, import_promises9.readFile)(e)), { mode: 384 });
+    else await (0, import_promises9.copyFile)(e, t);
   } catch (o) {
     if (Ne(o) === void 0) throw o;
-    if (!br(o)) await t6(t, { force: true }).catch(() => {
+    if (!br(o)) await (0, import_promises9.rm)(t, { force: true }).catch(() => {
     }), de(`sessionStore resume: skipping ${e} (${Ne(o)})`);
   }
 }
@@ -28158,16 +28187,16 @@ async function p1e({ backend: e, key: t }, n, r, o) {
   if (!i?.found) return;
   let a = Buffer.from(i.value);
   try {
-    await n6(r, o ? o(a) : a, { mode: 384 });
+    await (0, import_promises9.writeFile)(r, o ? o(a) : a, { mode: 384 });
   } catch (c) {
     if (Ne(c) === void 0) throw c;
-    if (!br(c)) await t6(r, { force: true }).catch(() => {
+    if (!br(c)) await (0, import_promises9.rm)(r, { force: true }).catch(() => {
     }), de(`sessionStore resume: skipping ${n} (${Ne(c)})`);
   }
 }
 var o6 = "-credentials";
 function s6(e = "") {
-  let t = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, n = t !== void 0 ? !t : !process.env.CLAUDE_CONFIG_DIR, r = t !== void 0 ? t.normalize("NFC") : Gt(), o = n ? "" : `-${f1e("sha256").update(r).digest("hex").substring(0, 8)}`;
+  let t = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, n = t !== void 0 ? !t : !process.env.CLAUDE_CONFIG_DIR, r = t !== void 0 ? t.normalize("NFC") : Gt(), o = n ? "" : `-${(0, import_crypto7.createHash)("sha256").update(r).digest("hex").substring(0, 8)}`;
   return `Claude Code${CF().OAUTH_FILE_SUFFIX}${e}${o}`;
 }
 var h1e = /^[a-zA-Z0-9._-]+$/;
@@ -28175,7 +28204,7 @@ function i6() {
   if (process.platform === "win32") return "claude-code-user";
   let e;
   try {
-    e = process.env.USER || m1e().username;
+    e = process.env.USER || (0, import_os7.userInfo)().username;
   } catch {
     e = "claude-code-user";
   }
@@ -28399,7 +28428,7 @@ async function U6e(e, t) {
   try {
     await n.appendFile(e, t);
   } catch {
-    await n.mkdir(N6e(e)).catch(sJ), await n.appendFile(e, t);
+    await n.mkdir((0, import_path12.dirname)(e)).catch(sJ), await n.appendFile(e, t);
   }
 }
 var iJ = class {
@@ -29186,7 +29215,7 @@ var AJ = class {
     return this.managedFilePath ??= r3e(), this.managedFilePath;
   }
   getDropInDir() {
-    return this.dropInDir ??= t3e(ac(), "managed-settings.d"), this.dropInDir;
+    return this.dropInDir ??= (0, import_path13.join)(ac(), "managed-settings.d"), this.dropInDir;
   }
   clearDropInDir() {
     this.dropInDir = void 0;
@@ -29893,7 +29922,7 @@ var NZe = M(() => C({ files: I(CS()).optional().describe("Credential files or di
     for (let a of i) n.add(a);
   }
 }).optional());
-var gI = M(() => C({ enabled: R().optional(), failIfUnavailable: R().optional().describe("Exit with an error at startup if sandbox.enabled is true but the sandbox cannot start (missing dependencies or unsupported platform). When false (default), a warning is shown and commands run unsandboxed. Intended for managed-settings deployments that require sandboxing as a hard gate."), autoAllowBashIfSandboxed: R().optional(), allowUnsandboxedCommands: R().optional().describe("Allow commands to run outside the sandbox via the dangerouslyDisableSandbox parameter. When false, the dangerouslyDisableSandbox parameter is completely ignored and all commands must run sandboxed. Default: true."), network: DZe(), filesystem: LZe(), credentials: NZe(), ignoreViolations: X(_(), I(_())).optional(), enableWeakerNestedSandbox: R().optional(), enableWeakerNetworkIsolation: R().optional().describe("macOS only: Allow access to com.apple.trustd.agent in the sandbox. Needed for Go-based CLI tools (gh, gcloud, terraform, etc.) to verify TLS certificates when using httpProxyPort with a MITM proxy and custom CA. **Reduces security** \u2014 opens a potential data exfiltration vector through the trustd service. Default: false"), allowAppleEvents: R().optional().describe("macOS only: Allow sandboxed commands to send Apple Events (and look up the appleeventsd Mach service). Needed for `open`, `osascript`, and browser-based auth flows that open URLs. **Removes code-execution isolation** \u2014 sandboxed commands can launch other applications unsandboxed with no user prompt, and can script running apps (e.g. Terminal) subject to the user's per-app TCC automation consent. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored. Default: false"), excludedCommands: I(_()).optional(), ripgrep: C({ command: _(), args: I(_()).optional() }).optional().describe("Custom ripgrep configuration for bundled ripgrep support. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored."), bwrapPath: st((e) => typeof e === "string" && $8(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the bwrap (bubblewrap) binary. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings."), socatPath: st((e) => typeof e === "string" && $8(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the socat binary used for the sandbox network proxy. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings.") }).passthrough());
+var gI = M(() => C({ enabled: R().optional(), failIfUnavailable: R().optional().describe("Exit with an error at startup if sandbox.enabled is true but the sandbox cannot start (missing dependencies or unsupported platform). When false (default), a warning is shown and commands run unsandboxed. Intended for managed-settings deployments that require sandboxing as a hard gate."), autoAllowBashIfSandboxed: R().optional(), allowUnsandboxedCommands: R().optional().describe("Allow commands to run outside the sandbox via the dangerouslyDisableSandbox parameter. When false, the dangerouslyDisableSandbox parameter is completely ignored and all commands must run sandboxed. Default: true."), network: DZe(), filesystem: LZe(), credentials: NZe(), ignoreViolations: X(_(), I(_())).optional(), enableWeakerNestedSandbox: R().optional(), enableWeakerNetworkIsolation: R().optional().describe("macOS only: Allow access to com.apple.trustd.agent in the sandbox. Needed for Go-based CLI tools (gh, gcloud, terraform, etc.) to verify TLS certificates when using httpProxyPort with a MITM proxy and custom CA. **Reduces security** \u2014 opens a potential data exfiltration vector through the trustd service. Default: false"), allowAppleEvents: R().optional().describe("macOS only: Allow sandboxed commands to send Apple Events (and look up the appleeventsd Mach service). Needed for `open`, `osascript`, and browser-based auth flows that open URLs. **Removes code-execution isolation** \u2014 sandboxed commands can launch other applications unsandboxed with no user prompt, and can script running apps (e.g. Terminal) subject to the user's per-app TCC automation consent. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored. Default: false"), excludedCommands: I(_()).optional(), ripgrep: C({ command: _(), args: I(_()).optional() }).optional().describe("Custom ripgrep configuration for bundled ripgrep support. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored."), bwrapPath: st((e) => typeof e === "string" && (0, import_path16.isAbsolute)(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the bwrap (bubblewrap) binary. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings."), socatPath: st((e) => typeof e === "string" && (0, import_path16.isAbsolute)(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the socat binary used for the sandbox network proxy. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings.") }).passthrough());
 var Xm = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"];
 var G8 = [...Xm];
 var W8 = G8;
@@ -29960,7 +29989,7 @@ function pX() {
   return { sourceCommand: _().max(vI + 20).optional().catch(void 0).describe("The `command`-source command the user accepted at explicit install/update. The once-per-session background re-resolve only runs while the marketplace entry still declares this exact command; a changed command (or an entry that became command-sourced later) is skipped with a warning until the user runs an explicit update."), sourceProducerPath: _().max(4096).refine(iX, { message: "must be an absolute path" }).optional().catch(void 0).describe("The directory a `command`-source plugin was last resolved to (what its command printed). Served in place in link mode and re-copied every session in copy mode, so the sandbox write-denies it; refreshed on every install/update, including no-op updates that resolve to a new location."), previousProducerPaths: I(Ae()).transform((e) => e.filter((t) => typeof t === "string" && t.length <= 4096 && iX(t)).slice(-e5e)).optional().catch(void 0).describe("Producer directories this installation was resolved to before the current one (most recent last, bounded). A concurrent older session may still serve one of them, so the sandbox keeps write-denying them too.") };
 }
 function iX(e) {
-  return YZe.isAbsolute(e) || JZe.isAbsolute(e);
+  return import_path17.posix.isAbsolute(e) || import_path17.win32.isAbsolute(e);
 }
 var fX = /[^\x20-\x7E]| {4,}/;
 function wI() {
@@ -30053,11 +30082,11 @@ function xI(e) {
   let t = e.toLowerCase().replace(/^\[|\]$/g, "");
   if (t.endsWith(".")) t = t.slice(0, -1);
   if (t === "" || t === "localhost" || t.endsWith(".localhost")) return true;
-  if (XZe(t)) {
+  if ((0, import_net.isIPv4)(t)) {
     let [s = 0, i = 0, a = 0, c = 0] = t.split(".").map(Number);
     return s === 127 || s === 169 && i === 254 || s === 0 || s === 100 && i === 100 && a === 100 && c === 200;
   }
-  if (!QZe(t)) return false;
+  if (!(0, import_net.isIPv6)(t)) return false;
   let n = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(t);
   if (n?.[1]) return xI(n[1]);
   let r = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(t);
@@ -30407,7 +30436,7 @@ function vYe(e, t, n = {}) {
     if (n.rejectDriveRelative) {
       if (!/^[A-Za-z]:\\/.test(r) && !o && /^(\\|[A-Za-z]:)/.test(r)) return false;
     }
-    if (GX.normalize(r) !== r) return false;
+    if (import_path15.win32.normalize(r) !== r) return false;
     let s = r.split("\\");
     if (s.some((a) => a === "." || a === "..")) return false;
     if (s.some((a, c) => /[. ]$/.test(a) || a.includes(":") && !(c === 0 && /^[A-Za-z]:$/.test(a)))) return false;
@@ -30417,7 +30446,7 @@ function vYe(e, t, n = {}) {
   }
   if (n.rejectNetworkRoot && EYe(e)) return false;
   if (n.rejectMagicLinkRoot && xYe(e)) return false;
-  if (KX.normalize(e) !== e) return false;
+  if (import_path15.posix.normalize(e) !== e) return false;
   if (e.split("/").some((r) => r === "." || r === "..")) return false;
   if (/\/{2}/.test(e)) return false;
   return !e.endsWith("/") || e === "/";
@@ -30454,7 +30483,7 @@ function MYe(e) {
 }
 function NYe(e) {
   let t = LYe(e), n = MYe(e);
-  return _().max(1024, { message: "path must be at most 1024 characters" }).refine((r) => !bYe.test(r), { message: "path must not contain control, line/paragraph-separator, or invisible (default-ignorable) characters" }).refine((r) => (t === "win32" ? GX : KX).isAbsolute(r), { message: "path must be absolute" }).refine((r) => !(t === "win32" && n.requireWin32ExecutableSuffix) || wYe.test(r), { message: "path must end in .exe or .ps1 on Windows" }).refine((r) => t !== "win32" || !TYe(r), { message: CYe }).refine((r) => vYe(r, t, n), { message: t === "win32" ? 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, no component ending in "." or a space, no ":" outside the drive letter, no device-namespace (\\\\?\\) prefix, no drive-relative (\\dir or C:name) or UNC (\\\\server\\share) form' : 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, and not under a network automount root (/net/<host>, /Network/Servers) or a kernel magic-link root (/proc, /dev/fd)' }).describe("Absolute path to the helper executable");
+  return _().max(1024, { message: "path must be at most 1024 characters" }).refine((r) => !bYe.test(r), { message: "path must not contain control, line/paragraph-separator, or invisible (default-ignorable) characters" }).refine((r) => (t === "win32" ? import_path15.win32 : import_path15.posix).isAbsolute(r), { message: "path must be absolute" }).refine((r) => !(t === "win32" && n.requireWin32ExecutableSuffix) || wYe.test(r), { message: "path must end in .exe or .ps1 on Windows" }).refine((r) => t !== "win32" || !TYe(r), { message: CYe }).refine((r) => vYe(r, t, n), { message: t === "win32" ? 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, no component ending in "." or a space, no ":" outside the drive letter, no device-namespace (\\\\?\\) prefix, no drive-relative (\\dir or C:name) or UNC (\\\\server\\share) form' : 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, and not under a network automount root (/net/<host>, /Network/Servers) or a kernel magic-link root (/proc, /dev/fd)' }).describe("Absolute path to the helper executable");
 }
 var jI = [...ss, "default"];
 var DI = ["path", "script", "interpreter", "outputBehavior", "timeoutMs", "refreshIntervalMs", "defaultSettings"];
@@ -30763,7 +30792,7 @@ function KYe(e) {
 `) ? 0 : 1) };
 }
 function GYe(e) {
-  return JX("sha256").update(me(e)).digest("hex");
+  return (0, import_crypto8.createHash)("sha256").update(me(e)).digest("hex");
 }
 function WYe(e) {
   if (typeof e === "string") return e || void 0;
@@ -30775,7 +30804,7 @@ function qYe(e) {
   return me(HS({ shellSettings: e.shellSettings, envVars: e.envVars, hooks: e.hooks, claudeMd: e.claudeMd }));
 }
 function e7(e) {
-  return JX("sha256").update(qYe(e)).digest("hex");
+  return (0, import_crypto8.createHash)("sha256").update(qYe(e)).digest("hex");
 }
 function YX(e, t, n) {
   return me([e, typeof t === "string" ? t : null, typeof n === "string" ? n : null]);
@@ -30793,7 +30822,7 @@ function VYe(e) {
 }
 var r7 = "remote-settings-helper-consent";
 function YYe() {
-  return n7(Gt(), r7);
+  return (0, import_path14.join)(Gt(), r7);
 }
 function JYe(e) {
   if (e.policyHelpers === void 0 && e.extraKnownMarketplaces === void 0 && !Jm.some(({ alias: n, canonical: r }) => r === "extraKnownMarketplaces" && e[n] !== void 0)) return;
@@ -30886,7 +30915,7 @@ function KS() {
 function p7() {
   let e = "";
   try {
-    e = cJe().username;
+    e = (0, import_os8.userInfo)().username;
   } catch {
   }
   let t = [];
@@ -31147,7 +31176,7 @@ var h8e = new B7();
 function lh(e, t) {
   return new Promise((n) => {
     try {
-      f8e(e, t, { encoding: "utf-8", timeout: d7, windowsHide: true }, (r, o) => {
+      (0, import_child_process4.execFile)(e, t, { encoding: "utf-8", timeout: d7, windowsHide: true }, (r, o) => {
         n({ stdout: o ?? "", code: r ? 1 : 0 });
       });
     } catch {
@@ -31159,7 +31188,7 @@ function JI() {
   return (async () => {
     if (process.platform === "darwin") {
       let e = p7(), n = (await Promise.all(e.map(async ({ path: r, label: o }) => {
-        if (!m8e(r)) return { stdout: "", label: o, ok: false };
+        if (!(0, import_fs11.existsSync)(r)) return { stdout: "", label: o, ok: false };
         let { stdout: s, code: i } = await lh(l7, [...u7, r]);
         return { stdout: s, label: o, ok: i === 0 && !!s };
       }))).find((r) => r.ok);
@@ -31282,25 +31311,25 @@ async function S8e(e) {
       return false;
     }
   }
-  if (await t(dd(cd, "managed-settings.json"))) return true;
+  if (await t((0, import_path11.join)(cd, "managed-settings.json"))) return true;
   try {
-    let n = dd(cd, "managed-settings.d");
-    for (let r of await eQ(n, e)) if ((r.isFile() || r.isSymbolicLink()) && r.name.endsWith(".json") && !r.name.startsWith(".") && await t(dd(n, r.name))) return true;
+    let n = (0, import_path11.join)(cd, "managed-settings.d");
+    for (let r of await eQ(n, e)) if ((r.isFile() || r.isSymbolicLink()) && r.name.endsWith(".json") && !r.name.startsWith(".") && await t((0, import_path11.join)(n, r.name))) return true;
   } catch {
   }
   return false;
 }
 async function q7(e, t) {
   try {
-    if (await W7(dd(e, "managed-settings.json"), t)) return true;
+    if (await W7((0, import_path11.join)(e, "managed-settings.json"), t)) return true;
   } catch {
   }
   try {
-    let n = dd(e, "managed-settings.d"), r = await eQ(n, t);
+    let n = (0, import_path11.join)(e, "managed-settings.d"), r = await eQ(n, t);
     for (let o of r) {
       if (!(o.isFile() || o.isSymbolicLink()) || !o.name.endsWith(".json") || o.name.startsWith(".")) continue;
       try {
-        if (await W7(dd(n, o.name), t)) return true;
+        if (await W7((0, import_path11.join)(n, o.name), t)) return true;
       } catch {
       }
     }
@@ -31335,37 +31364,37 @@ async function U8e(e, t) {
     if (r?.claudeAiOauth?.refreshToken) delete r.claudeAiOauth.refreshToken, n = me(r);
   } catch {
   }
-  await cQ(t, n, { mode: 384 });
+  await (0, import_promises2.writeFile)(t, n, { mode: 384 });
 }
 function F8e() {
   if (process.platform !== "darwin") return Promise.resolve(void 0);
   let e = s6(o6);
   return new Promise((t) => {
-    C8e("security", ["find-generic-password", "-a", i6(), "-w", "-s", e], { encoding: "utf-8", timeout: 5e3, windowsHide: true }, (n, r) => t(n ? void 0 : r.trim() || void 0));
+    (0, import_child_process.execFile)("security", ["find-generic-password", "-a", i6(), "-w", "-s", e], { encoding: "utf-8", timeout: 5e3, windowsHide: true }, (n, r) => t(n ? void 0 : r.trim() || void 0));
   });
 }
 async function dQ(e, t, n, r, o = 6e4, s) {
   if (!rt(t)) return;
   let i = Qr(n, r), a = await Or(e.load({ projectKey: i, sessionId: t }), o, `SessionStore.load() timed out after ${o}ms for session ${t}`);
   if (!a || a.length === 0) return;
-  let c = xn(D8e(), `claude-resume-${rD()}`);
+  let c = (0, import_path2.join)((0, import_os.tmpdir)(), `claude-resume-${(0, import_crypto2.randomUUID)()}`);
   try {
-    let l = xn(c, "projects", i);
-    await QI(l, { recursive: true, mode: 448 });
-    let u = xn(l, `${t}.jsonl`);
+    let l = (0, import_path2.join)(c, "projects", i);
+    await (0, import_promises2.mkdir)(l, { recursive: true, mode: 448 });
+    let u = (0, import_path2.join)(l, `${t}.jsonl`);
     await Kf(u, a);
-    let p = r?.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR, f = p ?? xn(eD(), ".claude"), m;
+    let p = r?.CLAUDE_CONFIG_DIR ?? process.env.CLAUDE_CONFIG_DIR, f = p ?? (0, import_path2.join)((0, import_os.homedir)(), ".claude"), m;
     try {
-      m = await aQ(xn(f, ".credentials.json"), "utf-8");
+      m = await (0, import_promises2.readFile)((0, import_path2.join)(f, ".credentials.json"), "utf-8");
     } catch (S) {
       if (!br(S)) throw S;
     }
     if (!p && !(r ?? process.env).ANTHROPIC_API_KEY && !(r ?? process.env).CLAUDE_CODE_OAUTH_TOKEN) m = await F8e() ?? m;
-    await U8e(m, xn(c, ".credentials.json"));
-    let h = r6(Mn.CLAUDE_CONFIG_DIR), g = xn(p ?? eD(), ".claude.json");
-    await tb(g, xn(c, ".claude.json"), void 0, SO(s, g, h.globalConfig, en.globalConfig()));
-    let y = xn(f, "settings.json");
-    if (await tb(y, xn(c, "settings.json"), rQ, SO(s, y, h.userSettings, en.userSettings())), await tb(xn(f, "cowork_settings.json"), xn(c, "cowork_settings.json"), rQ), e.listSubkeys) await j8e(e, { projectKey: i, sessionId: t }, xn(l, t), o);
+    await U8e(m, (0, import_path2.join)(c, ".credentials.json"));
+    let h = r6(Mn.CLAUDE_CONFIG_DIR), g = (0, import_path2.join)(p ?? (0, import_os.homedir)(), ".claude.json");
+    await tb(g, (0, import_path2.join)(c, ".claude.json"), void 0, SO(s, g, h.globalConfig, en.globalConfig()));
+    let y = (0, import_path2.join)(f, "settings.json");
+    if (await tb(y, (0, import_path2.join)(c, "settings.json"), rQ, SO(s, y, h.userSettings, en.userSettings())), await tb((0, import_path2.join)(f, "cowork_settings.json"), (0, import_path2.join)(c, "cowork_settings.json"), rQ), e.listSubkeys) await j8e(e, { projectKey: i, sessionId: t }, (0, import_path2.join)(l, t), o);
     return c;
   } catch (l) {
     throw await qS(c), l;
@@ -31374,8 +31403,8 @@ async function dQ(e, t, n, r, o = 6e4, s) {
 async function j8e(e, t, n, r) {
   let o = await Or(e.listSubkeys({ projectKey: t.projectKey, sessionId: t.sessionId }), r, `SessionStore.listSubkeys() timed out after ${r}ms for session ${t.sessionId}`);
   for (let s of o) {
-    let i = dh(n, s + ".jsonl");
-    if (!s || lQ(s) || s.split(/[\\/]/).includes("..") || !i.startsWith(n + oD)) {
+    let i = (0, import_path2.resolve)(n, s + ".jsonl");
+    if (!s || (0, import_path2.isAbsolute)(s) || s.split(/[\\/]/).includes("..") || !i.startsWith(n + import_path2.sep)) {
       de(`[SessionStore] skipping unsafe subpath from listSubkeys: ${s}`, { level: "warn" });
       continue;
     }
@@ -31384,12 +31413,12 @@ async function j8e(e, t, n, r) {
     let c = [], l = [];
     for (let u of a) if (nD(u)) c.push(u);
     else l.push(u);
-    if (l.length > 0) await QI(tD(i), { recursive: true }), await Kf(i, l);
+    if (l.length > 0) await (0, import_promises2.mkdir)((0, import_path2.dirname)(i), { recursive: true }), await Kf(i, l);
     if (c.length > 0) {
-      let u = c.at(-1), p = dh(n, s + ".meta.json");
-      await QI(tD(p), { recursive: true });
+      let u = c.at(-1), p = (0, import_path2.resolve)(n, s + ".meta.json");
+      await (0, import_promises2.mkdir)((0, import_path2.dirname)(p), { recursive: true });
       let { type: f, ...m } = u;
-      await cQ(p, me(m), { mode: 384 });
+      await (0, import_promises2.writeFile)(p, me(m), { mode: 384 });
     }
   }
 }
@@ -31409,7 +31438,7 @@ function sD(e, t) {
   c6(!!v, mD ?? "default", b);
   let ZS = u.pathToClaudeCodeExecutable;
   if (!ZS) {
-    let lr = M8e(import.meta.url), eo = I8e(lr), Wi = h2((hc) => eo.resolve(hc));
+    let lr = (0, import_url2.fileURLToPath)(import_meta.url), eo = (0, import_module.createRequire)(lr), Wi = h2((hc) => eo.resolve(hc));
     if (!Wi) throw Error(`Native CLI binary for ${process.platform}-${process.arch} not found. Reinstall @anthropic-ai/claude-agent-sdk without --omit=optional, or set options.pathToClaudeCodeExecutable.`);
     ZS = Wi;
   }
@@ -31449,7 +31478,7 @@ function sD(e, t) {
   }
   let yD = new qT({ abortController: h, additionalDirectories: g, agent: y, betas: x, cwd: U, debug: D, debugFile: F, executable: oe, executableArgs: _e, extraArgs: dD ? { ...ke, workload: dD } : ke, pathToClaudeCodeExecutable: ZS, env: Pn, forkSession: wt, stderr: kQ, thinkingConfig: pd, effort: Gi, maxTurns: ph, maxBudgetUsd: yQ, taskBudget: bQ, model: SQ, fallbackModel: vt, jsonSchema: hD, permissionMode: mD, allowDangerouslySkipPermissions: xQ, permissionPromptToolName: vQ, continueConversation: Ut ? void 0 : A, resume: pD, resumeSessionAt: AQ, resumeDropsTurn: TQ, sessionId: CQ, settings: typeof i === "object" ? me(i) : i, managedSettings: a ? me(a) : void 0, settingSources: c, skills: fD, allowedTools: b, disallowedTools: K, tools: V, mcpServers: gD, strictMcpConfig: RQ, canUseTool: !!v, hooks: !!ht, includeHookEvents: cr, includePartialMessages: Ot, persistSession: Pt, sessionMirror: !!Ut, plugins: wQ, sandbox: l, spawnClaudeCodeProcess: u.spawnClaudeCodeProcess, deferSpawn: o }), OQ = { systemPrompt: p, appendSystemPrompt: f, planModeInstructions: u.planModeInstructions, appendSubagentSystemPrompt: u.appendSubagentSystemPrompt, toolAliases: u.toolAliases, excludeDynamicSections: m, agents: S, title: u.title, skills: fD, webSearchIsolationExemptMcpServers: u.webSearchIsolationExemptMcpServers, promptSuggestions: u.promptSuggestions, agentProgressSummaries: u.agentProgressSummaries, forwardSubagentText: se, supportedDialogKinds: je, perTaskStopAffordance: Re }, JS = new ay(yD, n, v, ht, h, _D, hD, OQ, Q, lD, uD, te);
   if (Ut) {
-    let lr = () => xn(Pn.CLAUDE_CONFIG_DIR ?? xn(eD(), ".claude"), "projects"), eo = gt === "eager", Wi = new JT(async (hc, XS) => {
+    let lr = () => (0, import_path2.join)(Pn.CLAUDE_CONFIG_DIR ?? (0, import_path2.join)((0, import_os.homedir)(), ".claude"), "projects"), eo = gt === "eager", Wi = new JT(async (hc, XS) => {
       let fd = iQ(hc, lr());
       if (fd) await Ut.append(fd, XS);
       else de(`[SessionStore] dropping mirror frame: filePath ${hc} is not under ${lr()} -- subprocess CLAUDE_CONFIG_DIR likely differs from parent (custom spawnClaudeCodeProcess / container?)`, { level: "warn" });
@@ -31469,7 +31498,7 @@ function iD(e, t, n, r) {
 var $8e = /* @__PURE__ */ new Set(["EBUSY", "EMFILE", "ENFILE", "ENOTEMPTY", "EPERM"]);
 async function qS(e) {
   for (let t = 0; ; t++) try {
-    return await P8e(e, { recursive: true, force: true });
+    return await (0, import_promises2.rm)(e, { recursive: true, force: true });
   } catch (n) {
     if (t >= 4 || !$8e.has(Ne(n) ?? "")) return;
     await to((t + 1) * 100);
@@ -31485,7 +31514,7 @@ function PGt({ prompt: e, options: t }) {
   return iD(n, r, e, o), n;
 }
 function H8e(e, t) {
-  let { queryInstance: n, transport: r, abortController: o, processEnv: s } = sD({ ...t }, { isSingleUserTurn: typeof e === "string", deferSpawn: true }), i = dh(t.cwd ?? "."), a = t.sessionStore, c = t.loadTimeoutMs ?? 6e4, l = t.resume;
+  let { queryInstance: n, transport: r, abortController: o, processEnv: s } = sD({ ...t }, { isSingleUserTurn: typeof e === "string", deferSpawn: true }), i = (0, import_path2.resolve)(t.cwd ?? "."), a = t.sessionStore, c = t.loadTimeoutMs ?? 6e4, l = t.resume;
   return (async () => {
     if (!l) l = (await Or(a.listSessions(Qr(i, t.env)), c, `SessionStore.listSessions() timed out after ${c}ms`)).slice().sort((f, m) => m.mtime - f.mtime)[0]?.sessionId;
     if (!l) return;
@@ -31507,9 +31536,9 @@ function H8e(e, t) {
   }), iD(n, r, e, o), n;
 }
 function pQ(e) {
-  let t = dh(e ?? "."), n;
+  let t = (0, import_path2.resolve)(e ?? "."), n;
   try {
-    n = R8e(t);
+    n = (0, import_fs.realpathSync)(t);
   } catch {
     n = t;
   }
@@ -31524,8 +31553,8 @@ function nD(e) {
   return typeof e === "object" && e !== null && "type" in e && e.type === "agent_metadata";
 }
 function iQ(e, t) {
-  let n = uQ(t, e), r = n.split(oD);
-  if (r[0] === ".." || lQ(n)) return null;
+  let n = (0, import_path2.relative)(t, e), r = n.split(import_path2.sep);
+  if (r[0] === ".." || (0, import_path2.isAbsolute)(n)) return null;
   if (r.length < 2) return null;
   let o = r[0], s = r[1];
   if (r.length === 2 && s.endsWith(".jsonl")) return { projectKey: o, sessionId: s.replace(/\.jsonl$/, "") };
@@ -31537,13 +31566,10 @@ function iQ(e, t) {
 }
 
 // server/claude-provider.ts
-import {
-  negotiateProviderCapabilities,
-  requireProviderCapabilities
-} from "@getpaseo/plugin/server/provider";
+var import_provider = require("@getpaseo/plugin/server/provider");
 
 // server/translate.ts
-import { createHash } from "node:crypto";
+var import_node_crypto2 = require("node:crypto");
 
 // server/llm-client.ts
 function createLlmClient(config2, options = {}) {
@@ -31617,7 +31643,7 @@ function describeError(error62) {
 }
 
 // shared/translate.ts
-import { defineRpc, defineSettings } from "@getpaseo/plugin";
+var import_plugin = require("@getpaseo/plugin");
 
 // node_modules/zod/v4/classic/external.js
 var external_exports = {};
@@ -51293,7 +51319,7 @@ var TRANSLATE_CLAUDE_PROVIDER_LABEL = "Translate (Claude Code)";
 var TRANSLATION_TEXT_LIMIT = 1e5;
 var TRANSLATION_CACHE_CAPACITY = 500;
 var translateDirectionSchema = external_exports.enum(["user-to-agent", "agent-to-user"]);
-var translateSettings = defineSettings({
+var translateSettings = (0, import_plugin.defineSettings)({
   id: "translate",
   scope: "host",
   version: 1,
@@ -51313,7 +51339,7 @@ var translateSettings = defineSettings({
     translationTimeoutMs: external_exports.number().int().min(1e3).max(6e5).default(3e4)
   })
 });
-var translateTextRpc = defineRpc({
+var translateTextRpc = (0, import_plugin.defineRpc)({
   name: "translate.text",
   input: external_exports.object({
     text: external_exports.string().min(1),
@@ -51323,7 +51349,7 @@ var translateTextRpc = defineRpc({
     text: external_exports.string()
   })
 });
-var translateProvidersRpc = defineRpc({
+var translateProvidersRpc = (0, import_plugin.defineRpc)({
   name: "translate.providers.list",
   input: external_exports.object({}),
   output: external_exports.object({
@@ -51405,7 +51431,7 @@ function createTranslator(deps) {
   };
 }
 function cacheKey(text, direction, pair, model) {
-  const digest = createHash("sha256").update(text, "utf8").digest("hex");
+  const digest = (0, import_node_crypto2.createHash)("sha256").update(text, "utf8").digest("hex");
   return `${direction}:${pair.source}>${pair.target}:${model}:${digest}`;
 }
 
@@ -51482,7 +51508,7 @@ function createTranslateClaudeProvider(deps) {
       if (!request.versions.includes(1)) {
         throw new Error("Translate Claude provider requires provider protocol version 1");
       }
-      const capabilities = negotiateProviderCapabilities(request.capabilities, CAPABILITIES);
+      const capabilities = (0, import_provider.negotiateProviderCapabilities)(request.capabilities, CAPABILITIES);
       const connection = {
         version: 1,
         capabilities,
@@ -51520,11 +51546,11 @@ async function dispatch(input2, context, capabilities) {
       return;
     }
     case "session.open":
-      requireProviderCapabilities(capabilities, input2);
+      (0, import_provider.requireProviderCapabilities)(capabilities, input2);
       await openSession(input2, context, capabilities);
       return;
     case "session.prompt":
-      requireProviderCapabilities(capabilities, input2);
+      (0, import_provider.requireProviderCapabilities)(capabilities, input2);
       await promptSession(input2, context);
       return;
     case "session.interrupt": {
@@ -51559,7 +51585,7 @@ async function dispatch(input2, context, capabilities) {
       });
       return;
     case "sessions":
-      requireProviderCapabilities(capabilities, input2);
+      (0, import_provider.requireProviderCapabilities)(capabilities, input2);
       context.emit({
         type: "request.failed",
         requestId: input2.requestId,
@@ -51657,7 +51683,7 @@ async function promptSession(input2, context) {
     return;
   }
   await ensureQuery(session, context);
-  const turnId = randomUUID2();
+  const turnId = (0, import_node_crypto3.randomUUID)();
   session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
   session.interrupted = false;
   context.emit({
@@ -51927,9 +51953,10 @@ async function teardownSession(session) {
 function describe3(error62) {
   return error62 instanceof Error ? error62.message : String(error62);
 }
-export {
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
   createTranslateClaudeProvider
-};
+});
 /*! Bundled license information:
 
 @anthropic-ai/claude-agent-sdk/sdk.mjs:

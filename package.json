@@ -13,7 +13,7 @@
     "icon.svg"
   ],
   "scripts": {
-    "build": "esbuild server/claude-provider.ts --bundle --platform=node --format=esm --target=node20 --outfile=server/claude-provider.dist.mjs --external:@getpaseo/plugin --external:@getpaseo/plugin/*",
+    "build": "node scripts/build.mjs && node scripts/verify-bundle.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --bail=1"
   },
