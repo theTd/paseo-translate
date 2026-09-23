@@ -1,11 +1,12 @@
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
-import { Text } from "react-native";
+import { Text, TextInput } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useRpc, useSettings, type PluginSurfaceProps, type SettingsState } from "@getpaseo/plugin/client";
 import {
   SettingsAction,
   SettingsCard,
   SettingsInput,
+  SettingsRow,
   SettingsSection,
   SettingsSelect,
   SettingsSwitch,
@@ -20,6 +21,7 @@ interface Draft {
   endpointApiKey: string;
   endpointModel: string;
   reasoningEffort: "default" | "minimal" | "low" | "medium" | "high";
+  systemPrompt: string;
   userLanguage: string;
   agentLanguage: string;
   commandText: string;
@@ -39,6 +41,7 @@ function draftFrom(settings: ReadySettings): Draft {
     endpointApiKey: values.endpointApiKey,
     endpointModel: values.endpointModel,
     reasoningEffort: values.translationReasoningEffort,
+    systemPrompt: values.translationSystemPrompt,
     userLanguage: values.userLanguage,
     agentLanguage: values.agentLanguage,
     commandText: values.innerAgentCommand.join(" "),
@@ -54,6 +57,21 @@ function draftFrom(settings: ReadySettings): Draft {
 export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
   const settings = useSettings(translateSettings);
   const mutedStyle = useMemo(() => ({ color: theme.colors.foregroundMuted }), [theme]);
+  // Multiline prompt editor: the form kit's SettingsInput is single-line, so
+  // this row composes SettingsRow with a raw TextInput on theme tokens.
+  const promptInputStyle = useMemo(
+    () => ({
+      color: theme.colors.foreground,
+      borderColor: theme.colors.border,
+      borderWidth: 1,
+      borderRadius: 8,
+      paddingVertical: 8,
+      paddingHorizontal: 10,
+      minHeight: 72,
+      textAlignVertical: "top" as const,
+    }),
+    [theme],
+  );
   const [draft, setDraft] = useState<Draft | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
   // Bumped only when the displayed form must reset (discard or save); editing
@@ -124,6 +142,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     (reasoningEffort: Draft["reasoningEffort"]) => patch({ reasoningEffort: reasoningEffort }),
     [patch],
   );
+  const changeSystemPrompt = useCallback((systemPrompt: string) => patch({ systemPrompt }), [patch]);
   const changeUserLanguage = useCallback(
     (userLanguage: string) => patch({ userLanguage }),
     [patch],
@@ -178,6 +197,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         endpointApiKey: active.endpointApiKey,
         endpointModel: active.endpointModel,
         translationReasoningEffort: active.reasoningEffort,
+        translationSystemPrompt: active.systemPrompt,
         userLanguage: active.userLanguage,
         agentLanguage: active.agentLanguage,
         innerAgentCommand: command,
@@ -300,6 +320,21 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           disabled={settings.saving}
           onValueChange={changeReasoningEffort}
         />
+        <SettingsRow
+          label="Translation system prompt"
+          hint="Custom instructions for the translation model. Empty uses the built-in default. {source} and {target} insert the language pair; editing this re-translates cached text."
+        >
+          <TextInput
+            accessibilityLabel="Translation system prompt"
+            value={active.systemPrompt}
+            onChangeText={changeSystemPrompt}
+            editable={!settings.saving}
+            multiline
+            placeholder="Empty = built-in default prompt"
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={promptInputStyle}
+          />
+        </SettingsRow>
       </SettingsCard>
       <SettingsCard key={`agent-${formKey}`}>
         <SettingsInput

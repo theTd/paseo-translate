@@ -51321,7 +51321,7 @@ function date4(params) {
 var TRANSLATE_CLAUDE_PROVIDER_ID = "translate-claude";
 var TRANSLATE_CLAUDE_PROVIDER_LABEL = "Translate (Claude Code)";
 var TRANSLATION_TEXT_LIMIT = 1e5;
-var TRANSLATION_CACHE_CAPACITY = 500;
+var TRANSLATION_CACHE_CAPACITY = 1e4;
 var translateDirectionSchema = external_exports.enum(["user-to-agent", "agent-to-user"]);
 var translateSettings = (0, import_plugin.defineSettings)({
   id: "translate",
@@ -51333,6 +51333,12 @@ var translateSettings = (0, import_plugin.defineSettings)({
     endpointModel: external_exports.string().trim().default(""),
     /** Reasoning effort sent with each translation request (OpenAI-compatible). */
     translationReasoningEffort: external_exports.enum(["default", "minimal", "low", "medium", "high"]).default("default"),
+    /**
+     * Custom system prompt for the translation model; empty string uses the
+     * built-in default. `{source}` and `{target}` placeholders resolve per
+     * request (see resolveTranslationSystemPrompt).
+     */
+    translationSystemPrompt: external_exports.string().default(""),
     userLanguage: external_exports.string().trim().min(1).default("en"),
     agentLanguage: external_exports.string().trim().min(1).default("de"),
     innerAgentCommand: external_exports.array(external_exports.string().trim().min(1)).default([]),
@@ -51392,11 +51398,44 @@ function translationSystemPrompt(pair) {
     "Output ONLY the translation, with no preamble, quotes, or explanations."
   ].join(" ");
 }
+function resolveTranslationSystemPrompt(template, pair) {
+  const custom2 = template.trim();
+  if (custom2.length === 0) return translationSystemPrompt(pair);
+  return custom2.replaceAll("{source}", pair.source).replaceAll("{target}", pair.target);
+}
+
+// server/translation-cache-store.ts
+function createMemoryTranslationCacheStore(options) {
+  const maxEntries = options?.maxEntries ?? TRANSLATION_CACHE_CAPACITY;
+  const entries = /* @__PURE__ */ new Map();
+  return {
+    get(key) {
+      const value = entries.get(key);
+      if (value === void 0) return void 0;
+      refreshRecency(entries, key, value);
+      return value;
+    },
+    set(key, value) {
+      refreshRecency(entries, key, value);
+      evictOldestIfNeeded(entries, maxEntries);
+    }
+  };
+}
+function refreshRecency(entries, key, value) {
+  entries.delete(key);
+  entries.set(key, value);
+}
+function evictOldestIfNeeded(entries, maxEntries) {
+  while (entries.size > maxEntries) {
+    const oldest = entries.keys().next().value;
+    if (oldest === void 0) return;
+    entries.delete(oldest);
+  }
+}
 
 // server/translate.ts
 function createTranslator(deps) {
-  const capacity = deps.cacheCapacity ?? TRANSLATION_CACHE_CAPACITY;
-  const cache = /* @__PURE__ */ new Map();
+  const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
   return {
     async translate(text, direction) {
       if (text.trim().length === 0) return text;
@@ -51407,19 +51446,18 @@ function createTranslator(deps) {
       }
       const values = await deps.loadConfig();
       const pair = resolveLanguagePair(values, direction);
-      const key = cacheKey(
+      const systemPrompt = resolveTranslationSystemPrompt(values.translationSystemPrompt, pair);
+      const key = cacheKey({
         text,
         direction,
         pair,
-        values.endpointModel,
-        values.translationReasoningEffort
-      );
+        systemPrompt,
+        endpointBaseUrl: values.endpointBaseUrl,
+        endpointModel: values.endpointModel,
+        reasoningEffort: values.translationReasoningEffort
+      });
       const cached2 = cache.get(key);
-      if (cached2 !== void 0) {
-        cache.delete(key);
-        cache.set(key, cached2);
-        return cached2;
-      }
+      if (cached2 !== void 0) return cached2;
       const client = createLlmClient(
         {
           baseUrl: values.endpointBaseUrl,
@@ -51431,21 +51469,28 @@ function createTranslator(deps) {
         { fetchFn: deps.fetchFn }
       );
       const translated = await client.complete([
-        { role: "system", content: translationSystemPrompt(pair) },
+        { role: "system", content: systemPrompt },
         { role: "user", content: text }
       ]);
       cache.set(key, translated);
-      if (cache.size > capacity) {
-        const oldest = cache.keys().next().value;
-        if (oldest !== void 0) cache.delete(oldest);
-      }
       return translated;
     }
   };
 }
-function cacheKey(text, direction, pair, model, reasoningEffort) {
-  const digest = (0, import_node_crypto2.createHash)("sha256").update(text, "utf8").digest("hex");
-  return `${direction}:${pair.source}>${pair.target}:${model}:${reasoningEffort}:${digest}`;
+function cacheKey(input2) {
+  return JSON.stringify({
+    direction: input2.direction,
+    source: input2.pair.source,
+    target: input2.pair.target,
+    baseUrl: digest(input2.endpointBaseUrl),
+    model: digest(input2.endpointModel),
+    effort: input2.reasoningEffort,
+    prompt: digest(input2.systemPrompt),
+    text: digest(input2.text)
+  });
+}
+function digest(value) {
+  return (0, import_node_crypto2.createHash)("sha256").update(value, "utf8").digest("hex");
 }
 
 // server/prompt-text.ts

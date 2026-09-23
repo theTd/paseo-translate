@@ -6,6 +6,10 @@ import { createTranslateProvider } from "./server/provider";
 import { createTranslateClaudeProvider } from "./server/claude-provider.dist.cjs";
 import { createTranslateHandler } from "./server/translate";
 import {
+  createPersistentTranslationCacheStore,
+  defaultTranslationCacheDirectory,
+} from "./server/translation-cache-store";
+import {
   assertConfigured,
   translateProvidersRpc,
   translateSettings,
@@ -24,9 +28,16 @@ export default function contribute(server: PluginServerContext) {
     assertConfigured(state.values);
     return state.values;
   };
-  server.registerProvider(createTranslateProvider({ loadConfig }));
-  server.registerProvider(createTranslateClaudeProvider({ loadConfig }));
-  server.handle(translateTextRpc, createTranslateHandler({ loadConfig }));
+  // One disk-backed cache shared by every translator in this process
+  // (ACP provider, Claude provider, timeline renderer RPC): translations
+  // survive daemon restarts and plugin updates, so reopening a session is
+  // served from disk instead of re-billing the endpoint.
+  const cacheStore = createPersistentTranslationCacheStore({
+    directory: defaultTranslationCacheDirectory(),
+  });
+  server.registerProvider(createTranslateProvider({ loadConfig, cacheStore }));
+  server.registerProvider(createTranslateClaudeProvider({ loadConfig, cacheStore }));
+  server.handle(translateTextRpc, createTranslateHandler({ loadConfig, cacheStore }));
   server.handle(translateProvidersRpc, createProvidersHandler());
   return () => {};
 }

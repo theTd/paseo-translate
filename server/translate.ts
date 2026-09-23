@@ -2,11 +2,15 @@ import { createHash } from "node:crypto";
 import type { RpcInput } from "@getpaseo/plugin";
 import { createLlmClient } from "./llm-client";
 import {
-  TRANSLATION_CACHE_CAPACITY,
+  createMemoryTranslationCacheStore,
+  type TranslationCacheStore,
+} from "./translation-cache-store";
+import {
   TRANSLATION_TEXT_LIMIT,
   resolveLanguagePair,
+  resolveTranslationSystemPrompt,
   translateTextRpc,
-  translationSystemPrompt,
+  type LanguagePair,
   type TranslateDirection,
   type TranslateSettingsValues,
 } from "../shared/translate";
@@ -14,8 +18,13 @@ import {
 export interface TranslatorDeps {
   loadConfig(): Promise<TranslateSettingsValues>;
   fetchFn?: typeof fetch;
-  /** Test seam; defaults to TRANSLATION_CACHE_CAPACITY. */
-  cacheCapacity?: number;
+  /**
+   * Cache store consulted before every endpoint call. Defaults to an
+   * in-memory store so tests and unused paths stay hermetic; the plugin
+   * entry injects one persistent store shared by every translator in the
+   * process.
+   */
+  cacheStore?: TranslationCacheStore;
 }
 
 export interface Translator {
@@ -28,8 +37,7 @@ export interface Translator {
  * settings save applies to the next translation without a plugin reload.
  */
 export function createTranslator(deps: TranslatorDeps): Translator {
-  const capacity = deps.cacheCapacity ?? TRANSLATION_CACHE_CAPACITY;
-  const cache = new Map<string, string>();
+  const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
   return {
     async translate(text, direction) {
       if (text.trim().length === 0) return text;
@@ -40,23 +48,24 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       }
       const values = await deps.loadConfig();
       const pair = resolveLanguagePair(values, direction);
+      const systemPrompt = resolveTranslationSystemPrompt(values.translationSystemPrompt, pair);
       // The key covers everything that changes the output: direction,
-      // language pair, model, reasoning effort, and text. Editing settings
-      // invalidates old entries instead of serving stale translations.
-      const key = cacheKey(
+      // language pair, effective system prompt, endpoint (base URL + model,
+      // so switching providers invalidates), reasoning effort, and text.
+      // Editing settings invalidates old entries instead of serving stale
+      // translations.
+      const key = cacheKey({
         text,
         direction,
         pair,
-        values.endpointModel,
-        values.translationReasoningEffort,
-      );
+        systemPrompt,
+        endpointBaseUrl: values.endpointBaseUrl,
+        endpointModel: values.endpointModel,
+        reasoningEffort: values.translationReasoningEffort,
+      });
       const cached = cache.get(key);
-      if (cached !== undefined) {
-        // Refresh recency so the cache stays least-recently-used.
-        cache.delete(key);
-        cache.set(key, cached);
-        return cached;
-      }
+      // get() refreshes recency inside the store; a hit skips the endpoint.
+      if (cached !== undefined) return cached;
       const client = createLlmClient(
         {
           baseUrl: values.endpointBaseUrl,
@@ -68,14 +77,10 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         { fetchFn: deps.fetchFn },
       );
       const translated = await client.complete([
-        { role: "system", content: translationSystemPrompt(pair) },
+        { role: "system", content: systemPrompt },
         { role: "user", content: text },
       ]);
       cache.set(key, translated);
-      if (cache.size > capacity) {
-        const oldest = cache.keys().next().value;
-        if (oldest !== undefined) cache.delete(oldest);
-      }
       return translated;
     },
   };
@@ -97,13 +102,34 @@ export function createTranslateHandler(deps: TranslatorDeps) {
   };
 }
 
-function cacheKey(
-  text: string,
-  direction: TranslateDirection,
-  pair: { source: string; target: string },
-  model: string,
-  reasoningEffort: string,
-): string {
-  const digest = createHash("sha256").update(text, "utf8").digest("hex");
-  return `${direction}:${pair.source}>${pair.target}:${model}:${reasoningEffort}:${digest}`;
+interface CacheKeyInput {
+  text: string;
+  direction: TranslateDirection;
+  pair: LanguagePair;
+  systemPrompt: string;
+  endpointBaseUrl: string;
+  endpointModel: string;
+  reasoningEffort: string;
+}
+
+/**
+ * Opaque cache key. JSON encoding delimits every field, so pathological
+ * language or model strings cannot collide across settings combinations;
+ * long fields enter as sha-256 digests.
+ */
+function cacheKey(input: CacheKeyInput): string {
+  return JSON.stringify({
+    direction: input.direction,
+    source: input.pair.source,
+    target: input.pair.target,
+    baseUrl: digest(input.endpointBaseUrl),
+    model: digest(input.endpointModel),
+    effort: input.reasoningEffort,
+    prompt: digest(input.systemPrompt),
+    text: digest(input.text),
+  });
+}
+
+function digest(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }

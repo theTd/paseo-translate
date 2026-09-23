@@ -5,8 +5,10 @@ import {
   assertAcpConfigured,
   assertConfigured,
   knownAcpCommand,
+  resolveTranslationSystemPrompt,
   translateProvidersRpc,
   translateSettings,
+  translationSystemPrompt,
   type TranslateSettingsValues,
 } from "./translate";
 
@@ -15,6 +17,7 @@ const configured: TranslateSettingsValues = {
   endpointApiKey: "key",
   endpointModel: "mt",
   translationReasoningEffort: "default" as const,
+  translationSystemPrompt: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
@@ -36,6 +39,7 @@ describe("translate settings schema", () => {
     expect(parsed.data.innerAgentCommand).toEqual([]);
     expect(parsed.data.userLanguage).toBe("en");
     expect(parsed.data.agentLanguage).toBe("de");
+    expect(parsed.data.translationSystemPrompt).toBe("");
     expect(parsed.data.translationTimeoutMs).toBe(30_000);
   });
 
@@ -73,6 +77,28 @@ describe("translate settings schema", () => {
     for (const candidate of ACP_ADAPTER_PRESETS) {
       expect(candidate.windowsCommand.slice(0, 3)).toEqual(["cmd", "/c", "npx"]);
     }
+  });
+
+  it("resolves the effective system prompt from a custom template", () => {
+    const pair = { source: "en", target: "de" };
+    // Empty or whitespace-only falls back to the built-in default.
+    expect(resolveTranslationSystemPrompt("", pair)).toBe(translationSystemPrompt(pair));
+    expect(resolveTranslationSystemPrompt("   \n\t", pair)).toBe(translationSystemPrompt(pair));
+    // {source}/{target} placeholders resolve so one template serves both
+    // directions.
+    expect(resolveTranslationSystemPrompt("Übersetze {source} nach {target}.", pair)).toBe(
+      "Übersetze en nach de.",
+    );
+    expect(
+      resolveTranslationSystemPrompt("Translate {target} text to {source}.", {
+        source: "de",
+        target: "en",
+      }),
+    ).toBe("Translate en text to de.");
+    // A template without placeholders passes through verbatim.
+    expect(resolveTranslationSystemPrompt("Translate everything to German.", pair)).toBe(
+      "Translate everything to German.",
+    );
   });
 
   it("shapes the providers list RPC contract", () => {

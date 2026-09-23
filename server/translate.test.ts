@@ -1,16 +1,33 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { createTranslateHandler, createTranslator } from "./translate";
+import {
+  createMemoryTranslationCacheStore,
+  createPersistentTranslationCacheStore,
+} from "./translation-cache-store";
 import {
   resolveLanguagePair,
   translationSystemPrompt,
   type TranslateSettingsValues,
 } from "../shared/translate";
 
+const tempRoots: string[] = [];
+
+afterEach(() => {
+  while (tempRoots.length > 0) {
+    const root = tempRoots.pop();
+    if (root !== undefined) rmSync(root, { recursive: true, force: true });
+  }
+});
+
 const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
   translationReasoningEffort: "default" as const,
+  translationSystemPrompt: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
@@ -80,7 +97,7 @@ describe("translate service", () => {
     const translator = createTranslator({
       loadConfig: async () => values,
       fetchFn: translatingFetch(calls, (text) => `T:${text}`),
-      cacheCapacity: 1,
+      cacheStore: createMemoryTranslationCacheStore({ maxEntries: 1 }),
     });
     await translator.translate("a", "user-to-agent");
     await translator.translate("b", "user-to-agent");
@@ -88,7 +105,53 @@ describe("translate service", () => {
     expect(calls).toHaveLength(3);
   });
 
-  it("retranslates after the language pair or model changes", async () => {
+  it("serves translations from the persistent cache across translator instances", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "translate-store-"));
+    tempRoots.push(directory);
+    const firstCalls: Captured[] = [];
+    const first = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch(firstCalls, (text) => `T:${text}`),
+      cacheStore: createPersistentTranslationCacheStore({ directory }),
+    });
+    await expect(first.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
+    expect(firstCalls).toHaveLength(1);
+
+    // A fresh translator over the same directory (the reopened-session case)
+    // must not bill the endpoint again.
+    const secondCalls: Captured[] = [];
+    const second = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch(secondCalls, (text) => `T:${text}`),
+      cacheStore: createPersistentTranslationCacheStore({ directory }),
+    });
+    await expect(second.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
+    expect(secondCalls).toHaveLength(0);
+  });
+
+  it("sends a custom system prompt and invalidates the cache when it changes", async () => {
+    const calls: Captured[] = [];
+    let current = { ...values, translationSystemPrompt: "Custom {source} -> {target} engine." };
+    const translator = createTranslator({
+      loadConfig: async () => current,
+      fetchFn: translatingFetch(calls, (text) => `T:${text}`),
+    });
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls[0].body?.messages[0]).toEqual({
+      role: "system",
+      content: "Custom en -> de engine.",
+    });
+    // Same prompt: served from cache without a second endpoint call.
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls).toHaveLength(1);
+    // Editing the prompt changes the output, so the cache must miss.
+    current = { ...values, translationSystemPrompt: "Rewritten {source} -> {target} engine." };
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].body?.messages[0]?.content).toBe("Rewritten en -> de engine.");
+  });
+
+  it("retranslates after the language pair, model, or endpoint changes", async () => {
     const calls: Captured[] = [];
     let current = values;
     const translator = createTranslator({
@@ -102,7 +165,11 @@ describe("translate service", () => {
     await translator.translate("Hello", "user-to-agent");
     current = { ...values, translationReasoningEffort: "high" };
     await translator.translate("Hello", "user-to-agent");
-    expect(calls).toHaveLength(4);
+    // Switching providers with the same model name must not reuse the other
+    // endpoint's translations.
+    current = { ...values, endpointBaseUrl: "https://other.example/v1" };
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls).toHaveLength(5);
     expect(calls[1].body?.messages[0]?.content).toContain("from en to fr");
     expect(calls[2].body?.messages[0]?.content).toContain("from en to de");
   });

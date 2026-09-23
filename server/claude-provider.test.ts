@@ -14,6 +14,7 @@ const values: TranslateSettingsValues = {
   endpointApiKey: "key",
   endpointModel: "mt",
   translationReasoningEffort: "default" as const,
+  translationSystemPrompt: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: [],

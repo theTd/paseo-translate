@@ -11,6 +11,11 @@ export declare function createTranslateClaudeProvider(deps: {
   loadConfig(): Promise<Record<string, unknown>>;
   /** Translation endpoint override for tests. */
   fetchFn?: typeof fetch;
+  /** Translation cache store; injects the shared persistent one in production. */
+  cacheStore?: {
+    get(key: string): string | undefined;
+    set(key: string, value: string): void;
+  };
   /** Query factory override for tests. */
   queryFactory?: (params: { prompt: AsyncIterable<unknown>; options: unknown }) => {
     interrupt(): Promise<unknown>;

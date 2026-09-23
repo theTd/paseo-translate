@@ -21,7 +21,14 @@ export const TRANSLATED_MESSAGE_VERSION = 1;
 
 /** Hard cap on translated text so one giant message cannot stall a prompt turn. */
 export const TRANSLATION_TEXT_LIMIT = 100_000;
-export const TRANSLATION_CACHE_CAPACITY = 500;
+/**
+ * Cache capacity shared by the in-memory image and the persisted JSONL file
+ * (entries, not bytes — a translation is at most TRANSLATION_TEXT_LIMIT
+ * chars). Large enough that reopening old sessions is served entirely from
+ * cache; the file is compacted back to this bound on load, and mid-session
+ * once appends far exceed it.
+ */
+export const TRANSLATION_CACHE_CAPACITY = 10_000;
 
 export const translateDirectionSchema = z.enum(["user-to-agent", "agent-to-user"]);
 export type TranslateDirection = z.output<typeof translateDirectionSchema>;
@@ -45,6 +52,12 @@ export const translateSettings = defineSettings({
     translationReasoningEffort: z
       .enum(["default", "minimal", "low", "medium", "high"])
       .default("default"),
+    /**
+     * Custom system prompt for the translation model; empty string uses the
+     * built-in default. `{source}` and `{target}` placeholders resolve per
+     * request (see resolveTranslationSystemPrompt).
+     */
+    translationSystemPrompt: z.string().default(""),
     userLanguage: z.string().trim().min(1).default("en"),
     agentLanguage: z.string().trim().min(1).default("de"),
     innerAgentCommand: z.array(z.string().trim().min(1)).default([]),
@@ -199,4 +212,16 @@ export function translationSystemPrompt(pair: LanguagePair): string {
     "Preserve Markdown structure, code blocks, inline code, URLs, and command syntax exactly as given.",
     "Output ONLY the translation, with no preamble, quotes, or explanations.",
   ].join(" ");
+}
+
+/**
+ * Effective system prompt for translation requests: the custom template when
+ * set, otherwise the built-in default. `{source}` and `{target}` in a custom
+ * template resolve to the current language pair, so one template serves both
+ * directions (user→agent and agent→user flip the pair).
+ */
+export function resolveTranslationSystemPrompt(template: string, pair: LanguagePair): string {
+  const custom = template.trim();
+  if (custom.length === 0) return translationSystemPrompt(pair);
+  return custom.replaceAll("{source}", pair.source).replaceAll("{target}", pair.target);
 }
