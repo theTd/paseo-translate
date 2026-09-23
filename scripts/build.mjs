@@ -1,4 +1,5 @@
-import { build } from "esbuild";
+import { build, stop } from "esbuild";
+import { closeSync, openSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 
 /**
@@ -34,4 +35,38 @@ if (!bundled.includes(SHIM)) {
   );
 }
 await writeFile(OUTFILE, bundled.replace(SHIM, REPLACEMENT));
+
+// The daemon renames this whole checkout into place the moment the build
+// steps finish. esbuild's service process — spawned from this checkout's
+// node_modules — is only detached after a build, never stopped, so its
+// executable image stays locked and the daemon's rename races that lock
+// (EPERM on Windows). Stop the service explicitly, then wait until the
+// binary is exclusively openable: kill teardown and antivirus scans of the
+// freshly extracted binary can hold the lock a moment longer. Best effort:
+// past the deadline we exit anyway, leaving the original race (retryable),
+// never a failed build.
+stop();
+if (process.platform === "win32") {
+  for (const binary of [
+    "node_modules/@esbuild/win32-x64/esbuild.exe",
+    "node_modules/@esbuild/win32-arm64/esbuild.exe",
+  ]) {
+    await waitForUnlock(binary);
+  }
+}
+
 console.log(`built ${OUTFILE}`);
+
+async function waitForUnlock(relativePath) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      closeSync(openSync(relativePath, "r+"));
+      return;
+    } catch (error) {
+      // ENOENT: this architecture's esbuild binary is not installed here.
+      if (error?.code === "ENOENT") return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
