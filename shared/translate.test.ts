@@ -43,6 +43,16 @@ describe("translate settings schema", () => {
     expect(parsed.data.translationTimeoutMs).toBe(30_000);
   });
 
+  it("accepts every reasoning-effort gear including none", () => {
+    for (const effort of ["default", "none", "minimal", "low", "medium", "high"]) {
+      const parsed = translateSettings.schema.safeParse({ translationReasoningEffort: effort });
+      expect(parsed.success).toBe(true);
+    }
+    expect(
+      translateSettings.schema.safeParse({ translationReasoningEffort: "extreme" }).success,
+    ).toBe(false);
+  });
+
   it("fails closed at use time while required fields are unset", () => {
     expect(() => assertConfigured({ ...configured, endpointBaseUrl: "" })).toThrow(
       /missing endpoint base URL/,

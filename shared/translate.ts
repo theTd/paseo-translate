@@ -48,9 +48,13 @@ export const translateSettings = defineSettings({
     endpointBaseUrl: z.string().trim().default(""),
     endpointApiKey: z.string().default(""),
     endpointModel: z.string().trim().default(""),
-    /** Reasoning effort sent with each translation request (OpenAI-compatible). */
+    /**
+     * Reasoning effort sent with each translation request (OpenAI-compatible).
+     * "default" omits the parameter; "none" sends reasoning_effort "none" to
+     * turn thinking off where the endpoint supports it.
+     */
     translationReasoningEffort: z
-      .enum(["default", "minimal", "low", "medium", "high"])
+      .enum(["default", "none", "minimal", "low", "medium", "high"])
       .default("default"),
     /**
      * Custom system prompt for the translation model; empty string uses the

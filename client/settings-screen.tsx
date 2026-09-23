@@ -11,7 +11,11 @@ import {
   SettingsSelect,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
-import { translateProvidersRpc, translateSettings } from "../shared/translate";
+import {
+  translateProvidersRpc,
+  translateSettings,
+  type TranslateSettingsValues,
+} from "../shared/translate";
 
 type ReadySettings = Extract<SettingsState<typeof translateSettings.schema>, { status: "ready" }>;
 
@@ -20,7 +24,7 @@ interface Draft {
   endpointBaseUrl: string;
   endpointApiKey: string;
   endpointModel: string;
-  reasoningEffort: "default" | "minimal" | "low" | "medium" | "high";
+  reasoningEffort: TranslateSettingsValues["translationReasoningEffort"];
   systemPrompt: string;
   userLanguage: string;
   agentLanguage: string;
@@ -308,10 +312,11 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         />
         <SettingsSelect
           label="Reasoning effort"
-          hint="Thinking depth for translation requests; Default sends no parameter"
+          hint="Thinking depth for translation requests; Default sends no parameter, None turns thinking off"
           value={active.reasoningEffort}
           options={[
             { label: "Default", value: "default" },
+            { label: "None", value: "none" },
             { label: "Minimal", value: "minimal" },
             { label: "Low", value: "low" },
             { label: "Medium", value: "medium" },

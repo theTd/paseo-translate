@@ -51331,8 +51331,12 @@ var translateSettings = (0, import_plugin.defineSettings)({
     endpointBaseUrl: external_exports.string().trim().default(""),
     endpointApiKey: external_exports.string().default(""),
     endpointModel: external_exports.string().trim().default(""),
-    /** Reasoning effort sent with each translation request (OpenAI-compatible). */
-    translationReasoningEffort: external_exports.enum(["default", "minimal", "low", "medium", "high"]).default("default"),
+    /**
+     * Reasoning effort sent with each translation request (OpenAI-compatible).
+     * "default" omits the parameter; "none" sends reasoning_effort "none" to
+     * turn thinking off where the endpoint supports it.
+     */
+    translationReasoningEffort: external_exports.enum(["default", "none", "minimal", "low", "medium", "high"]).default("default"),
     /**
      * Custom system prompt for the translation model; empty string uses the
      * built-in default. `{source}` and `{target}` placeholders resolve per
