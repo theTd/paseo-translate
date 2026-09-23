@@ -110,9 +110,10 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
 ## Limitations
 
 - **Installing this plugin replaces the assistant-message rendering for every
-  agent on the daemon** with this plugin's plain-text view (timeline
+  agent on the daemon** with this plugin's translated view (timeline
   transformers are app-wide), not just agents using the Translate provider.
-  Markdown formatting is lost until the translation replaces the text.
+  Both the translation and the original render as Markdown through the same
+  engine the app itself uses.
 - Structured attachments (forge issues, reviews, uploaded files) reach the
   agent as serialized JSON and are passed through untranslated; free text
   inside them stays in your language.

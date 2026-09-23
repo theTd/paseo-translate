@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { Pressable, Text } from "react-native";
+import Markdown from "react-native-markdown-display";
 import { useQuery } from "@tanstack/react-query";
 import {
   useAgent,
@@ -57,22 +58,30 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
 
   const styles = useMemo(
     () => ({
-      text: { color: props.theme.colors.foreground },
       muted: { color: props.theme.colors.foregroundMuted },
       toggle: { color: props.theme.colors.accent, marginTop: 4, paddingVertical: 2 },
+      markdown: {
+        body: { color: props.theme.colors.foreground },
+        link: { color: props.theme.colors.accent },
+      },
     }),
     [props.theme],
   );
 
+  const renderMarkdown = useCallback(
+    (text: string) => <Markdown style={styles.markdown}>{text}</Markdown>,
+    [styles.markdown],
+  );
+
   if (!eligible) {
-    return <Text style={styles.text}>{data.text}</Text>;
+    return renderMarkdown(data.text);
   }
 
   const translated = query.data?.text;
   const showTranslation = translated !== undefined && !showOriginal;
   return (
     <>
-      <Text style={styles.text}>{showTranslation ? translated : data.text}</Text>
+      {renderMarkdown(showTranslation ? (translated as string) : data.text)}
       {query.isPending ? <Text style={styles.muted}>Translating…</Text> : null}
       {query.isError ? (
         <Text style={styles.muted} accessibilityRole="alert">
