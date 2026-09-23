@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text } from "react-native";
-import Markdown from "react-native-markdown-display";
+import { MarkdownView } from "./markdown";
 import {
   useAgent,
   useRpc,
@@ -149,17 +149,20 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     () => ({
       muted: { color: props.theme.colors.foregroundMuted },
       toggle: { color: props.theme.colors.accent, marginTop: 4, paddingVertical: 2 },
-      markdown: {
-        body: { color: props.theme.colors.foreground },
-        link: { color: props.theme.colors.accent },
-      },
+      foreground: props.theme.colors.foreground,
+      accent: props.theme.colors.accent,
     }),
     [props.theme],
   );
 
   const renderMarkdown = useCallback(
-    (text: string) => <Markdown style={styles.markdown}>{text}</Markdown>,
-    [styles.markdown],
+    (text: string) => (
+      <MarkdownView
+        text={text}
+        colors={{ foreground: styles.foreground, accent: styles.accent }}
+      />
+    ),
+    [styles.accent, styles.foreground],
   );
 
   if (!eligible) {
