@@ -15,7 +15,7 @@ import {
   translateTextRpc,
   type TranslatedMessageData,
 } from "../shared/translate";
-import { runDisplayTranslationChain } from "../shared/display-translation-chain";
+import { runDisplayTranslationChain, hasVisibleTranslation } from "../shared/display-translation-chain";
 import {
   classifyTranslationError,
   displayStreamIdleTimeoutMs,
@@ -107,7 +107,10 @@ function useStreamingTranslation(input: StreamingTranslationInput): StreamingTra
         },
         {
           onPartial: (text) => {
-            if (!cancelled) setPartial(text);
+            // Drop pre-first-token polls ("" / whitespace-only) so `partial`
+            // stays `undefined` and the original text remains visible with
+            // the `Translating…` hint until real content arrives.
+            if (!cancelled && hasVisibleTranslation(text)) setPartial(text);
           },
           sleep,
           now: () => Date.now(),
@@ -117,12 +120,18 @@ function useStreamingTranslation(input: StreamingTranslationInput): StreamingTra
         { idleTimeoutMs: displayStreamIdleTimeoutMs(translationTimeoutMsRef.current) },
       );
       if (cancelled) return;
-      if (outcome.status === "translated") {
+      if (outcome.status === "translated" && hasVisibleTranslation(outcome.text)) {
         setPartial(outcome.text);
         setDone(true);
       } else if (outcome.status === "failed") {
         setPartial(undefined);
         setError(outcome.error);
+      } else if (outcome.status === "translated") {
+        // Defensive: a blank final text (no visible token) must never
+        // replace the original with an empty view; surface it as a
+        // retryable failure instead so the original stays with an error hint.
+        setPartial(undefined);
+        setError(new Error("Translation returned no text"));
       }
     }
 
@@ -149,8 +158,9 @@ function useStreamingTranslation(input: StreamingTranslationInput): StreamingTra
  * Renders one assistant message. While the turn streams, the agent's original
  * text is shown untouched. Once the phase is `complete`, the plugin item is
  * re-rendered with the full text and a streaming translation starts,
- * rendering progressively; the canonical row always keeps the original, so
- * this stays a display-only projection.
+ * rendering progressively once its first non-blank token arrives (until
+ * then the original stays visible with a `Translating…` hint); the canonical
+ * row always keeps the original, so this stays a display-only projection.
  */
 export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessageData>) {
   const data = props.item.data;
@@ -249,11 +259,11 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     return renderMarkdown(data.text);
   }
 
-  const showTranslation = stream.text !== undefined && !showOriginal;
+  const showTranslation = hasVisibleTranslation(stream.text) && !showOriginal;
   return (
     <>
       {renderMarkdown(showTranslation ? (stream.text as string) : data.text)}
-      {stream.text === undefined && stream.error === undefined ? (
+      {!hasVisibleTranslation(stream.text) && stream.error === undefined && !stream.done ? (
         <Text style={styles.muted}>Translating…</Text>
       ) : null}
       {stream.error !== undefined ? (
@@ -270,7 +280,7 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
           </Pressable>
         </>
       ) : null}
-      {stream.done && stream.text !== undefined ? (
+      {stream.done && hasVisibleTranslation(stream.text) ? (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={showTranslation ? "Show original text" : "Show translation"}

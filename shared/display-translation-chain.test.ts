@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  hasVisibleTranslation,
   runDisplayTranslationChain,
   type DisplayTranslationCallbacks,
   type DisplayTranslationRpcs,
@@ -82,6 +83,23 @@ function createHarness(behavior: {
   };
   return harness;
 }
+
+describe("hasVisibleTranslation", () => {
+  it("stays false until the first token arrives", () => {
+    expect(hasVisibleTranslation(undefined)).toBe(false);
+    expect(hasVisibleTranslation("")).toBe(false);
+  });
+
+  it("treats whitespace-only partials as not yet visible", () => {
+    expect(hasVisibleTranslation("   ")).toBe(false);
+    expect(hasVisibleTranslation(" \n\t ")).toBe(false);
+  });
+
+  it("turns true on the first non-blank token", () => {
+    expect(hasVisibleTranslation("你好")).toBe(true);
+    expect(hasVisibleTranslation("  hello")).toBe(true);
+  });
+});
 
 describe("runDisplayTranslationChain", () => {
   it("propagates a unary success after exhausted stream attempts (N1 regression)", async () => {

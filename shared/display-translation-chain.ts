@@ -56,6 +56,18 @@ export type DisplayTranslationOutcome =
   | { status: "failed"; error: unknown }
   | { status: "cancelled" };
 
+/**
+ * Visible-translation gate: until the first non-blank translated token
+ * arrives, the renderer keeps showing the original text. Server stream jobs
+ * start as `text=""`, and polls forward that empty text before the first
+ * delta, so a bare `!== undefined` check would swap the original for a
+ * blank view (and hide the `Translating…` hint) for a flash. Pure and
+ * platform-agnostic so both the client renderer and unit tests can use it.
+ */
+export function hasVisibleTranslation(text: string | undefined): text is string {
+  return text !== undefined && text.trim().length > 0;
+}
+
 class ChainCancelled {}
 
 function jitteredDelayMs(kind: "busy" | "retryable", attempt: number, random: number): number {
