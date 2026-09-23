@@ -239,7 +239,11 @@ function streamingFetch(
           controller.close();
         },
       });
-      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+      // Type-only cast; see sseResponse in llm-client.test.ts.
+      return new Response(stream as unknown as ConstructorParameters<typeof Response>[0], {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
     }
     return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), {
       status: 200,

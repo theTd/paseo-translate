@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, Text } from "react-native";
 import { MarkdownView } from "./markdown";
 import {
@@ -15,9 +15,28 @@ import {
   translateTextRpc,
   type TranslatedMessageData,
 } from "../shared/translate";
+import { runDisplayTranslationChain } from "../shared/display-translation-chain";
+import {
+  classifyTranslationError,
+  displayStreamIdleTimeoutMs,
+} from "../shared/translation-retry";
+import { useReconnectEpoch } from "./use-reconnect-epoch";
 
-/** Delay between stream polls; each poll is a cheap in-memory read. */
-const STREAM_POLL_INTERVAL_MS = 200;
+interface StreamingTranslationInput {
+  enabled: boolean;
+  text: string;
+  languagePair: string | null;
+  /**
+   * The endpoint timeout setting; sizes the stream idle timeout. Read
+   * when an attempt chain starts, so changing it does not retranslate.
+   */
+  translationTimeoutMs: number | undefined;
+  /**
+   * Bumped by the manual "Retry translation" button and by the automatic
+   * retry after a reconnect to re-run the effect.
+   */
+  retryNonce: number;
+}
 
 interface StreamingTranslation {
   /** Latest translated text (partial while streaming); undefined until first bytes. */
@@ -27,22 +46,22 @@ interface StreamingTranslation {
 }
 
 /**
- * Stream-first translation with unary fallback. Opens a server stream job
- * and polls it for partial text; any job failure (evicted job, daemon
- * restart mid-stream, old daemon without the stream RPCs) falls back to the
- * single `translate.text` call, whose own failure surfaces as an error hint.
+ * Stream-first translation with bounded retries and a unary fallback; see
+ * shared/display-translation-chain.ts for the attempt policy. This hook is
+ * only the React adapter: it binds the RPCs, maps the chain outcome onto
+ * component state, and owns cancellation. A final failure discards any
+ * partial stream so the original text stays, and surfaces an error hint
+ * with a manual retry button that re-runs the whole chain via `retryNonce`.
  */
-function useStreamingTranslation(input: {
-  enabled: boolean;
-  text: string;
-  languagePair: string | null;
-}): StreamingTranslation {
+function useStreamingTranslation(input: StreamingTranslationInput): StreamingTranslation {
   const startStream = useRpc(translateStreamStartRpc);
   const pollStream = useRpc(translateStreamPollRpc);
   const translate = useRpc(translateTextRpc);
   const [partial, setPartial] = useState<string | undefined>(undefined);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<unknown>(undefined);
+  const translationTimeoutMsRef = useRef(input.translationTimeoutMs);
+  translationTimeoutMsRef.current = input.translationTimeoutMs;
 
   useEffect(() => {
     if (!input.enabled || input.languagePair === null) {
@@ -53,61 +72,75 @@ function useStreamingTranslation(input: {
     }
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let wake: (() => void) | null = null;
     setPartial(undefined);
     setDone(false);
     setError(undefined);
 
-    async function fallbackUnary(): Promise<void> {
-      try {
-        const result = await translate({ text: input.text, direction: "agent-to-user" });
-        if (cancelled) return;
-        setPartial(result.text);
-        setDone(true);
-      } catch (fallbackError) {
-        if (!cancelled) setError(fallbackError);
-      }
+    /**
+     * Cancellable sleep: resolves false when the effect unmounts mid-wait
+     * so no attempt chain is left parked on a cleared timer.
+     */
+    function sleep(ms: number): Promise<boolean> {
+      return new Promise((resolve) => {
+        wake = () => resolve(false);
+        timer = setTimeout(() => {
+          timer = null;
+          wake = null;
+          resolve(true);
+        }, ms);
+      });
     }
 
-    async function poll(jobId: string): Promise<void> {
+    async function run(): Promise<void> {
+      const outcome = await runDisplayTranslationChain(
+        {
+          startStream: async () => {
+            const { jobId } = await startStream({ text: input.text, direction: "agent-to-user" });
+            return jobId;
+          },
+          pollStream: (jobId: string) => pollStream({ jobId }),
+          translateUnary: async () => {
+            const result = await translate({ text: input.text, direction: "agent-to-user" });
+            return result.text;
+          },
+        },
+        {
+          onPartial: (text) => {
+            if (!cancelled) setPartial(text);
+          },
+          sleep,
+          now: () => Date.now(),
+          isCancelled: () => cancelled,
+          random: () => Math.random(),
+        },
+        { idleTimeoutMs: displayStreamIdleTimeoutMs(translationTimeoutMsRef.current) },
+      );
       if (cancelled) return;
-      let result: { text: string; done: boolean };
-      try {
-        result = await pollStream({ jobId });
-      } catch {
-        // Unknown job (evicted, daemon restarted): re-translate unary,
-        // which is cache-hot for a job that already finished server-side.
-        await fallbackUnary();
-        return;
-      }
-      if (cancelled) return;
-      setPartial(result.text);
-      if (result.done) {
+      if (outcome.status === "translated") {
+        setPartial(outcome.text);
         setDone(true);
-        return;
+      } else if (outcome.status === "failed") {
+        setPartial(undefined);
+        setError(outcome.error);
       }
-      timer = setTimeout(() => void poll(jobId), STREAM_POLL_INTERVAL_MS);
     }
 
-    async function start(): Promise<void> {
-      let jobId: string;
-      try {
-        ({ jobId } = await startStream({ text: input.text, direction: "agent-to-user" }));
-      } catch {
-        await fallbackUnary();
-        return;
-      }
-      await poll(jobId);
-    }
-
-    void start();
+    void run();
     return () => {
       cancelled = true;
-      if (timer !== null) clearTimeout(timer);
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      wake?.();
+      wake = null;
     };
     // The language pair is a dependency: editing settings retranslates
-    // instead of showing stale results from the previous pair.
+    // instead of showing stale results from the previous pair. retryNonce
+    // re-runs the whole attempt chain (manual button or reconnect retry).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input.enabled, input.text, input.languagePair]);
+  }, [input.enabled, input.text, input.languagePair, input.retryNonce]);
 
   return { text: partial, done, error };
 }
@@ -124,8 +157,13 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
   const provider = useAgent(props.agentId, (agent) => agent.provider);
   const settings = useSettings(translateSettings);
   const [showOriginal, setShowOriginal] = useState(false);
+  const [retryNonce, setRetryNonce] = useState(0);
   const toggleOriginal = useCallback(() => {
     setShowOriginal((value) => !value);
+  }, []);
+  const retryTranslation = useCallback(() => {
+    setShowOriginal(false);
+    setRetryNonce((value) => value + 1);
   }, []);
 
   const languagePair =
@@ -143,7 +181,49 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     languagePair !== null &&
     (ownedByTranslateProvider || translateAllTimelines);
 
-  const stream = useStreamingTranslation({ enabled: eligible, text: data.text, languagePair });
+  const stream = useStreamingTranslation({
+    enabled: eligible,
+    text: data.text,
+    languagePair,
+    translationTimeoutMs:
+      settings.status === "ready" ? settings.values.translationTimeoutMs : undefined,
+    retryNonce,
+  });
+
+  // Reconnect retry: a failure caused by a dropped connection (e.g. while
+  // AFK) re-runs by itself once a host is back online or the app returns
+  // to the foreground. Fatal failures (oversized text, unconfigured
+  // endpoint) would fail the same way, so they wait for the manual button.
+  const reconnectEpoch = useReconnectEpoch();
+  const handledReconnectEpoch = useRef(reconnectEpoch);
+  // A reconnect seen while an attempt is still running: that attempt may
+  // yet fail from the outage it started in, so the retry is held for it.
+  const reconnectDuringAttempt = useRef(false);
+  const autoRetryable =
+    stream.error !== undefined && classifyTranslationError(stream.error) !== "fatal";
+  const attemptRunning = eligible && !stream.done && stream.error === undefined;
+  useEffect(() => {
+    if (reconnectEpoch === handledReconnectEpoch.current) return;
+    handledReconnectEpoch.current = reconnectEpoch;
+    if (autoRetryable) {
+      setRetryNonce((value) => value + 1);
+    } else if (attemptRunning) {
+      reconnectDuringAttempt.current = true;
+    }
+    // Only a new reconnect should trigger this; the flags are read from
+    // the render that saw the new epoch.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reconnectEpoch]);
+  useEffect(() => {
+    if (!reconnectDuringAttempt.current) return;
+    if (autoRetryable) {
+      reconnectDuringAttempt.current = false;
+      setRetryNonce((value) => value + 1);
+    } else if (!attemptRunning) {
+      // Succeeded or became ineligible: nothing left to retry.
+      reconnectDuringAttempt.current = false;
+    }
+  }, [autoRetryable, attemptRunning]);
 
   const styles = useMemo(
     () => ({
@@ -177,9 +257,18 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
         <Text style={styles.muted}>Translating…</Text>
       ) : null}
       {stream.error !== undefined ? (
-        <Text style={styles.muted} accessibilityRole="alert">
-          Translation unavailable: {stream.error instanceof Error ? stream.error.message : "failed"}
-        </Text>
+        <>
+          <Text style={styles.muted} accessibilityRole="alert">
+            Translation unavailable: {stream.error instanceof Error ? stream.error.message : "failed"}
+          </Text>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Retry translation"
+            onPress={retryTranslation}
+          >
+            <Text style={styles.toggle}>Retry translation</Text>
+          </Pressable>
+        </>
       ) : null}
       {stream.done && stream.text !== undefined ? (
         <Pressable

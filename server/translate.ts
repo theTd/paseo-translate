@@ -16,6 +16,7 @@ import {
   type TranslateDirection,
   type TranslateSettingsValues,
 } from "../shared/translate";
+import { TRANSLATION_BUSY_MESSAGE } from "../shared/translation-retry";
 
 export interface TranslatorDeps {
   loadConfig(): Promise<TranslateSettingsValues>;
@@ -228,7 +229,7 @@ export function createTranslateStreamManager(deps: TranslatorDeps) {
         if (!job.done && job.error === undefined) active += 1;
       }
       if (active >= MAX_ACTIVE_STREAM_JOBS) {
-        throw new Error("Translation is busy; try again in a moment");
+        throw new Error(TRANSLATION_BUSY_MESSAGE);
       }
       const job: StreamJob = { text: "", done: false, updatedAt: Date.now() };
       jobs.set(jobId, job);

@@ -13,7 +13,7 @@ user-language rendering of replies exists only in the app's plugin view.
 | Direction | Where | Failure policy |
 | --- | --- | --- |
 | Prompt (you → agent) | The plugin's `translate-acp` provider proxies the inner ACP agent and translates `session/prompt` text blocks and the per-agent system prompt on the wire | Fail closed: a failed translation blocks that request with an error instead of leaking your language to the agent |
-| Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message phase is `complete` and renders each poll as Markdown | Display only: stream-first against the endpoint's SSE; endpoints without streaming fall back to one plain completion inside the same job, and dead jobs fall back to `translate.text`. On failure the original text stays, with an error hint |
+| Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message phase is `complete` and renders each poll as Markdown | Display only: stream-first against the endpoint's SSE with bounded retries from a fresh job (exponential backoff, longer for `busy`; fatal errors such as oversized text or an unconfigured endpoint fail fast), then a retried `translate.text` fallback. No total time limit: a stream attempt is dropped only when its text stops growing for 2 × `translationTimeoutMs` + 15s of awake time (device sleep does not count). On failure the original text stays, with an error hint and a manual Retry translation button; non-fatal failures also retry by themselves when a host comes back online or the app returns to the foreground |
 
 Slash-command frames keep their command word verbatim; only the free-text
 remainder is translated. Non-text content blocks (images) pass through
@@ -128,6 +128,9 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   most 4000 items are re-emitted per session open. After a daemon restart,
   older scrollback may be missing, but the newest messages — including the
   final response — always come back.
+- Restart fan-out: after a daemon restart, many replayed messages open
+  translation jobs at once; `busy` refusals back off longer with jitter and
+  degrade to direct unary calls. There is no cross-message global throttle.
 - Prompt turns pay one extra translation round trip before the agent starts.
 - The inner agent command is split on spaces; quoted arguments are not
   supported in the settings UI.

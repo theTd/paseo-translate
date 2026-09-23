@@ -32,7 +32,10 @@ function sseResponse(chunks: string[], status = 200): Response {
       controller.close();
     },
   });
-  return new Response(stream, {
+  // Type-only cast: react-native's global Response typing (pulled in by the
+  // client files under the same tsconfig) can shadow Node's depending on
+  // file order, and its BodyInit_ omits ReadableStream.
+  return new Response(stream as unknown as ConstructorParameters<typeof Response>[0], {
     status,
     headers: { "content-type": "text/event-stream" },
   });
