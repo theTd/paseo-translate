@@ -122,6 +122,12 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
 - A plain message that starts with `/word` keeps its first word untranslated,
   because flattened slash commands are indistinguishable on the wire.
 - Sub-agent tracks and chat search operate on the agent-language text.
+- History replay for the direct Claude provider is tail-kept per timeline:
+  the root keeps its newest 2000 items (from the newest 10000 transcript
+  lines) and all subagent sidecars share a further newest-2000 budget, so at
+  most 4000 items are re-emitted per session open. After a daemon restart,
+  older scrollback may be missing, but the newest messages — including the
+  final response — always come back.
 - Prompt turns pay one extra translation round trip before the agent starts.
 - The inner agent command is split on spaces; quoted arguments are not
   supported in the settings UI.

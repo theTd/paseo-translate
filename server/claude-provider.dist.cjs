@@ -52145,8 +52145,10 @@ var import_promises10 = require("node:fs/promises");
 var import_node_os2 = require("node:os");
 var import_node_path2 = require("node:path");
 var PROJECT_DIR_LENGTH_CAP = 200;
-var MAX_REPLAY_LINES = 3e3;
-var MAX_REPLAY_ITEMS = 500;
+var MAX_REPLAY_LINES = 1e4;
+var MAX_REPLAY_ITEMS = 2e3;
+var MAX_REPLAY_CHILD_ITEMS = 2e3;
+var MAX_REPLAY_SIDECARS = 50;
 function resolveConfigDir() {
   const override = process.env["CLAUDE_CONFIG_DIR"];
   if (typeof override === "string" && override.length > 0) return override;
@@ -52173,10 +52175,10 @@ function readString3(value) {
 }
 async function readJsonLines(path2) {
   const raw = await (0, import_promises10.readFile)(path2, "utf8");
-  const lines = raw.split("\n");
+  const rawLines = raw.split("\n");
+  const windowed = rawLines.length > MAX_REPLAY_LINES ? rawLines.slice(-MAX_REPLAY_LINES) : rawLines;
   const entries = [];
-  for (const line of lines) {
-    if (entries.length >= MAX_REPLAY_LINES) break;
+  for (const line of windowed) {
     if (line.trim().length === 0) continue;
     try {
       const parsed = JSON.parse(line);
@@ -52213,9 +52215,13 @@ function createCollector(contextCanonicalId) {
     totalTokens: void 0
   };
 }
-function pushCapped(collector, item) {
-  if (collector.items.length >= MAX_REPLAY_ITEMS) return;
+function pushItem(collector, item) {
   collector.items.push(item);
+}
+function truncateTail(collector) {
+  if (collector.items.length > MAX_REPLAY_ITEMS) {
+    collector.items = collector.items.slice(-MAX_REPLAY_ITEMS);
+  }
 }
 function collectEntry(collector, entry, idSeed) {
   const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : void 0;
@@ -52227,7 +52233,7 @@ function collectEntry(collector, entry, idSeed) {
     if (typeof rawContent === "string") {
       const text = rawContent.trim();
       if (text.length > 0) {
-        pushCapped(
+        pushItem(
           collector,
           withTimestamp({
             type: "assistant_message",
@@ -52247,7 +52253,7 @@ function collectEntry(collector, entry, idSeed) {
       if (record2.type === "text") {
         const text = readString3(block.text);
         if (text === void 0) continue;
-        pushCapped(
+        pushItem(
           collector,
           withTimestamp({
             type: "assistant_message",
@@ -52259,7 +52265,7 @@ function collectEntry(collector, entry, idSeed) {
       } else if (record2.type === "thinking") {
         const thinking = readString3(block.thinking);
         if (thinking === void 0) continue;
-        pushCapped(
+        pushItem(
           collector,
           withTimestamp({
             type: "reasoning",
@@ -52278,7 +52284,7 @@ function collectEntry(collector, entry, idSeed) {
         if (use2.name === "Task" && typeof use2.input === "object" && use2.input !== null) {
           collector.taskInputs.set(use2.id, use2.input);
         }
-        pushCapped(
+        pushItem(
           collector,
           withTimestamp({
             type: "tool_call",
@@ -52299,7 +52305,7 @@ function collectEntry(collector, entry, idSeed) {
     if (typeof content === "string") {
       const text = content.trim();
       if (text.length > 0) {
-        pushCapped(
+        pushItem(
           collector,
           withTimestamp({
             type: "user_message",
@@ -52323,7 +52329,7 @@ function collectEntry(collector, entry, idSeed) {
         if (typeof result.tool_use_id !== "string") continue;
         const name = collector.toolNames.get(result.tool_use_id) ?? "tool";
         const output2 = flattenReplayContent(result.content);
-        pushCapped(
+        pushItem(
           collector,
           withTimestamp({
             type: "tool_call",
@@ -52337,7 +52343,7 @@ function collectEntry(collector, entry, idSeed) {
       }
     }
     if (texts.length > 0) {
-      pushCapped(
+      pushItem(
         collector,
         withTimestamp({
           type: "user_message",
@@ -52379,7 +52385,21 @@ async function readReplayInner(cwd, claudeSessionId) {
     }
     collectEntry(root, entry, `replay-${seed++}`);
   }
+  truncateTail(root);
   const children = await readReplayChildren(projectDir, claudeSessionId, root);
+  let remaining = MAX_REPLAY_CHILD_ITEMS;
+  for (let index = children.length - 1; index >= 0; index--) {
+    const child = children[index];
+    if (child === void 0) continue;
+    if (remaining <= 0) {
+      child.items = [];
+      continue;
+    }
+    if (child.items.length > remaining) {
+      child.items = child.items.slice(-remaining);
+    }
+    remaining -= child.items.length;
+  }
   return { rootItems: root.items, children };
 }
 async function readReplayChildren(projectDir, claudeSessionId, root) {
@@ -52390,8 +52410,22 @@ async function readReplayChildren(projectDir, claudeSessionId, root) {
     return [];
   }
   const sidecars = files.filter((file2) => file2.startsWith("agent-") && file2.endsWith(".jsonl"));
+  const byAge = await Promise.all(
+    sidecars.map(async (file2) => {
+      let mtimeMs = 0;
+      try {
+        const fileStat = await (0, import_promises10.stat)((0, import_node_path2.join)(projectDir, claudeSessionId, "subagents", file2));
+        if (Number.isFinite(fileStat.mtimeMs)) mtimeMs = fileStat.mtimeMs;
+      } catch {
+        mtimeMs = 0;
+      }
+      return { file: file2, mtimeMs };
+    })
+  );
+  byAge.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  const stagedFiles = byAge.length > MAX_REPLAY_SIDECARS ? byAge.slice(-MAX_REPLAY_SIDECARS) : byAge;
   const staged = [];
-  for (const file2 of sidecars) {
+  for (const { file: file2 } of stagedFiles) {
     try {
       const agentId = file2.slice("agent-".length, -".jsonl".length);
       const stagedChild = await stageReplayChild(projectDir, claudeSessionId, agentId);
@@ -52406,7 +52440,6 @@ async function readReplayChildren(projectDir, claudeSessionId, root) {
       }
     } catch {
     }
-    if (staged.length >= 50) break;
   }
   return staged.map(({ canonicalId, meta: meta3, collector }) => {
     const parentCanonicalId = root.ownerCanonicalByToolUseId.get(canonicalId);
@@ -52441,6 +52474,7 @@ async function stageReplayChild(projectDir, claudeSessionId, agentId) {
   for (const entry of entries) {
     collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`);
   }
+  truncateTail(collector);
   return { canonicalId, meta: meta3 ?? {}, collector };
 }
 
