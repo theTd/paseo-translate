@@ -110,6 +110,35 @@ export const translateTextRpc = defineRpc({
 });
 
 /**
+ * Streaming translation jobs. The client opens a job, polls it for partial
+ * text, and renders each poll. RPC is unary, so progress travels as repeated
+ * `poll` reads of the server's accumulated stream — never as pushed chunks.
+ * Any unknown job (evicted, or lost to a daemon restart) reads as an error
+ * so the client falls back to the unary `translate.text` call.
+ */
+export const translateStreamStartRpc = defineRpc({
+  name: "translate.stream.start",
+  input: z.object({
+    text: z.string().min(1),
+    direction: translateDirectionSchema,
+  }),
+  output: z.object({
+    jobId: z.string(),
+  }),
+});
+
+export const translateStreamPollRpc = defineRpc({
+  name: "translate.stream.poll",
+  input: z.object({
+    jobId: z.string().min(1),
+  }),
+  output: z.object({
+    text: z.string(),
+    done: z.boolean(),
+  }),
+});
+
+/**
  * Launch commands of agent CLIs with a verified ACP stdio mode. A CLI's ACP
  * capability is independent of how Paseo's built-in provider talks to it
  * (e.g. omp/opencode are integrated through their native RPC but also ship

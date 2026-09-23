@@ -6,6 +6,11 @@ import { createTranslateProvider } from "./server/provider";
 import { createTranslateClaudeProvider } from "./server/claude-provider.dist.cjs";
 import { createTranslateHandler } from "./server/translate";
 import {
+  createTranslateStreamManager,
+  createTranslateStreamPollHandler,
+  createTranslateStreamStartHandler,
+} from "./server/translate";
+import {
   createPersistentTranslationCacheStore,
   defaultTranslationCacheDirectory,
 } from "./server/translation-cache-store";
@@ -13,6 +18,8 @@ import {
   assertConfigured,
   translateProvidersRpc,
   translateSettings,
+  translateStreamPollRpc,
+  translateStreamStartRpc,
   translateTextRpc,
 } from "./shared/translate";
 
@@ -38,6 +45,9 @@ export default function contribute(server: PluginServerContext) {
   server.registerProvider(createTranslateProvider({ loadConfig, cacheStore }));
   server.registerProvider(createTranslateClaudeProvider({ loadConfig, cacheStore }));
   server.handle(translateTextRpc, createTranslateHandler({ loadConfig, cacheStore }));
+  const streamManager = createTranslateStreamManager({ loadConfig, cacheStore });
+  server.handle(translateStreamStartRpc, createTranslateStreamStartHandler(streamManager));
+  server.handle(translateStreamPollRpc, createTranslateStreamPollHandler(streamManager));
   server.handle(translateProvidersRpc, createProvidersHandler());
   return () => {};
 }

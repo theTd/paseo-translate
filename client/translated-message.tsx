@@ -1,7 +1,6 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, Text } from "react-native";
 import Markdown from "react-native-markdown-display";
-import { useQuery } from "@tanstack/react-query";
 import {
   useAgent,
   useRpc,
@@ -11,21 +10,119 @@ import {
 import {
   TRANSLATE_PROVIDER_IDS,
   translateSettings,
+  translateStreamPollRpc,
+  translateStreamStartRpc,
   translateTextRpc,
   type TranslatedMessageData,
 } from "../shared/translate";
 
+/** Delay between stream polls; each poll is a cheap in-memory read. */
+const STREAM_POLL_INTERVAL_MS = 200;
+
+interface StreamingTranslation {
+  /** Latest translated text (partial while streaming); undefined until first bytes. */
+  text: string | undefined;
+  done: boolean;
+  error: unknown;
+}
+
+/**
+ * Stream-first translation with unary fallback. Opens a server stream job
+ * and polls it for partial text; any job failure (evicted job, daemon
+ * restart mid-stream, old daemon without the stream RPCs) falls back to the
+ * single `translate.text` call, whose own failure surfaces as an error hint.
+ */
+function useStreamingTranslation(input: {
+  enabled: boolean;
+  text: string;
+  languagePair: string | null;
+}): StreamingTranslation {
+  const startStream = useRpc(translateStreamStartRpc);
+  const pollStream = useRpc(translateStreamPollRpc);
+  const translate = useRpc(translateTextRpc);
+  const [partial, setPartial] = useState<string | undefined>(undefined);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState<unknown>(undefined);
+
+  useEffect(() => {
+    if (!input.enabled || input.languagePair === null) {
+      setPartial(undefined);
+      setDone(false);
+      setError(undefined);
+      return;
+    }
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    setPartial(undefined);
+    setDone(false);
+    setError(undefined);
+
+    async function fallbackUnary(): Promise<void> {
+      try {
+        const result = await translate({ text: input.text, direction: "agent-to-user" });
+        if (cancelled) return;
+        setPartial(result.text);
+        setDone(true);
+      } catch (fallbackError) {
+        if (!cancelled) setError(fallbackError);
+      }
+    }
+
+    async function poll(jobId: string): Promise<void> {
+      if (cancelled) return;
+      let result: { text: string; done: boolean };
+      try {
+        result = await pollStream({ jobId });
+      } catch {
+        // Unknown job (evicted, daemon restarted): re-translate unary,
+        // which is cache-hot for a job that already finished server-side.
+        await fallbackUnary();
+        return;
+      }
+      if (cancelled) return;
+      setPartial(result.text);
+      if (result.done) {
+        setDone(true);
+        return;
+      }
+      timer = setTimeout(() => void poll(jobId), STREAM_POLL_INTERVAL_MS);
+    }
+
+    async function start(): Promise<void> {
+      let jobId: string;
+      try {
+        ({ jobId } = await startStream({ text: input.text, direction: "agent-to-user" }));
+      } catch {
+        await fallbackUnary();
+        return;
+      }
+      await poll(jobId);
+    }
+
+    void start();
+    return () => {
+      cancelled = true;
+      if (timer !== null) clearTimeout(timer);
+    };
+    // The language pair is a dependency: editing settings retranslates
+    // instead of showing stale results from the previous pair.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [input.enabled, input.text, input.languagePair]);
+
+  return { text: partial, done, error };
+}
+
 /**
  * Renders one assistant message. While the turn streams, the agent's original
  * text is shown untouched. Once the phase is `complete`, the plugin item is
- * re-rendered with the full text and translation starts; the canonical row
- * always keeps the original, so this stays a display-only projection.
+ * re-rendered with the full text and a streaming translation starts,
+ * rendering progressively; the canonical row always keeps the original, so
+ * this stays a display-only projection.
  */
 export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessageData>) {
   const data = props.item.data;
   const provider = useAgent(props.agentId, (agent) => agent.provider);
   const settings = useSettings(translateSettings);
-  const translate = useRpc(translateTextRpc);
   const [showOriginal, setShowOriginal] = useState(false);
   const toggleOriginal = useCallback(() => {
     setShowOriginal((value) => !value);
@@ -46,15 +143,7 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     languagePair !== null &&
     (ownedByTranslateProvider || translateAllTimelines);
 
-  const query = useQuery({
-    // The language pair is part of the key: editing settings retranslates
-    // instead of showing stale results from the previous pair.
-    queryKey: ["translate", "agent-to-user", languagePair, data.text],
-    queryFn: () => translate({ text: data.text, direction: "agent-to-user" }),
-    enabled: eligible,
-    staleTime: Number.POSITIVE_INFINITY,
-    retry: 1,
-  });
+  const stream = useStreamingTranslation({ enabled: eligible, text: data.text, languagePair });
 
   const styles = useMemo(
     () => ({
@@ -77,18 +166,19 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     return renderMarkdown(data.text);
   }
 
-  const translated = query.data?.text;
-  const showTranslation = translated !== undefined && !showOriginal;
+  const showTranslation = stream.text !== undefined && !showOriginal;
   return (
     <>
-      {renderMarkdown(showTranslation ? (translated as string) : data.text)}
-      {query.isPending ? <Text style={styles.muted}>Translating…</Text> : null}
-      {query.isError ? (
+      {renderMarkdown(showTranslation ? (stream.text as string) : data.text)}
+      {stream.text === undefined && stream.error === undefined ? (
+        <Text style={styles.muted}>Translating…</Text>
+      ) : null}
+      {stream.error !== undefined ? (
         <Text style={styles.muted} accessibilityRole="alert">
-          Translation unavailable: {query.error instanceof Error ? query.error.message : "failed"}
+          Translation unavailable: {stream.error instanceof Error ? stream.error.message : "failed"}
         </Text>
       ) : null}
-      {translated !== undefined ? (
+      {stream.done && stream.text !== undefined ? (
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={showTranslation ? "Show original text" : "Show translation"}

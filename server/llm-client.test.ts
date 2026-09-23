@@ -24,6 +24,24 @@ function requestBody(call: CapturedCall): Record<string, unknown> {
   return JSON.parse(String(call.init.body)) as Record<string, unknown>;
 }
 
+function sseResponse(chunks: string[], status = 200): Response {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status,
+    headers: { "content-type": "text/event-stream" },
+  });
+}
+
+function sseData(content: string): string {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
+}
+
 describe("translation endpoint client", () => {
   it("posts an OpenAI-compatible completion and returns the message text", async () => {
     const calls: CapturedCall[] = [];
@@ -136,6 +154,47 @@ describe("translation endpoint client", () => {
     );
     await expect(client.complete([{ role: "user", content: "x" }])).rejects.toThrow(
       /Translation endpoint request failed after 5000ms \(https:\/\/llm\.example\/v1\/chat\/completions\): ECONNREFUSED/,
+    );
+  });
+});
+
+describe("translation endpoint streaming", () => {
+  it("accumulates SSE deltas across chunk boundaries and posts stream:true", async () => {
+    const calls: CapturedCall[] = [];
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000 },
+      {
+        fetchFn: capturingFetch(calls, () =>
+          // Split mid-JSON on purpose: chunk boundaries are arbitrary bytes.
+          sseResponse([sseData("Hal").slice(0, 20), sseData("Hal").slice(20) + sseData("lo"), "data: [DONE]\n\n"]),
+        ),
+      },
+    );
+    const deltas: string[] = [];
+    await expect(
+      client.stream([{ role: "user", content: "Hello" }], (delta) => deltas.push(delta)),
+    ).resolves.toBe("Hallo");
+    expect(requestBody(calls[0]).stream).toBe(true);
+    expect(deltas.join("")).toBe("Hallo");
+  });
+
+  it("rejects the stream on HTTP errors so the caller can fall back", async () => {
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000 },
+      { fetchFn: capturingFetch([], () => sseResponse(["stream unsupported"], 400)) },
+    );
+    await expect(client.stream([{ role: "user", content: "x" }], () => {})).rejects.toThrow(
+      /refused the stream \(HTTP 400\)/,
+    );
+  });
+
+  it("rejects an empty stream", async () => {
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000 },
+      { fetchFn: capturingFetch([], () => sseResponse(["data: [DONE]\n\n"])) },
+    );
+    await expect(client.stream([{ role: "user", content: "x" }], () => {})).rejects.toThrow(
+      /streamed no message text/,
     );
   });
 });

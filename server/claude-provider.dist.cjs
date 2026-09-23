@@ -31577,32 +31577,45 @@ var import_node_crypto2 = require("node:crypto");
 // server/llm-client.ts
 function createLlmClient(config2, options = {}) {
   const fetchFn = options.fetchFn ?? fetch;
+  async function postCompletions(messages, stream) {
+    const url2 = `${config2.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    const headers = { "content-type": "application/json" };
+    if (config2.apiKey.length > 0) headers.authorization = `Bearer ${config2.apiKey}`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), config2.timeoutMs);
+    const release = () => clearTimeout(timer);
+    try {
+      const response = await fetchFn(url2, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          model: config2.model,
+          messages,
+          temperature: 0,
+          stream,
+          ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning_effort: config2.reasoningEffort } : {}
+        }),
+        // The SDK dependency bundles DOM-style globals that clash with the
+        // Node declarations; bridge them at this boundary through the
+        // fetch-side signal type.
+        signal: controller.signal
+      });
+      return { response, url: url2, release };
+    } catch (error62) {
+      release();
+      throw new Error(
+        `Translation endpoint request failed after ${config2.timeoutMs}ms (${url2}): ${describeError(error62)}`,
+        { cause: error62 }
+      );
+    }
+  }
   return {
     async complete(messages) {
-      const url2 = `${config2.baseUrl.replace(/\/+$/, "")}/chat/completions`;
-      const headers = { "content-type": "application/json" };
-      if (config2.apiKey.length > 0) headers.authorization = `Bearer ${config2.apiKey}`;
+      const { response, url: url2, release } = await postCompletions(messages, false);
       let body;
       let status;
       let ok2;
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), config2.timeoutMs);
       try {
-        const response = await fetchFn(url2, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            model: config2.model,
-            messages,
-            temperature: 0,
-            stream: false,
-            ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning_effort: config2.reasoningEffort } : {}
-          }),
-          // The SDK dependency bundles DOM-style globals that clash with the
-          // Node declarations; bridge them at this boundary through the
-          // fetch-side signal type.
-          signal: controller.signal
-        });
         status = response.status;
         ok2 = response.ok;
         body = await response.text();
@@ -31612,7 +31625,7 @@ function createLlmClient(config2, options = {}) {
           { cause: error62 }
         );
       } finally {
-        clearTimeout(timer);
+        release();
       }
       if (!ok2) {
         throw new Error(`Translation endpoint returned HTTP ${status}: ${excerpt(body)}`);
@@ -31630,8 +31643,73 @@ function createLlmClient(config2, options = {}) {
         throw new Error(`Translation endpoint returned no message text: ${excerpt(body)}`);
       }
       return content;
+    },
+    async stream(messages, onDelta) {
+      const { response, release } = await postCompletions(messages, true);
+      try {
+        if (!response.ok) {
+          const body = await response.text().catch(() => "");
+          throw new Error(
+            `Translation endpoint refused the stream (HTTP ${response.status}): ${excerpt(body)}`
+          );
+        }
+        if (response.body === null) {
+          throw new Error("Translation endpoint returned an empty stream");
+        }
+        return await readSseDeltas(response.body, onDelta);
+      } finally {
+        release();
+        try {
+          await response.body?.cancel();
+        } catch {
+        }
+      }
     }
   };
+}
+async function readSseDeltas(body, onDelta) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let accumulated = "";
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (value !== void 0) buffer += decoder.decode(value, { stream: !done });
+    if (done) break;
+    buffer = consumeSseEvents(buffer, (data) => {
+      accumulated += data;
+      if (data.length > 0) onDelta(data);
+    });
+  }
+  buffer = consumeSseEvents(buffer, (data) => {
+    accumulated += data;
+    if (data.length > 0) onDelta(data);
+  });
+  if (accumulated.length === 0) {
+    throw new Error("Translation endpoint streamed no message text");
+  }
+  return accumulated;
+}
+function consumeSseEvents(buffer, onData) {
+  let rest = buffer;
+  for (; ; ) {
+    const boundary = rest.indexOf("\n\n");
+    if (boundary === -1) return rest;
+    const event = rest.slice(0, boundary);
+    rest = rest.slice(boundary + 2);
+    for (const line of event.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice("data:".length).trim();
+      if (payload === "[DONE]") continue;
+      try {
+        const parsed = JSON.parse(payload);
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta.length > 0) onData(delta);
+      } catch {
+      }
+    }
+  }
 }
 function readChoiceContent(parsed) {
   if (typeof parsed !== "object" || parsed === null) return void 0;
@@ -51365,6 +51443,26 @@ var translateTextRpc = (0, import_plugin.defineRpc)({
     text: external_exports.string()
   })
 });
+var translateStreamStartRpc = (0, import_plugin.defineRpc)({
+  name: "translate.stream.start",
+  input: external_exports.object({
+    text: external_exports.string().min(1),
+    direction: translateDirectionSchema
+  }),
+  output: external_exports.object({
+    jobId: external_exports.string()
+  })
+});
+var translateStreamPollRpc = (0, import_plugin.defineRpc)({
+  name: "translate.stream.poll",
+  input: external_exports.object({
+    jobId: external_exports.string().min(1)
+  }),
+  output: external_exports.object({
+    text: external_exports.string(),
+    done: external_exports.boolean()
+  })
+});
 var translateProvidersRpc = (0, import_plugin.defineRpc)({
   name: "translate.providers.list",
   input: external_exports.object({}),
@@ -51440,47 +51538,69 @@ function evictOldestIfNeeded(entries, maxEntries) {
 // server/translate.ts
 function createTranslator(deps) {
   const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
+  async function setup(text, direction) {
+    if (text.trim().length === 0) return { trivial: text };
+    if (text.length > TRANSLATION_TEXT_LIMIT) {
+      throw new Error(
+        `Refusing to translate ${text.length} characters (limit ${TRANSLATION_TEXT_LIMIT})`
+      );
+    }
+    const values = await deps.loadConfig();
+    const pair = resolveLanguagePair(values, direction);
+    const systemPrompt = resolveTranslationSystemPrompt(values.translationSystemPrompt, pair);
+    const key = cacheKey({
+      text,
+      direction,
+      pair,
+      systemPrompt,
+      endpointBaseUrl: values.endpointBaseUrl,
+      endpointModel: values.endpointModel,
+      reasoningEffort: values.translationReasoningEffort
+    });
+    const cached2 = cache.get(key);
+    if (cached2 !== void 0) return { cached: cached2 };
+    const client = createLlmClient(
+      {
+        baseUrl: values.endpointBaseUrl,
+        apiKey: values.endpointApiKey,
+        model: values.endpointModel,
+        timeoutMs: values.translationTimeoutMs,
+        reasoningEffort: values.translationReasoningEffort
+      },
+      { fetchFn: deps.fetchFn }
+    );
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: text }
+    ];
+    return { key, client, messages };
+  }
   return {
     async translate(text, direction) {
-      if (text.trim().length === 0) return text;
-      if (text.length > TRANSLATION_TEXT_LIMIT) {
-        throw new Error(
-          `Refusing to translate ${text.length} characters (limit ${TRANSLATION_TEXT_LIMIT})`
-        );
-      }
-      const values = await deps.loadConfig();
-      const pair = resolveLanguagePair(values, direction);
-      const systemPrompt = resolveTranslationSystemPrompt(values.translationSystemPrompt, pair);
-      const key = cacheKey({
-        text,
-        direction,
-        pair,
-        systemPrompt,
-        endpointBaseUrl: values.endpointBaseUrl,
-        endpointModel: values.endpointModel,
-        reasoningEffort: values.translationReasoningEffort
-      });
-      const cached2 = cache.get(key);
-      if (cached2 !== void 0) return cached2;
-      const client = createLlmClient(
-        {
-          baseUrl: values.endpointBaseUrl,
-          apiKey: values.endpointApiKey,
-          model: values.endpointModel,
-          timeoutMs: values.translationTimeoutMs,
-          reasoningEffort: values.translationReasoningEffort
-        },
-        { fetchFn: deps.fetchFn }
-      );
-      const translated = await client.complete([
-        { role: "system", content: systemPrompt },
-        { role: "user", content: text }
-      ]);
-      cache.set(key, translated);
+      const prepared = await setup(text, direction);
+      if ("trivial" in prepared) return prepared.trivial;
+      if ("cached" in prepared) return prepared.cached;
+      const translated = await prepared.client.complete([...prepared.messages]);
+      cache.set(prepared.key, translated);
       return translated;
+    },
+    async translateStream(text, direction, onDelta) {
+      const prepared = await setup(text, direction);
+      if ("trivial" in prepared) return prepared.trivial;
+      if ("cached" in prepared) return prepared.cached;
+      try {
+        const translated = await prepared.client.stream([...prepared.messages], onDelta);
+        cache.set(prepared.key, translated);
+        return translated;
+      } catch {
+        const translated = await prepared.client.complete([...prepared.messages]);
+        cache.set(prepared.key, translated);
+        return translated;
+      }
     }
   };
 }
+var STREAM_JOB_TTL_MS = 5 * 60 * 1e3;
 function cacheKey(input2) {
   return JSON.stringify({
     direction: input2.direction,

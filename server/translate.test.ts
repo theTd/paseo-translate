@@ -2,7 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createTranslateHandler, createTranslator } from "./translate";
+import {
+  createTranslateHandler,
+  createTranslateStreamManager,
+  createTranslator,
+} from "./translate";
 import {
   createMemoryTranslationCacheStore,
   createPersistentTranslationCacheStore,
@@ -200,5 +204,141 @@ describe("translate service", () => {
     await expect(handler({ text: "Guten Tag", direction: "agent-to-user" })).resolves.toEqual({
       text: "Guten Tag",
     });
+  });
+});
+
+function sseData(content: string): string {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
+}
+
+/** Serves SSE for stream:true and JSON otherwise; streamMode flips behavior. */
+function streamingFetch(
+  calls: Array<{ stream: boolean }>,
+  map: (text: string) => string,
+  streamMode: "ok" | "refuse" | "fail" = "ok",
+): typeof fetch {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as {
+      stream?: boolean;
+      messages: Array<{ role: string; content: string }>;
+    };
+    calls.push({ stream: body.stream === true });
+    const user = body.messages.find((message) => message.role === "user");
+    const text = map(user?.content ?? "");
+    if (body.stream === true) {
+      if (streamMode === "refuse") {
+        return new Response("stream unsupported", { status: 400 });
+      }
+      if (streamMode === "fail") throw new Error("boom");
+      const half = Math.ceil(text.length / 2);
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(sseData(text.slice(0, half))));
+          controller.enqueue(encoder.encode(sseData(text.slice(half)) + "data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), {
+      status: 200,
+    });
+  }) as typeof fetch;
+}
+
+async function waitForPoll(
+  manager: ReturnType<typeof createTranslateStreamManager>,
+  jobId: string,
+  done: boolean,
+): Promise<{ text: string; done: boolean }> {
+  const deadline = Date.now() + 4_000;
+  for (;;) {
+    const result = await manager.poll({ jobId });
+    if (result.done === done) return result;
+    if (Date.now() > deadline) throw new Error("timed out waiting for poll state");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+describe("streaming translation jobs", () => {
+  it("streams partial text before completing", async () => {
+    const calls: Array<{ stream: boolean }> = [];
+    const manager = createTranslateStreamManager({
+      loadConfig: async () => values,
+      fetchFn: streamingFetch(calls, (text) => `DE:${text}`),
+    });
+    const { jobId } = await manager.start({ text: "Hello", direction: "agent-to-user" });
+    const final = await waitForPoll(manager, jobId, true);
+    expect(final.text).toBe("DE:Hello");
+    expect(calls).toEqual([{ stream: true }]);
+    // A completed job is single-shot: the terminal poll consumes it.
+    await expect(manager.poll({ jobId })).rejects.toThrow(/Unknown translation job/);
+  });
+
+  it("serves cache hits without touching the endpoint", async () => {
+    const calls: Array<{ stream: boolean }> = [];
+    const cacheStore = createMemoryTranslationCacheStore();
+    const deps = {
+      loadConfig: async () => values,
+      fetchFn: streamingFetch(calls, (text) => `DE:${text}`),
+      cacheStore,
+    };
+    const first = createTranslateStreamManager(deps);
+    const started = await first.start({ text: "Hello", direction: "agent-to-user" });
+    await waitForPoll(first, started.jobId, true);
+    expect(calls).toEqual([{ stream: true }]);
+    // A second manager over the same store serves the warmed entry: the
+    // first poll already carries the full text.
+    const second = createTranslateStreamManager(deps);
+    const retry = await second.start({ text: "Hello", direction: "agent-to-user" });
+    await expect(waitForPoll(second, retry.jobId, true)).resolves.toEqual({
+      text: "DE:Hello",
+      done: true,
+    });
+    expect(calls).toEqual([{ stream: true }]);
+  });
+
+  it("falls back to a plain completion when the stream is refused", async () => {
+    const calls: Array<{ stream: boolean }> = [];
+    const manager = createTranslateStreamManager({
+      loadConfig: async () => values,
+      fetchFn: streamingFetch(calls, (text) => `DE:${text}`, "refuse"),
+    });
+    const { jobId } = await manager.start({ text: "Hello", direction: "agent-to-user" });
+    const final = await waitForPoll(manager, jobId, true);
+    expect(final.text).toBe("DE:Hello");
+    expect(calls).toEqual([{ stream: true }, { stream: false }]);
+  });
+
+  it("surfaces endpoint errors through poll", async () => {
+    const manager = createTranslateStreamManager({
+      loadConfig: async () => values,
+      fetchFn: (async () => {
+        throw new Error("down");
+      }) as typeof fetch,
+    });
+    const { jobId } = await manager.start({ text: "Hello", direction: "agent-to-user" });
+    await expect(waitForPoll(manager, jobId, true)).rejects.toThrow(/down/);
+  });
+
+  it("rejects unknown jobs and oversized text", async () => {
+    const manager = createTranslateStreamManager({
+      loadConfig: async () => values,
+      fetchFn: streamingFetch([], (text) => text),
+    });
+    await expect(manager.poll({ jobId: "nope" })).rejects.toThrow(/Unknown translation job/);
+    await expect(
+      manager.start({ text: "x".repeat(100_001), direction: "agent-to-user" }),
+    ).rejects.toThrow(/Refusing to translate/);
+  });
+
+  it("returns the original text when response translation is disabled", async () => {
+    const manager = createTranslateStreamManager({
+      loadConfig: async () => ({ ...values, translateResponses: false }),
+      fetchFn: streamingFetch([], () => ""),
+    });
+    const { jobId } = await manager.start({ text: "Guten Tag", direction: "agent-to-user" });
+    await expect(manager.poll({ jobId })).resolves.toEqual({ text: "Guten Tag", done: true });
   });
 });

@@ -13,7 +13,7 @@ user-language rendering of replies exists only in the app's plugin view.
 | Direction | Where | Failure policy |
 | --- | --- | --- |
 | Prompt (you → agent) | The plugin's `translate-acp` provider proxies the inner ACP agent and translates `session/prompt` text blocks and the per-agent system prompt on the wire | Fail closed: a failed translation blocks that request with an error instead of leaking your language to the agent |
-| Reply (agent → you) | A client timeline transformer + renderer calls the plugin's `translate.text` RPC once the message phase is `complete` | Display only: on failure the original text stays, with an error hint |
+| Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message phase is `complete` and renders each poll as Markdown | Display only: stream-first against the endpoint's SSE; endpoints without streaming fall back to one plain completion inside the same job, and dead jobs fall back to `translate.text`. On failure the original text stays, with an error hint |
 
 Slash-command frames keep their command word verbatim; only the free-text
 remainder is translated. Non-text content blocks (images) pass through
