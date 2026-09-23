@@ -51637,6 +51637,124 @@ async function translatePromptFragment(text, translate) {
   return `${match[1]}${await translate(match[2])}`;
 }
 
+// server/question.ts
+var ASK_USER_QUESTION_TOOL = "AskUserQuestion";
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function readNonEmptyString(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+function isAskUserQuestionRequest(toolName, input2) {
+  return toolName === ASK_USER_QUESTION_TOOL && isRecord(input2) && Array.isArray(input2.questions);
+}
+function normalizeQuestionRequestInput(input2) {
+  if (!Array.isArray(input2.questions)) return input2;
+  return {
+    ...input2,
+    questions: input2.questions.map((item) => {
+      if (!isRecord(item)) return item;
+      return { ...item, allowOther: true };
+    })
+  };
+}
+function stripQuestionUiMetadata(input2) {
+  if (!Array.isArray(input2.questions)) return input2;
+  return {
+    ...input2,
+    questions: input2.questions.map((item) => {
+      if (!isRecord(item) || !("allowOther" in item)) return item;
+      const copy = { ...item };
+      delete copy.allowOther;
+      return copy;
+    })
+  };
+}
+function summarizeQuestions(input2) {
+  if (!Array.isArray(input2.questions)) return {};
+  const first = input2.questions.find(isRecord);
+  const title = first !== void 0 ? readNonEmptyString(first.question) : null;
+  if (title === null) return {};
+  const rawOptions = isRecord(first) ? first.options : void 0;
+  const labels = Array.isArray(rawOptions) ? rawOptions.map((option) => {
+    if (typeof option === "string") return option.trim();
+    return isRecord(option) && typeof option.label === "string" ? option.label.trim() : "";
+  }).filter((label) => label.length > 0) : [];
+  return labels.length > 0 ? { title, description: labels.join(" / ") } : { title };
+}
+function isTranslatable(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+async function translateQuestionItem(item, translate) {
+  if (!isRecord(item)) return item;
+  const copy = { ...item };
+  if (isTranslatable(item.question)) copy.question = await translate(item.question);
+  if (isTranslatable(item.header)) copy.header = await translate(item.header);
+  if (Array.isArray(item.options)) {
+    const options = [];
+    for (const option of item.options) {
+      if (typeof option === "string") {
+        options.push(isTranslatable(option) ? await translate(option) : option);
+        continue;
+      }
+      if (!isRecord(option)) {
+        options.push(option);
+        continue;
+      }
+      const optionCopy = { ...option };
+      if (isTranslatable(option.label)) optionCopy.label = await translate(option.label);
+      if (isTranslatable(option.description)) {
+        optionCopy.description = await translate(option.description);
+      }
+      options.push(optionCopy);
+    }
+    copy.options = options;
+  }
+  return copy;
+}
+async function translateQuestionsForDisplay(questions, translate) {
+  const translated = [];
+  for (const item of questions) {
+    translated.push(await translateQuestionItem(item, translate));
+  }
+  return translated;
+}
+function readAnswers(updatedInput) {
+  if (!isRecord(updatedInput)) return null;
+  const answers = updatedInput.answers;
+  return isRecord(answers) ? answers : null;
+}
+async function resolveQuestionAnswers(translatedQuestions, originalQuestions, updatedInput, translate) {
+  const answers = readAnswers(updatedInput);
+  if (answers === null) return {};
+  const headerToQuestion = /* @__PURE__ */ new Map();
+  const questionToQuestion = /* @__PURE__ */ new Map();
+  const remember = (key, originalText, map2) => {
+    if (key !== null && !map2.has(key)) map2.set(key, originalText);
+  };
+  for (let index = 0; index < translatedQuestions.length; index += 1) {
+    const translated = translatedQuestions[index];
+    const original = originalQuestions[index];
+    if (!isRecord(translated) || !isRecord(original)) continue;
+    const originalText = readNonEmptyString(original.question);
+    if (originalText === null) continue;
+    remember(readNonEmptyString(translated.header), originalText, headerToQuestion);
+    remember(readNonEmptyString(translated.question), originalText, questionToQuestion);
+    remember(readNonEmptyString(original.header), originalText, headerToQuestion);
+    remember(originalText, originalText, questionToQuestion);
+  }
+  const resolved = {};
+  for (const [key, value] of Object.entries(answers)) {
+    if (typeof value !== "string") {
+      resolved[headerToQuestion.get(key) ?? questionToQuestion.get(key) ?? key] = value;
+      continue;
+    }
+    const questionText = headerToQuestion.get(key) ?? questionToQuestion.get(key) ?? key;
+    resolved[questionText] = value.trim().length === 0 ? value : await translate(value);
+  }
+  return resolved;
+}
+
 // server/claude-subagents.ts
 var import_node_crypto3 = require("node:crypto");
 
@@ -52646,7 +52764,7 @@ async function dispatch(input2, context, capabilities) {
       return;
     }
     case "session.permission": {
-      respondToPermission(context.sessions.get(input2.sessionId), input2.permissionId, input2.response, context.emit);
+      await respondToPermission(context.sessions.get(input2.sessionId), input2.permissionId, input2.response, context);
       return;
     }
     case "session.close": {
@@ -52970,7 +53088,7 @@ function denyPendingForSteer(session, emit) {
     const pending = session.pendingPermissions.get(permissionId);
     if (pending === void 0) continue;
     session.pendingPermissions.delete(permissionId);
-    pending({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+    pending.resolve({ behavior: "deny", message: "Superseded by a follow-up prompt" });
     emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
   }
 }
@@ -53030,7 +53148,7 @@ async function ensureQuery(session, context) {
       toolName,
       input2,
       toolOptions,
-      context.emit
+      context
     ))
   };
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
@@ -53191,56 +53309,133 @@ async function withTimeout(promise2, timeoutMs, message) {
     if (timer !== void 0) clearTimeout(timer);
   }
 }
-function requestPermission(session, toolName, input2, toolOptions, emit) {
+function requestPermission(session, toolName, input2, toolOptions, context) {
+  if (isAskUserQuestionRequest(toolName, input2)) {
+    return requestQuestionPermission(session, input2, toolOptions, context);
+  }
+  return requestToolPermission(session, toolName, input2, toolOptions, context);
+}
+function waitForPermissionResponse(session, permissionId, request, toolOptions, emit, question) {
   return new Promise((resolve5) => {
-    const permissionId = toolOptions.requestId;
-    session.pendingPermissions.set(permissionId, resolve5);
+    session.pendingPermissions.set(permissionId, { resolve: resolve5, ...question !== void 0 ? { question } : {} });
     toolOptions.signal.addEventListener("abort", () => {
       const pending = session.pendingPermissions.get(permissionId);
       if (pending === void 0) return;
       session.pendingPermissions.delete(permissionId);
-      pending({ behavior: "deny", message: "Permission request expired" });
+      pending.resolve({ behavior: "deny", message: "Permission request expired" });
       emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
     });
-    emit({
-      type: "session.permission",
-      sessionId: session.id,
-      request: {
-        id: permissionId,
-        name: toolName,
-        kind: "tool",
-        ...toolOptions.title !== void 0 ? { title: toolOptions.title } : {},
-        ...toolOptions.description !== void 0 ? { description: toolOptions.description } : toolOptions.displayName !== void 0 ? { description: toolOptions.displayName } : {},
-        // The SDK hands a plain JSON object; round-trip keeps the wire shape
-        // the daemon's JsonValue contract expects.
-        input: JSON.parse(JSON.stringify(input2)),
-        actions: [
-          { id: "allow", label: "Allow", behavior: "allow" },
-          { id: "deny", label: "Deny", behavior: "deny" }
-        ]
-      }
-    });
+    emit({ type: "session.permission", sessionId: session.id, request });
   });
 }
-function respondToPermission(session, permissionId, response, emit) {
+function requestToolPermission(session, toolName, input2, toolOptions, context) {
+  const emit = (event) => context.emit(event);
+  const permissionId = toolOptions.requestId;
+  return waitForPermissionResponse(
+    session,
+    permissionId,
+    {
+      id: permissionId,
+      name: toolName,
+      kind: "tool",
+      ...toolOptions.title !== void 0 ? { title: toolOptions.title } : {},
+      ...toolOptions.description !== void 0 ? { description: toolOptions.description } : toolOptions.displayName !== void 0 ? { description: toolOptions.displayName } : {},
+      // The SDK hands a plain JSON object; round-trip keeps the wire shape
+      // the daemon's JsonValue contract expects.
+      input: JSON.parse(JSON.stringify(input2)),
+      actions: [
+        { id: "allow", label: "Allow", behavior: "allow" },
+        { id: "deny", label: "Deny", behavior: "deny" }
+      ]
+    },
+    toolOptions,
+    emit
+  );
+}
+async function requestQuestionPermission(session, input2, toolOptions, context) {
+  const emit = (event) => context.emit(event);
+  const permissionId = toolOptions.requestId;
+  const requestInput = normalizeQuestionRequestInput(
+    JSON.parse(JSON.stringify(input2))
+  );
+  const originalQuestions = Array.isArray(requestInput.questions) ? requestInput.questions : [];
+  let translatedQuestions = originalQuestions;
+  try {
+    const values = await context.loadValues();
+    if (values.translateResponses) {
+      translatedQuestions = await translateQuestionsForDisplay(
+        originalQuestions,
+        (text) => context.translator.translate(text, "agent-to-user")
+      );
+    }
+  } catch {
+    translatedQuestions = originalQuestions;
+  }
+  if (toolOptions.signal.aborted || session.closed) {
+    return { behavior: "deny", message: "Permission request expired" };
+  }
+  const summary = summarizeQuestions({ questions: translatedQuestions });
+  return waitForPermissionResponse(
+    session,
+    permissionId,
+    {
+      id: permissionId,
+      name: ASK_USER_QUESTION_TOOL,
+      kind: "question",
+      ...summary,
+      input: JSON.parse(JSON.stringify({ ...requestInput, questions: translatedQuestions }))
+    },
+    toolOptions,
+    emit,
+    { requestInput, translatedQuestions }
+  );
+}
+async function respondToPermission(session, permissionId, response, context) {
+  const emit = (event) => context.emit(event);
   if (session === void 0) return;
   const pending = session.pendingPermissions.get(permissionId);
   if (pending === void 0) return;
   session.pendingPermissions.delete(permissionId);
   if (response.behavior === "allow") {
-    pending({
-      behavior: "allow",
-      updatedInput: response.updatedInput,
-      updatedPermissions: response.updatedPermissions
-    });
+    if (pending.question !== void 0) {
+      await resolveQuestionAllow(pending.question, response, pending.resolve, context);
+    } else {
+      pending.resolve({
+        behavior: "allow",
+        updatedInput: response.updatedInput,
+        updatedPermissions: response.updatedPermissions
+      });
+    }
   } else {
-    pending({
+    pending.resolve({
       behavior: "deny",
       message: response.message ?? "Denied",
       interrupt: response.interrupt
     });
   }
   emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
+}
+async function resolveQuestionAllow(question, response, resolve5, context) {
+  try {
+    const values = await context.loadValues();
+    const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent") : async (text) => text;
+    const answers = await resolveQuestionAnswers(
+      question.translatedQuestions,
+      Array.isArray(question.requestInput.questions) ? question.requestInput.questions : [],
+      response.updatedInput,
+      translate
+    );
+    resolve5({
+      behavior: "allow",
+      updatedInput: { ...stripQuestionUiMetadata(question.requestInput), answers },
+      updatedPermissions: response.updatedPermissions
+    });
+  } catch (error62) {
+    resolve5({
+      behavior: "deny",
+      message: `Translating the answers failed, so the question was declined: ${describe3(error62)}`
+    });
+  }
 }
 async function pumpQuery(session, query, context) {
   const emit = (event) => context.emit(event);
@@ -53278,7 +53473,7 @@ function finishDeadQuery(session, message, emit) {
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
   else session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
-    pending({ behavior: "deny", message: "Claude session ended" });
+    pending.resolve({ behavior: "deny", message: "Claude session ended" });
   }
   session.pendingPermissions.clear();
   if (!wasInterrupted) {
@@ -53470,7 +53665,7 @@ async function teardownSession(session) {
   session.abort.abort();
   session.subagents?.reset();
   for (const pending of session.pendingPermissions.values()) {
-    pending({ behavior: "deny", message: "Session closed" });
+    pending.resolve({ behavior: "deny", message: "Session closed" });
   }
   session.pendingPermissions.clear();
   await session.pump?.catch(() => void 0);

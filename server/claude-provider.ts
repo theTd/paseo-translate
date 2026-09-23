@@ -18,6 +18,15 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslator, type TranslatorDeps } from "./translate";
 import { translatePromptFragment } from "./prompt-text";
+import {
+  ASK_USER_QUESTION_TOOL,
+  isAskUserQuestionRequest,
+  normalizeQuestionRequestInput,
+  resolveQuestionAnswers,
+  stripQuestionUiMetadata,
+  summarizeQuestions,
+  translateQuestionsForDisplay,
+} from "./question";
 import { ClaudeSubagentTracker } from "./claude-subagents";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { readClaudeReplay } from "./claude-transcript";
@@ -129,6 +138,19 @@ type PermissionResultLike =
   | { behavior: "allow"; updatedInput?: Record<string, unknown>; updatedPermissions?: unknown[] }
   | { behavior: "deny"; message: string; interrupt?: boolean };
 
+interface PendingPermission {
+  resolve: (response: PermissionResultLike | null) => void;
+  /**
+   * Present for AskUserQuestion permissions: the normalized agent-language
+   * input plus the translated questions actually emitted, so answers keyed
+   * by translated header map back to Claude's question-text keys.
+   */
+  question?: {
+    requestInput: Record<string, unknown>;
+    translatedQuestions: unknown[];
+  };
+}
+
 interface ClaudeSession {
   id: string;
   config: ProviderSessionConfig;
@@ -147,7 +169,7 @@ interface ClaudeSession {
   closed: boolean;
   toolNames: Map<string, string>;
   toolInputs: Map<string, unknown>;
-  pendingPermissions: Map<string, (response: PermissionResultLike | null) => void>;
+  pendingPermissions: Map<string, PendingPermission>;
   /** Live Task-protocol children, surfaced as provider subsessions. */
   subagents: ClaudeSubagentTracker | null;
   commandsPublished: boolean;
@@ -337,7 +359,7 @@ async function dispatch(
       return;
     }
     case "session.permission": {
-      respondToPermission(context.sessions.get(input.sessionId), input.permissionId, input.response, context.emit);
+      await respondToPermission(context.sessions.get(input.sessionId), input.permissionId, input.response, context);
       return;
     }
     case "session.close": {
@@ -731,7 +753,7 @@ function denyPendingForSteer(
     const pending = session.pendingPermissions.get(permissionId);
     if (pending === undefined) continue;
     session.pendingPermissions.delete(permissionId);
-    pending({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+    pending.resolve({ behavior: "deny", message: "Superseded by a follow-up prompt" });
     emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
   }
 }
@@ -836,7 +858,7 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
         toolName,
         input,
         toolOptions as CanUseToolOptions,
-        context.emit,
+        context,
       )) as unknown as NonNullable<Options["canUseTool"]>,
   };
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
@@ -1061,69 +1083,194 @@ function requestPermission(
   toolName: string,
   input: Record<string, unknown>,
   toolOptions: CanUseToolOptions,
+  context: DispatchContext,
+): Promise<PermissionResultLike | null> {
+  if (isAskUserQuestionRequest(toolName, input)) {
+    return requestQuestionPermission(session, input, toolOptions, context);
+  }
+  return requestToolPermission(session, toolName, input, toolOptions, context);
+}
+
+function waitForPermissionResponse(
+  session: ClaudeSession,
+  permissionId: string,
+  request: Extract<ProviderEvent, { type: "session.permission" }>["request"],
+  toolOptions: CanUseToolOptions,
   emit: (event: ProviderEvent) => void,
+  question?: PendingPermission["question"],
 ): Promise<PermissionResultLike | null> {
   return new Promise((resolve) => {
-    const permissionId = toolOptions.requestId;
-    session.pendingPermissions.set(permissionId, resolve);
+    session.pendingPermissions.set(permissionId, { resolve, ...(question !== undefined ? { question } : {}) });
     toolOptions.signal.addEventListener("abort", () => {
       const pending = session.pendingPermissions.get(permissionId);
       if (pending === undefined) return;
       session.pendingPermissions.delete(permissionId);
-      pending({ behavior: "deny", message: "Permission request expired" });
+      pending.resolve({ behavior: "deny", message: "Permission request expired" });
       // Resolve the daemon-side card too: a superseded request would otherwise
       // linger until the turn ends and ignore taps.
       emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
     });
-    emit({
-      type: "session.permission",
-      sessionId: session.id,
-      request: {
-        id: permissionId,
-        name: toolName,
-        kind: "tool",
-        ...(toolOptions.title !== undefined ? { title: toolOptions.title } : {}),
-        ...(toolOptions.description !== undefined
-          ? { description: toolOptions.description }
-          : toolOptions.displayName !== undefined
-            ? { description: toolOptions.displayName }
-            : {}),
-        // The SDK hands a plain JSON object; round-trip keeps the wire shape
-        // the daemon's JsonValue contract expects.
-        input: JSON.parse(JSON.stringify(input)),
-        actions: [
-          { id: "allow", label: "Allow", behavior: "allow" },
-          { id: "deny", label: "Deny", behavior: "deny" },
-        ],
-      },
-    });
+    emit({ type: "session.permission", sessionId: session.id, request });
   });
 }
 
-function respondToPermission(
+function requestToolPermission(
+  session: ClaudeSession,
+  toolName: string,
+  input: Record<string, unknown>,
+  toolOptions: CanUseToolOptions,
+  context: DispatchContext,
+): Promise<PermissionResultLike | null> {
+  const emit = (event: ProviderEvent) => context.emit(event);
+  const permissionId = toolOptions.requestId;
+  return waitForPermissionResponse(
+    session,
+    permissionId,
+    {
+      id: permissionId,
+      name: toolName,
+      kind: "tool",
+      ...(toolOptions.title !== undefined ? { title: toolOptions.title } : {}),
+      ...(toolOptions.description !== undefined
+        ? { description: toolOptions.description }
+        : toolOptions.displayName !== undefined
+          ? { description: toolOptions.displayName }
+          : {}),
+      // The SDK hands a plain JSON object; round-trip keeps the wire shape
+      // the daemon's JsonValue contract expects.
+      input: JSON.parse(JSON.stringify(input)),
+      actions: [
+        { id: "allow", label: "Allow", behavior: "allow" },
+        { id: "deny", label: "Deny", behavior: "deny" },
+      ],
+    },
+    toolOptions,
+    emit,
+  );
+}
+
+/**
+ * AskUserQuestion surfaces as a `question` permission (the app's
+ * QuestionFormCard) instead of a generic Allow/Deny tool card. Question
+ * strings are translated into the user language before emitting; a failed
+ * display translation degrades to the original text so the turn survives.
+ */
+async function requestQuestionPermission(
+  session: ClaudeSession,
+  input: Record<string, unknown>,
+  toolOptions: CanUseToolOptions,
+  context: DispatchContext,
+): Promise<PermissionResultLike | null> {
+  const emit = (event: ProviderEvent) => context.emit(event);
+  const permissionId = toolOptions.requestId;
+  const requestInput = normalizeQuestionRequestInput(
+    JSON.parse(JSON.stringify(input)) as Record<string, unknown>,
+  );
+  const originalQuestions = Array.isArray(requestInput.questions)
+    ? (requestInput.questions as unknown[])
+    : [];
+  let translatedQuestions = originalQuestions;
+  try {
+    const values = await context.loadValues();
+    if (values.translateResponses) {
+      translatedQuestions = await translateQuestionsForDisplay(originalQuestions, (text) =>
+        context.translator.translate(text, "agent-to-user"),
+      );
+    }
+  } catch {
+    // Display-only: keep the original text rather than breaking the turn.
+    translatedQuestions = originalQuestions;
+  }
+  if (toolOptions.signal.aborted || session.closed) {
+    // The turn went away while the display translation was in flight
+    // (close, teardown, or SDK abort): deny without emitting or registering,
+    // so no ghost card appears and no pending is left for teardown to wait on.
+    return { behavior: "deny", message: "Permission request expired" };
+  }
+  const summary = summarizeQuestions({ questions: translatedQuestions });
+  return waitForPermissionResponse(
+    session,
+    permissionId,
+    {
+      id: permissionId,
+      name: ASK_USER_QUESTION_TOOL,
+      kind: "question",
+      ...summary,
+      input: JSON.parse(JSON.stringify({ ...requestInput, questions: translatedQuestions })),
+    },
+    toolOptions,
+    emit,
+    { requestInput, translatedQuestions },
+  );
+}
+
+async function respondToPermission(
   session: ClaudeSession | undefined,
   permissionId: string,
   response: ProviderPermissionResponse,
-  emit: (event: ProviderEvent) => void,
-): void {
+  context: DispatchContext,
+): Promise<void> {
+  const emit = (event: ProviderEvent) => context.emit(event);
   if (session === undefined) return;
   const pending = session.pendingPermissions.get(permissionId);
   if (pending === undefined) return;
   session.pendingPermissions.delete(permissionId);
   if (response.behavior === "allow") {
-    pending({
-      behavior: "allow",
-      updatedInput: response.updatedInput,
-      updatedPermissions: response.updatedPermissions,
-    });
+    if (pending.question !== undefined) {
+      await resolveQuestionAllow(pending.question, response, pending.resolve, context);
+    } else {
+      pending.resolve({
+        behavior: "allow",
+        updatedInput: response.updatedInput,
+        updatedPermissions: response.updatedPermissions,
+      });
+    }
   } else {
-    pending({
+    pending.resolve({
       behavior: "deny",
       message: response.message ?? "Denied",
       interrupt: response.interrupt,
     });
   }
   emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
+}
+
+/**
+ * Fail closed: answers are translated into the agent language before Claude
+ * sees them. A failed translation denies the request instead of leaking
+ * user-language text to the agent. Keys map back from the translated headers
+ * the UI answered with to Claude's question-text keys.
+ */
+async function resolveQuestionAllow(
+  question: NonNullable<PendingPermission["question"]>,
+  response: Extract<ProviderPermissionResponse, { behavior: "allow" }>,
+  resolve: (response: PermissionResultLike | null) => void,
+  context: DispatchContext,
+): Promise<void> {
+  try {
+    const values = await context.loadValues();
+    const translate = values.translatePrompts
+      ? (text: string) => context.translator.translate(text, "user-to-agent")
+      : async (text: string) => text;
+    const answers = await resolveQuestionAnswers(
+      question.translatedQuestions,
+      Array.isArray(question.requestInput.questions)
+        ? (question.requestInput.questions as unknown[])
+        : [],
+      response.updatedInput,
+      translate,
+    );
+    resolve({
+      behavior: "allow",
+      updatedInput: { ...stripQuestionUiMetadata(question.requestInput), answers },
+      updatedPermissions: response.updatedPermissions,
+    });
+  } catch (error) {
+    resolve({
+      behavior: "deny",
+      message: `Translating the answers failed, so the question was declined: ${describe(error)}`,
+    });
+  }
 }
 
 async function pumpQuery(
@@ -1180,7 +1327,7 @@ function finishDeadQuery(
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
   else session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
-    pending({ behavior: "deny", message: "Claude session ended" });
+    pending.resolve({ behavior: "deny", message: "Claude session ended" });
   }
   session.pendingPermissions.clear();
   if (!wasInterrupted) {
@@ -1430,7 +1577,7 @@ async function teardownSession(session: ClaudeSession): Promise<void> {
   session.abort.abort();
   session.subagents?.reset();
   for (const pending of session.pendingPermissions.values()) {
-    pending({ behavior: "deny", message: "Session closed" });
+    pending.resolve({ behavior: "deny", message: "Session closed" });
   }
   session.pendingPermissions.clear();
   await session.pump?.catch(() => undefined);

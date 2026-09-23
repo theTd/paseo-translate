@@ -30,6 +30,12 @@ export function createTranslateProvider(deps: TranslatorDeps): ProviderRegistrat
         translate: values.translatePrompts
           ? (text) => translator.translate(text, "user-to-agent")
           : passThrough,
+        // Question-like permission requests inbound from the inner agent
+        // render in the app untranslated (the timeline renderer only owns
+        // assistant messages), so they are translated here for display.
+        translateDisplay: values.translateResponses
+          ? (text) => translator.translate(text, "agent-to-user")
+          : undefined,
       });
     },
   });

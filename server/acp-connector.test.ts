@@ -32,6 +32,55 @@ function echoStream(translate: (text: string) => Promise<string>): AcpStream {
   return stream;
 }
 
+/**
+ * Echo agent variant that first emits one inbound frame (a
+ * `session/request_permission` request line via env) before answering
+ * outbound prompts. Proves what the daemon would receive.
+ */
+const PERMISSION_AGENT = `
+const readline = require("node:readline");
+process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "agent/started", params: {} }) + "\\n");
+if (process.env.PERMISSION_LINE) process.stdout.write(process.env.PERMISSION_LINE + "\\n");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let message;
+  try { message = JSON.parse(trimmed); } catch { return; }
+  if (message && typeof message.method === "string" && message.id !== undefined && message.id !== null) {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { method: message.method, params: message.params ?? null } }) + "\\n");
+  }
+});
+`;
+
+function permissionStream(
+  permissionLine: string,
+  display: (text: string) => Promise<string>,
+): AcpStream {
+  const stream = createTranslatingAcpStream({
+    command: [process.execPath, "-e", PERMISSION_AGENT],
+    env: { PERMISSION_LINE: permissionLine },
+    translate: async (text) => text,
+    translateDisplay: display,
+  });
+  streams.push(stream);
+  return stream;
+}
+
+function permissionRequestLine(params: unknown): string {
+  return JSON.stringify({
+    jsonrpc: "2.0",
+    id: 99,
+    method: "session/request_permission",
+    params,
+  });
+}
+
+function inboundRequest(messages: AcpStreamMessage[]): Record<string, unknown> {
+  const found = messages.find((message) => "method" in message && message.method === "session/request_permission");
+  if (found === undefined || !("params" in found)) throw new Error("no permission request received");
+  return (found as { params: Record<string, unknown> }).params;
+}
+
 function promptRequest(id: number | string, blocks: unknown[]): AcpStreamMessage {
   return {
     jsonrpc: "2.0",
@@ -238,8 +287,7 @@ describe("translating ACP connector", () => {
     expect(meta.providerOptions).toEqual({ x: 1 });
   });
 
-  it("blocks a malformed session/prompt frame instead of passing it through", async () => {
-    const stream = echoStream(async (text) => `DE(${text})`);
+  it("blocks a malformed session/prompt frame instead of passing it through", async () => {    const stream = echoStream(async (text) => `DE(${text})`);
     const writer = stream.writable.getWriter();
     await writer.write({
       jsonrpc: "2.0",
@@ -257,5 +305,150 @@ describe("translating ACP connector", () => {
       error: { code: -32603, message: expect.stringContaining("prompt content array is missing") },
     });
     expect(responses(messages)).toHaveLength(0);
+  });
+
+  it("translates question-like (chooser) permission requests inbound", async () => {
+    const diff = { type: "diff", path: "a.txt", oldText: "x", newText: "y" };
+    const line = permissionRequestLine({
+      sessionId: "s",
+      toolCall: {
+        toolCallId: "tc-1",
+        title: "Welche Farbe?",
+        content: [
+          { type: "content", content: { type: "text", text: "Wähle eine Farbe" } },
+          diff,
+        ],
+        rawInput: { questions: "sensitive" },
+      },
+      options: [
+        { optionId: "o1", name: "Blau", kind: "allow_once" },
+        { optionId: "o2", name: "Grün", kind: "allow_once" },
+        { optionId: "o3", name: "Ablehnen", kind: "reject_once" },
+      ],
+    });
+    const seen: string[] = [];
+    const stream = permissionStream(line, async (text) => {
+      seen.push(text);
+      return `EN(${text})`;
+    });
+
+    const messages = await readCount(stream, 2);
+    const params = inboundRequest(messages);
+    const toolCall = params.toolCall as Record<string, unknown>;
+    expect(toolCall.title).toBe("EN(Welche Farbe?)");
+    expect(toolCall.content).toEqual([
+      { type: "content", content: { type: "text", text: "EN(Wähle eine Farbe)" } },
+      diff,
+    ]);
+    // Machine-addressable fields stay verbatim.
+    expect(toolCall.toolCallId).toBe("tc-1");
+    expect(toolCall.rawInput).toEqual({ questions: "sensitive" });
+    const options = params.options as Array<Record<string, unknown>>;
+    expect(options.map((option) => option.name)).toEqual(["EN(Blau)", "EN(Grün)", "EN(Ablehnen)"]);
+    expect(options.map((option) => option.optionId)).toEqual(["o1", "o2", "o3"]);
+    expect(options.map((option) => option.kind)).toEqual(["allow_once", "allow_once", "reject_once"]);
+    expect(seen).toEqual(["Welche Farbe?", "Wähle eine Farbe", "Blau", "Grün", "Ablehnen"]);
+
+    // The stream stays live for outbound prompts afterwards.
+    const writer = stream.writable.getWriter();
+    await writer.write(promptRequest(10, [{ type: "text", text: "Hi" }]));
+    writer.releaseLock();
+    const echoed = responses(await readCount(stream, 1));
+    expect(echoed.map((response) => response.id)).toEqual([10]);
+  });
+
+  it("passes approval-shaped permission requests through untouched", async () => {
+    const line = permissionRequestLine({
+      sessionId: "s",
+      toolCall: { toolCallId: "tc-2", title: "rm -rf /tmp/x" },
+      options: [
+        { optionId: "o1", name: "Allow", kind: "allow_once" },
+        { optionId: "o2", name: "Reject", kind: "reject_once" },
+      ],
+    });
+    let called = false;
+    const stream = permissionStream(line, async (text) => {
+      called = true;
+      return `EN(${text})`;
+    });
+
+    const params = inboundRequest(await readCount(stream, 2));
+    expect((params.toolCall as Record<string, unknown>).title).toBe("rm -rf /tmp/x");
+    expect((params.options as Array<Record<string, unknown>>).map((option) => option.name)).toEqual([
+      "Allow",
+      "Reject",
+    ]);
+    expect(called).toBe(false);
+  });
+
+  it("delivers the original frame when display translation fails", async () => {    const line = permissionRequestLine({
+      sessionId: "s",
+      toolCall: { toolCallId: "tc-3", title: "FAIL Farbe?" },
+      options: [
+        { optionId: "o1", name: "Blau", kind: "allow_once" },
+        { optionId: "o2", name: "Grün", kind: "allow_once" },
+      ],
+    });
+    const stream = permissionStream(line, async (text) => {
+      if (text.includes("FAIL")) throw new Error("endpoint down");
+      return `EN(${text})`;
+    });
+
+    const params = inboundRequest(await readCount(stream, 2));
+    expect((params.toolCall as Record<string, unknown>).title).toBe("FAIL Farbe?");
+    expect((params.options as Array<Record<string, unknown>>).map((option) => option.name)).toEqual([
+      "Blau",
+      "Grün",
+    ]);
+  });
+
+  it("leaves allow-once plus allow-always approvals untranslated (no duplicate kind)", async () => {
+    const line = permissionRequestLine({
+      sessionId: "s",
+      toolCall: { toolCallId: "tc-4", title: "Befehl ausführen" },
+      options: [
+        { optionId: "o1", name: "Einmal erlauben", kind: "allow_once" },
+        { optionId: "o2", name: "Immer erlauben", kind: "allow_always" },
+        { optionId: "o3", name: "Ablehnen", kind: "reject_once" },
+      ],
+    });
+    let called = false;
+    const stream = permissionStream(line, async (text) => {
+      called = true;
+      return `EN(${text})`;
+    });
+
+    const params = inboundRequest(await readCount(stream, 2));
+    expect((params.toolCall as Record<string, unknown>).title).toBe("Befehl ausführen");
+    expect(called).toBe(false);
+  });
+
+  it("leaves kind-less options and terminals untouched", async () => {
+    const terminal = { type: "terminal", terminalId: "t-1" };
+    const line = permissionRequestLine({
+      sessionId: "s",
+      toolCall: {
+        toolCallId: "tc-5",
+        title: "Welche Farbe?",
+        content: [
+          { type: "content", content: { type: "text", text: "Wähle eine Farbe" } },
+          terminal,
+        ],
+      },
+      options: [
+        { optionId: "o1", name: "Blau" },
+        { optionId: "o2", name: "Grün" },
+      ],
+    });
+    const stream = permissionStream(line, async (text) => `EN(${text})`);
+
+    // No kind on any option: not a chooser, so the whole frame passes through.
+    const params = inboundRequest(await readCount(stream, 2));
+    const toolCall = params.toolCall as Record<string, unknown>;
+    expect(toolCall.title).toBe("Welche Farbe?");
+    expect(toolCall.content).toEqual([
+      { type: "content", content: { type: "text", text: "Wähle eine Farbe" } },
+      terminal,
+    ]);
   });
 });

@@ -336,6 +336,207 @@ describe("translate claude provider", () => {
     expect(items[0]).toMatchObject({ item: { text: "decision:deny" } });
   });
 
+  it("surfaces AskUserQuestion as a translated question permission and translates answers back", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let decision: unknown;
+    fake.use(async function* (_pushed) {
+      decision = await fake.state.options?.canUseTool?.(
+        "AskUserQuestion",
+        {
+          questions: [
+            {
+              header: "Farbe",
+              question: "Welche Farbe?",
+              options: [{ label: "Blau" }, { label: "Grün" }],
+            },
+          ],
+        },
+        { signal: new AbortController().signal, requestId: "perm-q", toolUseID: "tu-q" },
+      );
+      yield assistantText("a-1", "noted");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Choose"));
+    await waitFor(events, (event) => event.type === "session.permission");
+    const permission = events.find((event) => event.type === "session.permission");
+    expect(permission).toMatchObject({
+      sessionId: "s",
+      request: {
+        id: "perm-q",
+        name: "AskUserQuestion",
+        kind: "question",
+        title: "DE(Welche Farbe?)",
+        description: "DE(Blau) / DE(Grün)",
+      },
+    });
+    const emittedInput = (
+      permission as Extract<ProviderEvent, { type: "session.permission" }>
+    ).request.input as { questions: Array<Record<string, unknown>> };
+    expect(emittedInput.questions[0]).toMatchObject({
+      header: "DE(Farbe)",
+      question: "DE(Welche Farbe?)",
+      allowOther: true,
+    });
+    expect(
+      (emittedInput.questions[0].options as Array<Record<string, unknown>>).map(
+        (option) => option.label,
+      ),
+    ).toEqual(["DE(Blau)", "DE(Grün)"]);
+    expect(
+      (permission as Extract<ProviderEvent, { type: "session.permission" }>).request.actions,
+    ).toBeUndefined();
+
+    await send({
+      type: "session.permission",
+      sessionId: "s",
+      permissionId: "perm-q",
+      response: {
+        behavior: "allow",
+        updatedInput: JSON.parse(
+          JSON.stringify({ ...emittedInput, answers: { "DE(Farbe)": "Grün" } }),
+        ),
+      },
+    });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // Claude receives agent-language keys and values; the UI-only flag is stripped.
+    expect(decision).toMatchObject({
+      behavior: "allow",
+      updatedInput: { answers: { "Welche Farbe?": "DE(Grün)" } },
+    });
+    const resolvedQuestions = (decision as { updatedInput: { questions: Array<Record<string, unknown>> } })
+      .updatedInput.questions;
+    expect(resolvedQuestions[0]).not.toHaveProperty("allowOther");
+    expect(resolvedQuestions[0]).toMatchObject({ header: "Farbe", question: "Welche Farbe?" });
+  });
+
+  it("fails closed: an untranslatable answer denies instead of leaking user text", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let decision: unknown;
+    fake.use(async function* (_pushed) {
+      decision = await fake.state.options?.canUseTool?.(
+        "AskUserQuestion",
+        { questions: [{ header: "Farbe", question: "Welche Farbe?", options: [] }] },
+        { signal: new AbortController().signal, requestId: "perm-q2", toolUseID: "tu-q2" },
+      );
+      yield assistantText("a-1", "noted");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Choose"));
+    await waitFor(events, (event) => event.type === "session.permission");
+    const permission = events.find((event) => event.type === "session.permission");
+    const emittedInput = (
+      permission as Extract<ProviderEvent, { type: "session.permission" }>
+    ).request.input as { questions: Array<Record<string, unknown>> };
+    await send({
+      type: "session.permission",
+      sessionId: "s",
+      permissionId: "perm-q2",
+      response: {
+        behavior: "allow",
+        updatedInput: JSON.parse(
+          JSON.stringify({ ...emittedInput, answers: { "DE(Farbe)": "FAIL bitte" } }),
+        ),
+      },
+    });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(decision).toMatchObject({ behavior: "deny", message: expect.stringContaining("endpoint down") });
+  });
+
+  it("degrades gracefully: a failed question translation still asks with the original text", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* (_pushed) {
+      const decision = await fake.state.options?.canUseTool?.(
+        "AskUserQuestion",
+        { questions: [{ header: "Farbe", question: "FAIL Farbe?", options: [] }] },
+        { signal: new AbortController().signal, requestId: "perm-q3", toolUseID: "tu-q3" },
+      );
+      yield assistantText("a-1", `decision:${decision && typeof decision === "object" && "behavior" in decision ? (decision as { behavior: string }).behavior : "none"}`);
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Choose"));
+    await waitFor(events, (event) => event.type === "session.permission");
+    const permission = events.find((event) => event.type === "session.permission");
+    expect(permission).toMatchObject({
+      request: { id: "perm-q3", kind: "question", title: "FAIL Farbe?" },
+    });
+    await send({
+      type: "session.permission",
+      sessionId: "s",
+      permissionId: "perm-q3",
+      response: { behavior: "deny", message: "no" },
+    });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const items = events.filter((event) => event.type === "timeline.item");
+    expect(items[0]).toMatchObject({ item: { text: "decision:deny" } });
+  });
+
+  it("does not hang when the session closes mid question translation", async () => {
+    let fetchCalled = false;
+    let releaseFetch: ((content: string) => void) | null = null;
+    const gate = new Promise<string>((resolve) => {
+      releaseFetch = resolve;
+    });
+    const gatedFetch = (async () => {
+      fetchCalled = true;
+      const text = await gate;
+      return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), {
+        status: 200,
+      });
+    }) as typeof fetch;
+    const fake = createFakeFactory();
+    const provider = createTranslateClaudeProvider({
+      loadConfig: async () => values,
+      fetchFn: gatedFetch,
+      queryFactory: fake.factory,
+    });
+    const registration = await provider.connect({
+      versions: [1],
+      capabilities: [...PROVIDER_CAPABILITIES],
+    });
+    const events: ProviderEvent[] = [];
+    registration.onEvent((event) => events.push(event));
+    const send = (input: ProviderInput) => registration.send(input);
+    await send(openInput);
+    let decision: unknown;
+    fake.use(async function* (_pushed) {
+      decision = await fake.state.options?.canUseTool?.(
+        "AskUserQuestion",
+        { questions: [{ header: "Farbe", question: "Welche Farbe?", options: [] }] },
+        { signal: new AbortController().signal, requestId: "perm-qc", toolUseID: "tu-qc" },
+      );
+      yield assistantText("a-1", "noted");
+      yield resultSuccess("cs-1", "done");
+    });
+    const prompting = send(promptInput("Choose"));
+    // Wait until the display translation is actually in flight, then close.
+    // The prompt send itself is left unawaited: it stays parked on the gated
+    // translation fetch until released below.
+    const start = Date.now();
+    while (!fetchCalled && Date.now() - start < 4_000) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(fetchCalled).toBe(true);
+    // Do not await the close yet: teardown waits on the pump, which waits on
+    // the gated translation. Release first, then the close must settle.
+    const closing = send({ type: "session.close", requestId: "r-close-q", sessionId: "s" });
+    (releaseFetch as unknown as (content: string) => void)("EN(x)");
+    await closing;
+    await prompting;
+    // Releasing with any text proves teardown never waited on a ghost pending:
+    // session.closed arrives only after the pump settles.
+    await waitFor(events, (event) => event.type === "session.closed");
+    const decisionStart = Date.now();
+    while (decision === undefined && Date.now() - decisionStart < 4_000) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(decision).toMatchObject({ behavior: "deny" });
+    expect(events.some((event) => event.type === "session.permission")).toBe(false);
+    await registration.close();
+  });
+
   it("marks the turn canceled after an interrupt", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
