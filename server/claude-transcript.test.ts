@@ -2,7 +2,7 @@ import { mkdtempSync, realpathSync, rmSync, utimesSync } from "node:fs";
 import { mkdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_REPLAY_CHILD_ITEMS,
   MAX_REPLAY_ITEMS,
@@ -10,6 +10,7 @@ import {
   MAX_REPLAY_SIDECARS,
   readClaudeReplay,
   type ReplayResult,
+  type ReplayUserTextRestore,
 } from "./claude-transcript";
 
 const tempRoots: string[] = [];
@@ -85,11 +86,11 @@ function writeSidecar(
   }
 }
 
-async function replay(fixture: Fixture): Promise<ReplayResult> {
+async function replay(fixture: Fixture, restore?: ReplayUserTextRestore): Promise<ReplayResult> {
   const previous = process.env["CLAUDE_CONFIG_DIR"];
   process.env["CLAUDE_CONFIG_DIR"] = fixture.configDir;
   try {
-    return await readClaudeReplay(fixture.cwd, fixture.sessionId);
+    return await readClaudeReplay(fixture.cwd, fixture.sessionId, restore);
   } finally {
     if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
     else process.env["CLAUDE_CONFIG_DIR"] = previous;
@@ -220,5 +221,106 @@ describe("claude transcript replay windows", () => {
     expect(ids.has("tu-s01")).toBe(false);
     expect(ids.has("tu-s02")).toBe(false);
     expect(ids.has(`tu-s${String(total - 1).padStart(2, "0")}`)).toBe(true);
+  });
+});
+
+describe("user text restoration", () => {
+  it("restores root user blocks per-block before joining, leaving assistants alone", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "text", text: "DE(Hello)" }, { type: "text", text: "DE(world)" }] },
+      }),
+      assistantText("Antwort"),
+    ]);
+    const restoreRootBlock = vi.fn((block: string) =>
+      block === "DE(Hello)" ? "Hello" : block === "DE(world)" ? "world" : block,
+    );
+    const result = await replay(fixture, {
+      restoreRootBlock,
+      restoreChildBlock: (block) => block,
+    });
+    const users = result.rootItems.filter((item) => item.type === "user_message");
+    // Block boundaries are the exact lookup keys: the joined replay text is
+    // built from individually restored blocks.
+    expect(users.map((item) => ("text" in item ? item.text : null))).toEqual(["Hello\nworld"]);
+    expect(restoreRootBlock).toHaveBeenCalledWith("DE(Hello)");
+    expect(restoreRootBlock).toHaveBeenCalledWith("DE(world)");
+    expect(textsOf(result.rootItems)).toContain("Antwort");
+  });
+
+  it("routes sidecar user blocks through the child restorer, never the root one", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [userText("DE(root)")]);
+    writeSidecar(fixture, "aaa", "tu-aaa", [userText("DE(child)")], Date.now());
+    const restoreRootBlock = vi.fn(async (block: string) => `ROOT:${block}`);
+    const restoreChildBlock = vi.fn((block: string) => `CHILD:${block}`);
+    const result = await replay(fixture, { restoreRootBlock, restoreChildBlock });
+    expect(textsOf(result.rootItems)).toEqual(["ROOT:DE(root)"]);
+    expect(restoreRootBlock).toHaveBeenCalledWith("DE(root)");
+    expect(restoreRootBlock).not.toHaveBeenCalledWith("DE(child)");
+    expect(result.children).toHaveLength(1);
+    expect(textsOf(result.children[0]?.items ?? [])).toEqual(["CHILD:DE(child)"]);
+    expect(restoreChildBlock).toHaveBeenCalledWith("DE(child)");
+    expect(restoreChildBlock).not.toHaveBeenCalledWith("DE(root)");
+  });
+
+  it("never feeds tool-result content to the restorer", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", id: "tu-1", name: "Bash", input: { command: "ls" } }],
+        },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", tool_use_id: "tu-1", content: "DE(output)" }] },
+      }),
+    ]);
+    const restoreRootBlock = vi.fn((block: string) => `RESTORED:${block}`);
+    const result = await replay(fixture, {
+      restoreRootBlock,
+      restoreChildBlock: (block) => block,
+    });
+    // No user_message at all: the tool result replays as a tool_call whose
+    // detail comes from the tool input/output, never the user restorer.
+    expect(result.rootItems.some((item) => item.type === "user_message")).toBe(false);
+    expect(restoreRootBlock).not.toHaveBeenCalled();
+    // One running card from the assistant tool_use plus its completed card
+    // from the user tool_result.
+    expect(result.rootItems.filter((item) => item.type === "tool_call")).toHaveLength(2);
+  });
+
+  it("supports async root restorers (the back-translation fallback)", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [userText("Hallo Welt")]);
+    const result = await replay(fixture, {
+      restoreRootBlock: async (block) => `BACK:${block}`,
+      restoreChildBlock: (block) => block,
+    });
+    expect(textsOf(result.rootItems)).toEqual(["BACK:Hallo Welt"]);
+  });
+
+  it("keeps a throwing block verbatim instead of dropping the whole replay", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "text", text: "good" }, { type: "text", text: "bad" }] },
+      }),
+    ]);
+    const result = await replay(fixture, {
+      restoreRootBlock: (block) => {
+        if (block === "bad") throw new Error("restorer boom");
+        return `R:${block}`;
+      },
+      restoreChildBlock: (block) => block,
+    });
+    // One bad block degrades to its translated text; the good block and the
+    // replay as a whole survive.
+    expect(textsOf(result.rootItems)).toEqual(["R:good\nbad"]);
   });
 });

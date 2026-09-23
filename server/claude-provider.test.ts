@@ -24,6 +24,7 @@ const values: TranslateSettingsValues = {
   translateResponses: true,
   translateAllTimelines: false,
   translationTimeoutMs: 5_000,
+  uiLanguage: "system" as const,
 };
 
 /** Translation endpoint stub: DE(...) or FAIL for texts containing FAIL. */
@@ -161,12 +162,16 @@ function resultSuccess(sessionId: string, text: string): SDKMessage {
   } as unknown as SDKMessage;
 }
 
-async function createHarness() {
+async function createHarness(
+  overrides?: Partial<TranslateSettingsValues>,
+  cacheStore?: import("./translation-cache-store").TranslationCacheStore,
+) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
-    loadConfig: async () => values,
+    loadConfig: async () => ({ ...values, ...overrides }),
     fetchFn: translatingFetch(),
     queryFactory: fake.factory,
+    ...(cacheStore !== undefined ? { cacheStore } : {}),
   });
   const registration = await provider.connect({
     versions: [1],
@@ -1256,7 +1261,10 @@ describe("translate claude provider extended protocol", () => {
     const previous = process.env["CLAUDE_CONFIG_DIR"];
     process.env["CLAUDE_CONFIG_DIR"] = configDir;
     try {
-      const { events, send } = await createHarness();
+      // Prompt translation disabled: the fixture holds original user text
+      // (never translated), so replay must keep it verbatim instead of
+      // back-translating it.
+      const { events, send } = await createHarness({ translatePrompts: false });
       await send({
         ...openInput,
         config: { ...openInput.config, cwd },
@@ -1330,7 +1338,9 @@ describe("translate claude provider extended protocol", () => {
     const previous = process.env["CLAUDE_CONFIG_DIR"];
     process.env["CLAUDE_CONFIG_DIR"] = configDir;
     try {
-      const { events, send } = await createHarness();
+      // Same as above: untranslated fixture text with prompt translation
+      // disabled replays verbatim.
+      const { events, send } = await createHarness({ translatePrompts: false });
       await send({
         ...openInput,
         config: { ...openInput.config, cwd },
@@ -1361,6 +1371,251 @@ describe("translate claude provider extended protocol", () => {
       else process.env["CLAUDE_CONFIG_DIR"] = previous;
       await fs.rm(configDir, { recursive: true, force: true });
       await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the original user text on replay instead of the translated transcript", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantText("a-rt", "Hallo");
+      yield resultSuccess("cs-rt-live", "fertig");
+    });
+    await send(promptInput("Hello world"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+
+    // Claude persisted the translated prompt; replay must show the original.
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = pathModule.join(configDir, "projects", encoded);
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-rt.jsonl"),
+      [
+        JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "DE(Hello world)" }] },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Hallo" }] },
+        }),
+      ].join("\n"),
+    );
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      await send({
+        ...openInput,
+        requestId: "r-rt",
+        sessionId: "s-rt",
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-rt" } },
+        history: "replay",
+      });
+      await waitFor(
+        events,
+        (event) => event.type === "session.ready" && event.sessionId === "s-rt",
+      );
+      const texts = events
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "s-rt")
+        .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+      expect(texts).toContain("Hello world");
+      expect(texts).not.toContain("DE(Hello world)");
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("back-translates pre-fix transcripts for the root timeline but never for sidecars", async () => {    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = pathModule.join(configDir, "projects", encoded);
+    await fs.mkdir(pathModule.join(projectDir, "cs-fb", "subagents"), { recursive: true });
+    // "Guten Morgen" was never translated through this harness, so no exact
+    // reverse entry exists: the root fallback back-translates it via the
+    // stub endpoint (DE(...)). The sidecar Task prompt is agent-language by
+    // design and must stay untouched.
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-fb.jsonl"),
+      [
+        JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Guten Morgen" }] },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Hallo" }] },
+        }),
+      ].join("\n"),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-fb", "subagents", "agent-c1.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "Explore", toolUseId: "tu-c1" }),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-fb", "subagents", "agent-c1.jsonl"),
+      JSON.stringify({ type: "user", message: { role: "user", content: "Task prompt" } }),
+    );
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      const { events, send } = await createHarness();
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-fb" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      const rootTexts = events
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "s")
+        .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+      expect(rootTexts).toContain("DE(Guten Morgen)");
+      expect(rootTexts).not.toContain("Guten Morgen");
+      const childTexts = events
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "subagent:s:tu-c1")
+        .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+      expect(childTexts).toEqual(["Task prompt"]);
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps serialized attachments and oversized blocks verbatim on replay", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = pathModule.join(configDir, "projects", encoded);
+    await fs.mkdir(projectDir, { recursive: true });
+    const attachment = JSON.stringify({ type: "note", mimeType: "text/plain", extra: 1 });
+    const big = `prefix-${"x".repeat(100_001)}`;
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-keep.jsonl"),
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "text", text: attachment }, { type: "text", text: big }] },
+      }),
+    );
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      const { events, send } = await createHarness();
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-keep" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      const texts = events
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "s")
+        .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+      // Neither block may reach the endpoint (the stub would wrap it in
+      // DE(...)): attachments pass through, oversized blocks are refused.
+      expect(texts).toEqual([`${attachment}\n${big}`]);
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("restores originals across daemon restarts via the persistent store", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const { createPersistentTranslationCacheStore } = await import("./translation-cache-store");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const cacheDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "translate-cache-"));
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = pathModule.join(configDir, "projects", encoded);
+    await fs.mkdir(projectDir, { recursive: true });
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      // First "process": prompt, translating and recording the reverse entry.
+      const first = await createHarness(undefined, createPersistentTranslationCacheStore({ directory: cacheDir }));
+      await first.send(openInput);
+      first.fake.use(async function* () {
+        yield assistantText("a-persist", "Hallo");
+        yield resultSuccess("cs-persist-live", "fertig");
+      });
+      await first.send(promptInput("Hello world"));
+      await waitFor(first.events, (event) => event.type === "session.turn" && event.state === "completed");
+      await first.registration.close();
+
+      // Claude persisted the translated prompt.
+      await fs.writeFile(
+        pathModule.join(projectDir, "cs-persist.jsonl"),
+        [
+          JSON.stringify({
+            type: "user",
+            message: { content: [{ type: "text", text: "DE(Hello world)" }] },
+          }),
+          JSON.stringify({
+            type: "assistant",
+            message: { content: [{ type: "text", text: "Hallo" }] },
+          }),
+        ].join("\n"),
+      );
+
+      // Second "process": a fresh store over the same directory must restore
+      // the original with zero endpoint calls — the fetch rejects on any use.
+      const fake2 = createFakeFactory();
+      const provider2 = createTranslateClaudeProvider({
+        loadConfig: async () => values,
+        fetchFn: (async () => {
+          throw new Error("endpoint must not be billed on exact restore");
+        }) as typeof fetch,
+        queryFactory: fake2.factory,
+        cacheStore: createPersistentTranslationCacheStore({ directory: cacheDir }),
+      });
+      const registration2 = await provider2.connect({
+        versions: [1],
+        capabilities: [...PROVIDER_CAPABILITIES],
+      });
+      const events2: ProviderEvent[] = [];
+      registration2.onEvent((event) => events2.push(event));
+      await registration2.send({
+        ...openInput,
+        requestId: "r-persist",
+        sessionId: "s-persist",
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-persist" } },
+        history: "replay",
+      });
+      await waitFor(events2, (event) => event.type === "session.ready");
+      const texts = events2
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "s-persist")
+        .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+      expect(texts).toContain("Hello world");
+      expect(texts).not.toContain("DE(Hello world)");
+      await registration2.close();
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+      await fs.rm(cacheDir, { recursive: true, force: true });
     }
   });
 });

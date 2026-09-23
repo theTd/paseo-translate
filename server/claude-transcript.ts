@@ -86,6 +86,28 @@ export interface ReplayResult {
   children: ReplayedChild[];
 }
 
+/**
+ * Per-block user-text restoration for history replay.
+ *
+ * Claude persists the translated (agent-language) prompts this plugin sent
+ * it, so replaying them verbatim would show the user their own messages in
+ * the wrong language after a reopen. The provider passes:
+ * - `restoreRootBlock`: exact reverse lookup plus a back-translation
+ *   fallback for sessions predating the reverse index. Only the root
+ *   timeline gets the fallback — Task sidechain prompts are agent-language
+ *   by design and must never be back-translated.
+ * - `restoreChildBlock`: exact reverse lookup only (a miss keeps the block).
+ *
+ * Both receive one translated user text block at a time (never tool-result
+ * content) and resolve with the text to emit. Absent means no restoration.
+ * Callbacks SHOULD NOT throw — a throwing block is kept verbatim by the
+ * per-block backstop above, but callers get no failure signal there.
+ */
+export interface ReplayUserTextRestore {
+  restoreRootBlock: (translatedBlock: string) => Promise<string> | string;
+  restoreChildBlock: (translatedBlock: string) => Promise<string> | string;
+}
+
 function resolveConfigDir(): string {
   const override = process.env["CLAUDE_CONFIG_DIR"];
   if (typeof override === "string" && override.length > 0) return override;
@@ -203,7 +225,12 @@ function truncateTail(collector: Collector): void {
   }
 }
 
-function collectEntry(collector: Collector, entry: ReplayEntry, idSeed: string): void {
+async function collectEntry(
+  collector: Collector,
+  entry: ReplayEntry,
+  idSeed: string,
+  restoreUserBlock?: (translatedBlock: string) => Promise<string> | string,
+): Promise<void> {
   const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : undefined;
   const withTimestamp = <T extends object>(item: T): T =>
     timestamp !== undefined ? { ...item, timestamp } : item;
@@ -283,6 +310,18 @@ function collectEntry(collector: Collector, entry: ReplayEntry, idSeed: string):
   }
   if (entry.type === "user") {
     const content = entry.message?.content;
+    // A throwing restorer must never fail the whole replay: on error the
+    // translated block is kept (otherwise the readClaudeReplay catch-all
+    // would drop every item on one bad block). Provider callbacks are
+    // guarded already; this is the backstop for future callers.
+    const restoreBlock = async (translatedBlock: string): Promise<string> => {
+      if (restoreUserBlock === undefined) return translatedBlock;
+      try {
+        return await restoreUserBlock(translatedBlock);
+      } catch {
+        return translatedBlock;
+      }
+    };
     // Sidecar prompts serialize as a bare string rather than a block array.
     if (typeof content === "string") {
       const text = content.trim();
@@ -292,7 +331,7 @@ function collectEntry(collector: Collector, entry: ReplayEntry, idSeed: string):
           withTimestamp({
             type: "user_message",
             id: `${idSeed}`,
-            text,
+            text: await restoreBlock(text),
           } satisfies ProviderTimelineItem),
         );
       }
@@ -305,7 +344,10 @@ function collectEntry(collector: Collector, entry: ReplayEntry, idSeed: string):
       const record = block as { type?: unknown };
       if (record.type === "text") {
         const text = readString((block as { text?: unknown }).text);
-        if (text !== undefined) texts.push(text);
+        // Per-block restore BEFORE joining: forward translation ran per
+        // block, so block boundaries are the only exact lookup keys. A
+        // joined-string lookup would miss every multi-block turn.
+        if (text !== undefined) texts.push(await restoreBlock(text));
       } else if (record.type === "tool_result") {
         const result = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
         if (typeof result.tool_use_id !== "string") continue;
@@ -357,10 +399,14 @@ function flattenReplayContent(content: unknown): string | null {
 }
 
 /** Best-effort replay. Never throws: failures read as empty replay. */
-export async function readClaudeReplay(cwd: string, claudeSessionId: string): Promise<ReplayResult> {
+export async function readClaudeReplay(
+  cwd: string,
+  claudeSessionId: string,
+  restore?: ReplayUserTextRestore,
+): Promise<ReplayResult> {
   const empty: ReplayResult = { rootItems: [], children: [] };
   try {
-    return await readReplayInner(cwd, claudeSessionId);
+    return await readReplayInner(cwd, claudeSessionId, restore);
   } catch {
     return empty;
   }
@@ -372,7 +418,11 @@ interface ReplayMeta {
   toolUseId?: unknown;
 }
 
-async function readReplayInner(cwd: string, claudeSessionId: string): Promise<ReplayResult> {
+async function readReplayInner(
+  cwd: string,
+  claudeSessionId: string,
+  restore?: ReplayUserTextRestore,
+): Promise<ReplayResult> {
   const projectDir = join(resolveConfigDir(), "projects", encodeProjectDir(canonicalize(cwd)));
   const entries = await readJsonLines(join(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
@@ -389,11 +439,11 @@ async function readReplayInner(cwd: string, claudeSessionId: string): Promise<Re
     ) {
       continue;
     }
-    collectEntry(root, entry, `replay-${seed++}`);
+    await collectEntry(root, entry, `replay-${seed++}`, restore?.restoreRootBlock);
   }
   truncateTail(root);
 
-  const children = await readReplayChildren(projectDir, claudeSessionId, root);
+  const children = await readReplayChildren(projectDir, claudeSessionId, root, restore);
   // Global bound: sidecars share one tail budget on top of the root window
   // so many sidecars can never emit collectors × cap items. The walk runs
   // from the newest child backwards, so the oldest children shrink first
@@ -419,6 +469,7 @@ async function readReplayChildren(
   projectDir: string,
   claudeSessionId: string,
   root: Collector,
+  restore?: ReplayUserTextRestore,
 ): Promise<ReplayedChild[]> {
   let files: string[];
   try {
@@ -458,7 +509,12 @@ async function readReplayChildren(
   for (const { file } of stagedFiles) {
     try {
       const agentId = file.slice("agent-".length, -".jsonl".length);
-      const stagedChild = await stageReplayChild(projectDir, claudeSessionId, agentId);
+      const stagedChild = await stageReplayChild(
+        projectDir,
+        claudeSessionId,
+        agentId,
+        restore?.restoreChildBlock,
+      );
       if (stagedChild) {
         staged.push(stagedChild);
         for (const [toolUseId, owner] of stagedChild.collector.ownerCanonicalByToolUseId) {
@@ -491,6 +547,7 @@ async function stageReplayChild(
   projectDir: string,
   claudeSessionId: string,
   agentId: string,
+  restoreUserBlock?: (translatedBlock: string) => Promise<string> | string,
 ): Promise<{
   canonicalId: string;
   meta: { agentType?: unknown; description?: unknown };
@@ -514,7 +571,7 @@ async function stageReplayChild(
   const collector = createCollector(canonicalId);
   let seed = 0;
   for (const entry of entries) {
-    collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`);
+    await collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`, restoreUserBlock);
   }
   truncateTail(collector);
   return { canonicalId, meta: meta ?? {}, collector };

@@ -43,6 +43,54 @@ export interface Translator {
     direction: TranslateDirection,
     onDelta: (delta: string) => void,
   ): Promise<string>;
+  /**
+   * Exact original fragment for a previously translated user prompt, if the
+   * reverse entry is still cached. Settings-independent (keyed by the
+   * trimmed translated text only) so a reopened session restores its
+   * originals even after endpoint or language settings changed. Returns
+   * undefined on a miss; the caller keeps the translated text or falls back
+   * to a back-translation.
+   */
+  restoreOriginalFragment(translatedFragment: string): string | undefined;
+}
+
+/**
+ * Reverse-index key for user→agent translations. Deliberately NOT part of
+ * the forward cache-key space (forward keys are JSON objects starting with
+ * `{`), so the two namespaces share the store file and LRU budget without
+ * colliding. Trimmed before hashing: replayed transcript blocks are trimmed
+ * on read while the prompt-time fragment may carry surrounding whitespace.
+ *
+ * Known tradeoffs of sharing the store (see TRANSLATION_CACHE_CAPACITY):
+ * every user→agent translation now occupies two entries, so the effective
+ * forward capacity is roughly halved and the JSONL file grows twice as fast
+ * (same compaction rules apply). Evicting a reverse entry only degrades to
+ * the replay back-translation fallback — never to a wrong text.
+ *
+ * The trimmed key is many-to-one by design: distinct originals that happen
+ * to translate to the same trimmed text share one entry (last-write-wins)
+ * and replay may show another turn's original. Machine translation is not
+ * injective, so per-turn disambiguation would need prompt-time ordering
+ * metadata; the mistargeted text is still same-language and fail-soft, and
+ * exact triple collisions are rare enough that the ordering-free key wins.
+ */
+const ORIGINAL_FRAGMENT_KEY_PREFIX = "user-original:v1:";
+
+function originalFragmentKey(translatedFragment: string): string | null {
+  const normalized = translatedFragment.trim();
+  if (normalized.length === 0) return null;
+  return `${ORIGINAL_FRAGMENT_KEY_PREFIX}${createHash("sha256").update(normalized, "utf8").digest("hex")}`;
+}
+
+function rememberOriginalFragment(
+  cache: TranslationCacheStore,
+  translated: string,
+  original: string,
+): void {
+  if (original.trim().length === 0) return;
+  const key = originalFragmentKey(translated);
+  if (key === null) return;
+  cache.set(key, original);
 }
 
 /**
@@ -117,26 +165,43 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     async translate(text, direction) {
       const prepared = await setup(text, direction);
       if ("trivial" in prepared) return prepared.trivial;
-      if ("cached" in prepared) return prepared.cached;
+      if ("cached" in prepared) {
+        // A cache hit still records the reverse entry: entries translated
+        // before the reverse index existed (or evicted from it while the
+        // forward entry survived) become restorable on next use.
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
+        return prepared.cached;
+      }
       const translated = await prepared.client.complete([...prepared.messages]);
       cache.set(prepared.key, translated);
+      if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
       return translated;
     },
     async translateStream(text, direction, onDelta) {
       const prepared = await setup(text, direction);
       if ("trivial" in prepared) return prepared.trivial;
-      if ("cached" in prepared) return prepared.cached;
+      if ("cached" in prepared) {
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
+        return prepared.cached;
+      }
       try {
         const translated = await prepared.client.stream([...prepared.messages], onDelta);
         cache.set(prepared.key, translated);
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
         return translated;
       } catch {
         // The stream is an optimization, not a requirement: one ordinary
         // completion runs instead, so endpoints without SSE stay usable.
         const translated = await prepared.client.complete([...prepared.messages]);
         cache.set(prepared.key, translated);
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
         return translated;
       }
+    },
+    restoreOriginalFragment(translatedFragment) {
+      const key = originalFragmentKey(translatedFragment);
+      if (key === null) return undefined;
+      return cache.get(key);
     },
   };
 }

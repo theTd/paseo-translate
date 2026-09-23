@@ -38,3 +38,25 @@ export async function translatePromptFragment(
   if (match === null || match[2].trim().length === 0) return text;
   return `${match[1]}${await translate(match[2])}`;
 }
+
+/**
+ * Reverse of {@link translatePromptFragment} for history replay: maps one
+ * agent-language block back to the exact user-language fragment recorded at
+ * prompt time. `lookup` resolves a single translated fragment (args or whole
+ * text) to its original, or undefined on a miss. Slash prefixes, serialized
+ * attachments, and blank/arg-less commands pass through untouched; a missed
+ * lookup keeps the translated block so the caller can fall back to a
+ * back-translation or keep it as-is.
+ */
+export function restorePromptFragment(
+  translated: string,
+  lookup: (translatedFragment: string) => string | undefined,
+): string {
+  if (translated.trim().length === 0) return translated;
+  if (isSerializedAttachment(translated)) return translated;
+  if (!translated.startsWith("/")) return lookup(translated) ?? translated;
+  const match = /^(\S+\s*)([\s\S]*)$/.exec(translated);
+  if (match === null || match[2].trim().length === 0) return translated;
+  const restored = lookup(match[2]);
+  return restored === undefined ? translated : `${match[1]}${restored}`;
+}

@@ -17,7 +17,11 @@ import {
   type ProviderSessionConfig,
 } from "@getpaseo/plugin/server/provider";
 import { createTranslator, type TranslatorDeps } from "./translate";
-import { translatePromptFragment } from "./prompt-text";
+import {
+  isSerializedAttachment,
+  restorePromptFragment,
+  translatePromptFragment,
+} from "./prompt-text";
 import {
   ASK_USER_QUESTION_TOOL,
   isAskUserQuestionRequest,
@@ -29,10 +33,11 @@ import {
 } from "./question";
 import { ClaudeSubagentTracker } from "./claude-subagents";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
-import { readClaudeReplay } from "./claude-transcript";
+import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
 import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
   TRANSLATE_CLAUDE_PROVIDER_LABEL,
+  TRANSLATION_TEXT_LIMIT,
   type TranslateSettingsValues,
 } from "../shared/translate";
 
@@ -497,7 +502,8 @@ async function replayHistory(
   context: DispatchContext,
 ): Promise<void> {
   if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
-  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId);
+  const restore = await buildReplayRestore(context);
+  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore);
   for (const item of replay.rootItems) {
     if (session.closed) return;
     context.emit({ type: "timeline.item", sessionId: session.id, item });
@@ -535,6 +541,97 @@ async function replayHistory(
     }
     context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "completed" });
   }
+}
+
+/**
+ * Builds the user-text restoration for history replay.
+ *
+ * Claude persists the translated (agent-language) prompts this plugin sent
+ * it, so replaying them verbatim would show the user's own messages in the
+ * wrong language after a reopen. Two layers, both fail-soft (a miss keeps
+ * the translated block):
+ * - exact reverse lookup of the fragment recorded at prompt time — no
+ *   endpoint call, survives settings changes (trimmed-hash key);
+ * - back-translation fallback for sessions predating the reverse index,
+ *   billed once per block then served from the normal translation cache.
+ * Only the root timeline gets the fallback: Task sidechain prompts are
+ * agent-language by design and must never be back-translated.
+ *
+ * Explicit tradeoff of the fallback (no language tag distinguishes a
+ * translated block from an untranslated one): transcripts that were NEVER
+ * translated — prompt translation disabled at the time, or a Claude session
+ * imported from another provider — have no exact entries, so every block
+ * misses and is back-translated once prompt translation is on. Such text
+ * is usually already in the user language, in which case a well-behaved
+ * endpoint returns it unchanged and the `back === block` guard below keeps
+ * it verbatim; but an endpoint that paraphrases same-language input can
+ * rewrite those blocks. Sessions translated under an older language pair
+ * have the same exposure (the fallback always uses the CURRENT pair, while
+ * the exact path is settings-independent and unaffected). If that ever
+ * matters, gate the fallback behind a setting or drop it: exact-only is
+ * the conservative mode, and pre-fix sessions then keep their translated
+ * text instead of an approximate back-translation.
+ */
+async function buildReplayRestore(context: DispatchContext): Promise<ReplayUserTextRestore> {
+  const lookupExact = (fragment: string): string | undefined => {
+    try {
+      return context.translator.restoreOriginalFragment(fragment);
+    } catch {
+      return undefined;
+    }
+  };
+  const exactOriginal = (block: string): string | undefined => {
+    try {
+      const restored = restorePromptFragment(block, lookupExact);
+      if (restored !== block) return restored;
+      // A recorded original identical to its translation (numbers, code,
+      // cognates) still counts as a hit: without this the identity case
+      // would fall through to a billed back-translation on every reopen.
+      return hasExactEntry(block) ? block : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const hasExactEntry = (block: string): boolean => {
+    try {
+      if (block.trim().length === 0 || isSerializedAttachment(block)) return false;
+      if (!block.startsWith("/")) return lookupExact(block) !== undefined;
+      const match = /^(\S+\s*)([\s\S]*)$/.exec(block);
+      if (match === null || match[2].trim().length === 0) return false;
+      return lookupExact(match[2]) !== undefined;
+    } catch {
+      return false;
+    }
+  };
+  let translateBack: ((block: string) => Promise<string | undefined>) | undefined;
+  try {
+    const values = await context.loadValues();
+    if (values.translatePrompts) {
+      translateBack = async (block: string) => {
+        if (block.trim().length === 0 || isSerializedAttachment(block)) return undefined;
+        if (block.length > TRANSLATION_TEXT_LIMIT) return undefined;
+        try {
+          const back = await translatePromptFragment(block, (fragment) =>
+            context.translator.translate(fragment, "agent-to-user"),
+          );
+          if (back.trim().length === 0 || back === block) return undefined;
+          return back;
+        } catch (error) {
+          console.warn(
+            `[translate] history back-translation failed (${error instanceof Error ? error.message : String(error)}); keeping the translated text`,
+          );
+          return undefined;
+        }
+      };
+    }
+  } catch {
+    translateBack = undefined;
+  }
+  return {
+    restoreRootBlock: async (block: string) =>
+      exactOriginal(block) ?? (translateBack !== undefined ? (await translateBack(block)) ?? block : block),
+    restoreChildBlock: (block: string) => exactOriginal(block) ?? block,
+  };
 }
 
 function configStateFor(session: ClaudeSession): {

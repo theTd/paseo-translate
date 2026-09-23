@@ -51430,7 +51430,13 @@ var translateSettings = (0, import_plugin.defineSettings)({
     translatePrompts: external_exports.boolean().default(true),
     translateResponses: external_exports.boolean().default(true),
     translateAllTimelines: external_exports.boolean().default(false),
-    translationTimeoutMs: external_exports.number().int().min(1e3).max(6e5).default(3e4)
+    translationTimeoutMs: external_exports.number().int().min(1e3).max(6e5).default(3e4),
+    /**
+     * Language of this plugin's own client screens and hints. "system"
+     * follows the device locale via Intl (the host does not expose its app
+     * language to plugins); any other value pins one of the host's locales.
+     */
+    uiLanguage: external_exports.enum(["system", "ar", "en", "es", "fr", "ja", "ko", "pt-BR", "ru", "zh-CN"]).default("system")
   })
 });
 var translateTextRpc = (0, import_plugin.defineRpc)({
@@ -51536,6 +51542,18 @@ function evictOldestIfNeeded(entries, maxEntries) {
 }
 
 // server/translate.ts
+var ORIGINAL_FRAGMENT_KEY_PREFIX = "user-original:v1:";
+function originalFragmentKey(translatedFragment) {
+  const normalized = translatedFragment.trim();
+  if (normalized.length === 0) return null;
+  return `${ORIGINAL_FRAGMENT_KEY_PREFIX}${(0, import_node_crypto2.createHash)("sha256").update(normalized, "utf8").digest("hex")}`;
+}
+function rememberOriginalFragment(cache, translated, original) {
+  if (original.trim().length === 0) return;
+  const key = originalFragmentKey(translated);
+  if (key === null) return;
+  cache.set(key, original);
+}
 function createTranslator(deps) {
   const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
   async function setup(text, direction) {
@@ -51579,24 +51597,38 @@ function createTranslator(deps) {
     async translate(text, direction) {
       const prepared = await setup(text, direction);
       if ("trivial" in prepared) return prepared.trivial;
-      if ("cached" in prepared) return prepared.cached;
+      if ("cached" in prepared) {
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
+        return prepared.cached;
+      }
       const translated = await prepared.client.complete([...prepared.messages]);
       cache.set(prepared.key, translated);
+      if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
       return translated;
     },
     async translateStream(text, direction, onDelta) {
       const prepared = await setup(text, direction);
       if ("trivial" in prepared) return prepared.trivial;
-      if ("cached" in prepared) return prepared.cached;
+      if ("cached" in prepared) {
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
+        return prepared.cached;
+      }
       try {
         const translated = await prepared.client.stream([...prepared.messages], onDelta);
         cache.set(prepared.key, translated);
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
         return translated;
       } catch {
         const translated = await prepared.client.complete([...prepared.messages]);
         cache.set(prepared.key, translated);
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
         return translated;
       }
+    },
+    restoreOriginalFragment(translatedFragment) {
+      const key = originalFragmentKey(translatedFragment);
+      if (key === null) return void 0;
+      return cache.get(key);
     }
   };
 }
@@ -51635,6 +51667,15 @@ async function translatePromptFragment(text, translate) {
   const match = /^(\S+\s*)([\s\S]*)$/.exec(text);
   if (match === null || match[2].trim().length === 0) return text;
   return `${match[1]}${await translate(match[2])}`;
+}
+function restorePromptFragment(translated, lookup) {
+  if (translated.trim().length === 0) return translated;
+  if (isSerializedAttachment(translated)) return translated;
+  if (!translated.startsWith("/")) return lookup(translated) ?? translated;
+  const match = /^(\S+\s*)([\s\S]*)$/.exec(translated);
+  if (match === null || match[2].trim().length === 0) return translated;
+  const restored = lookup(match[2]);
+  return restored === void 0 ? translated : `${match[1]}${restored}`;
 }
 
 // server/question.ts
@@ -52341,7 +52382,7 @@ function truncateTail(collector) {
     collector.items = collector.items.slice(-MAX_REPLAY_ITEMS);
   }
 }
-function collectEntry(collector, entry, idSeed) {
+async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
   const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : void 0;
   const withTimestamp = (item) => timestamp !== void 0 ? { ...item, timestamp } : item;
   if (entry.type === "assistant") {
@@ -52420,6 +52461,14 @@ function collectEntry(collector, entry, idSeed) {
   }
   if (entry.type === "user") {
     const content = entry.message?.content;
+    const restoreBlock = async (translatedBlock) => {
+      if (restoreUserBlock === void 0) return translatedBlock;
+      try {
+        return await restoreUserBlock(translatedBlock);
+      } catch {
+        return translatedBlock;
+      }
+    };
     if (typeof content === "string") {
       const text = content.trim();
       if (text.length > 0) {
@@ -52428,7 +52477,7 @@ function collectEntry(collector, entry, idSeed) {
           withTimestamp({
             type: "user_message",
             id: `${idSeed}`,
-            text
+            text: await restoreBlock(text)
           })
         );
       }
@@ -52441,7 +52490,7 @@ function collectEntry(collector, entry, idSeed) {
       const record2 = block;
       if (record2.type === "text") {
         const text = readString3(block.text);
-        if (text !== void 0) texts.push(text);
+        if (text !== void 0) texts.push(await restoreBlock(text));
       } else if (record2.type === "tool_result") {
         const result = block;
         if (typeof result.tool_use_id !== "string") continue;
@@ -52483,15 +52532,15 @@ function flattenReplayContent(content) {
   }
   return parts.length > 0 ? parts.join("\n") : null;
 }
-async function readClaudeReplay(cwd, claudeSessionId) {
+async function readClaudeReplay(cwd, claudeSessionId, restore) {
   const empty = { rootItems: [], children: [] };
   try {
-    return await readReplayInner(cwd, claudeSessionId);
+    return await readReplayInner(cwd, claudeSessionId, restore);
   } catch {
     return empty;
   }
 }
-async function readReplayInner(cwd, claudeSessionId) {
+async function readReplayInner(cwd, claudeSessionId, restore) {
   const projectDir = (0, import_node_path2.join)(resolveConfigDir(), "projects", encodeProjectDir(canonicalize(cwd)));
   const entries = await readJsonLines((0, import_node_path2.join)(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
@@ -52501,10 +52550,10 @@ async function readReplayInner(cwd, claudeSessionId) {
     if (typeof entry.parent_tool_use_id === "string" && entry.parent_tool_use_id.length > 0 || entry.isSidechain === true) {
       continue;
     }
-    collectEntry(root, entry, `replay-${seed++}`);
+    await collectEntry(root, entry, `replay-${seed++}`, restore?.restoreRootBlock);
   }
   truncateTail(root);
-  const children = await readReplayChildren(projectDir, claudeSessionId, root);
+  const children = await readReplayChildren(projectDir, claudeSessionId, root, restore);
   let remaining = MAX_REPLAY_CHILD_ITEMS;
   for (let index = children.length - 1; index >= 0; index--) {
     const child = children[index];
@@ -52520,7 +52569,7 @@ async function readReplayInner(cwd, claudeSessionId) {
   }
   return { rootItems: root.items, children };
 }
-async function readReplayChildren(projectDir, claudeSessionId, root) {
+async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   let files;
   try {
     files = await (0, import_promises10.readdir)((0, import_node_path2.join)(projectDir, claudeSessionId, "subagents"));
@@ -52546,7 +52595,12 @@ async function readReplayChildren(projectDir, claudeSessionId, root) {
   for (const { file: file2 } of stagedFiles) {
     try {
       const agentId = file2.slice("agent-".length, -".jsonl".length);
-      const stagedChild = await stageReplayChild(projectDir, claudeSessionId, agentId);
+      const stagedChild = await stageReplayChild(
+        projectDir,
+        claudeSessionId,
+        agentId,
+        restore?.restoreChildBlock
+      );
       if (stagedChild) {
         staged.push(stagedChild);
         for (const [toolUseId, owner] of stagedChild.collector.ownerCanonicalByToolUseId) {
@@ -52571,7 +52625,7 @@ async function readReplayChildren(projectDir, claudeSessionId, root) {
     };
   });
 }
-async function stageReplayChild(projectDir, claudeSessionId, agentId) {
+async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUserBlock) {
   const base = (0, import_node_path2.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
   let meta3 = null;
   try {
@@ -52590,7 +52644,7 @@ async function stageReplayChild(projectDir, claudeSessionId, agentId) {
   const collector = createCollector(canonicalId);
   let seed = 0;
   for (const entry of entries) {
-    collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`);
+    await collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`, restoreUserBlock);
   }
   truncateTail(collector);
   return { canonicalId, meta: meta3 ?? {}, collector };
@@ -52884,7 +52938,8 @@ function readConfigured(value) {
 }
 async function replayHistory(session, history, context) {
   if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
-  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId);
+  const restore = await buildReplayRestore(context);
+  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore);
   for (const item of replay.rootItems) {
     if (session.closed) return;
     context.emit({ type: "timeline.item", sessionId: session.id, item });
@@ -52919,6 +52974,64 @@ async function replayHistory(session, history, context) {
     }
     context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "completed" });
   }
+}
+async function buildReplayRestore(context) {
+  const lookupExact = (fragment) => {
+    try {
+      return context.translator.restoreOriginalFragment(fragment);
+    } catch {
+      return void 0;
+    }
+  };
+  const exactOriginal = (block) => {
+    try {
+      const restored = restorePromptFragment(block, lookupExact);
+      if (restored !== block) return restored;
+      return hasExactEntry(block) ? block : void 0;
+    } catch {
+      return void 0;
+    }
+  };
+  const hasExactEntry = (block) => {
+    try {
+      if (block.trim().length === 0 || isSerializedAttachment(block)) return false;
+      if (!block.startsWith("/")) return lookupExact(block) !== void 0;
+      const match = /^(\S+\s*)([\s\S]*)$/.exec(block);
+      if (match === null || match[2].trim().length === 0) return false;
+      return lookupExact(match[2]) !== void 0;
+    } catch {
+      return false;
+    }
+  };
+  let translateBack;
+  try {
+    const values = await context.loadValues();
+    if (values.translatePrompts) {
+      translateBack = async (block) => {
+        if (block.trim().length === 0 || isSerializedAttachment(block)) return void 0;
+        if (block.length > TRANSLATION_TEXT_LIMIT) return void 0;
+        try {
+          const back = await translatePromptFragment(
+            block,
+            (fragment) => context.translator.translate(fragment, "agent-to-user")
+          );
+          if (back.trim().length === 0 || back === block) return void 0;
+          return back;
+        } catch (error62) {
+          console.warn(
+            `[translate] history back-translation failed (${error62 instanceof Error ? error62.message : String(error62)}); keeping the translated text`
+          );
+          return void 0;
+        }
+      };
+    }
+  } catch {
+    translateBack = void 0;
+  }
+  return {
+    restoreRootBlock: async (block) => exactOriginal(block) ?? (translateBack !== void 0 ? await translateBack(block) ?? block : block),
+    restoreChildBlock: (block) => exactOriginal(block) ?? block
+  };
 }
 function configStateFor(session) {
   return {

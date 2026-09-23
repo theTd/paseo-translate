@@ -41,6 +41,7 @@ const values: TranslateSettingsValues = {
   translateResponses: true,
   translateAllTimelines: false,
   translationTimeoutMs: 5_000,
+  uiLanguage: "system" as const,
 };
 
 interface Captured {
@@ -344,5 +345,69 @@ describe("streaming translation jobs", () => {
     });
     const { jobId } = await manager.start({ text: "Guten Tag", direction: "agent-to-user" });
     await expect(manager.poll({ jobId })).resolves.toEqual({ text: "Guten Tag", done: true });
+  });
+});
+
+describe("user original restoration", () => {
+  it("records the reverse entry on a fresh translation and restores it", async () => {
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch([], (text) => `T:${text}`),
+    });
+    await expect(translator.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
+    expect(translator.restoreOriginalFragment("T:Hello")).toBe("Hello");
+  });
+
+  it("records the reverse entry on the cache-hit path and matches trimmed lookups", async () => {
+    const cacheStore = createMemoryTranslationCacheStore();
+    const first = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch([], (text) => `T:${text}`),
+      cacheStore,
+    });
+    await first.translate("  Hello  ", "user-to-agent");
+    // A second translator over the same store takes the cache-hit path: it
+    // must not bill the endpoint and must still restore the original.
+    const second = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch([], () => {
+        throw new Error("must not bill the endpoint on a cache hit");
+      }),
+      cacheStore,
+    });
+    await expect(second.translate("  Hello  ", "user-to-agent")).resolves.toBe("T:  Hello  ");
+    expect(second.restoreOriginalFragment("T:  Hello  ")).toBe("  Hello  ");
+    // Replayed transcript blocks are trimmed on read; the lookup tolerates it.
+    expect(second.restoreOriginalFragment("   T:  Hello   ")).toBe("  Hello  ");
+  });
+
+  it("ignores agent-to-user translations and misses", async () => {
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch([], (text) => `T:${text}`),
+    });
+    await translator.translate("Hallo", "agent-to-user");
+    expect(translator.restoreOriginalFragment("T:Hallo")).toBeUndefined();
+    expect(translator.restoreOriginalFragment("never seen")).toBeUndefined();
+    expect(translator.restoreOriginalFragment("   ")).toBeUndefined();
+  });
+
+  it("persists reverse entries across instances (the reopened-session case)", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "translate-reverse-"));
+    tempRoots.push(directory);
+    const first = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch([], (text) => `T:${text}`),
+      cacheStore: createPersistentTranslationCacheStore({ directory }),
+    });
+    await first.translate("Hello", "user-to-agent");
+    const second = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch([], () => {
+        throw new Error("must not bill the endpoint after a restart");
+      }),
+      cacheStore: createPersistentTranslationCacheStore({ directory }),
+    });
+    expect(second.restoreOriginalFragment("T:Hello")).toBe("Hello");
   });
 });
