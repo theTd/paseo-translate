@@ -53,6 +53,11 @@ function createFakeFactory() {
     setModelCalls: [] as Array<string | undefined>,
     setPermissionModeCalls: [] as string[],
     applyFlagSettingsCalls: [] as Array<Record<string, unknown>>,
+    supportedCommands: null as Array<{
+      name: string;
+      description?: string;
+      argumentHint?: string;
+    }> | null,
     supportedModels: null as
       | Array<{
           value: string;
@@ -104,6 +109,13 @@ function createFakeFactory() {
         if (state.supportedModels === null) throw new Error("no models mocked");
         return state.supportedModels;
       },
+      ...(state.supportedCommands === null
+        ? {}
+        : {
+            async supportedCommands() {
+              return state.supportedCommands ?? [];
+            },
+          }),
       async setModel(model?: string) {
         state.setModelCalls.push(model);
       },
@@ -612,6 +624,543 @@ describe("translate claude provider", () => {
     );
     const secondOptions = fake.state.allOptions.at(-1);
     expect(secondOptions?.settings).toEqual({ effortLevel: "xhigh" });
+  });
+});
+
+function taskStarted(
+  taskId: string,
+  toolUseId: string,
+  extra: Record<string, unknown> = {},
+): SDKMessage {
+  return {
+    type: "system",
+    subtype: "task_started",
+    task_id: taskId,
+    tool_use_id: toolUseId,
+    description: "Explore the repo",
+    subagent_type: "Explore",
+    task_type: "local_agent",
+    prompt: "List all source files",
+    uuid: `u-${taskId}`,
+    session_id: "cs-1",
+    ...extra,
+  } as unknown as SDKMessage;
+}
+
+function taskNotification(taskId: string, status: string): SDKMessage {
+  return {
+    type: "system",
+    subtype: "task_notification",
+    task_id: taskId,
+    status,
+    output_file: "",
+    summary: "",
+    uuid: `n-${taskId}-${status}`,
+    session_id: "cs-1",
+  } as unknown as SDKMessage;
+}
+
+function sidechainText(parentToolUseId: string, uuid: string, text: string): SDKMessage {
+  return {
+    type: "assistant",
+    message: { content: [{ type: "text", text }] },
+    parent_tool_use_id: parentToolUseId,
+    uuid,
+    session_id: "cs-1",
+  } as unknown as SDKMessage;
+}
+
+function rootToolUse(uuid: string, id: string, name: string, input: unknown): SDKMessage {
+  return {
+    type: "assistant",
+    message: { content: [{ type: "tool_use", id, name, input }] },
+    parent_tool_use_id: null,
+    uuid,
+    session_id: "cs-1",
+  } as unknown as SDKMessage;
+}
+
+describe("translate claude provider subagents", () => {
+  it("declares Task children as subsessions with timelines and terminal turns", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-task", "tu-1", "Task", {
+        name: "Explorer",
+        subagent_type: "Explore",
+        description: "Explore the repo",
+      });
+      yield taskStarted("t-1", "tu-1");
+      yield sidechainText("tu-1", "s-1", "Found three files");
+      yield taskNotification("t-1", "completed");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Go"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const childId = "subagent:s:tu-1";
+    const opened = events.find(
+      (event) => event.type === "session.opened" && event.sessionId === childId,
+    );
+    expect(opened).toMatchObject({
+      parentSessionId: "s",
+      toolCallId: "tu-1",
+      restoration: "parent",
+      title: "Explorer",
+      description: "Explore the repo",
+    });
+    const childItems = events.filter(
+      (event) => event.type === "timeline.item" && event.sessionId === childId,
+    );
+    expect(childItems.map((event) => event.type === "timeline.item" && event.item.type)).toEqual([
+      "user_message",
+      "assistant_message",
+    ]);
+    const childTurns = events.filter(
+      (event) => event.type === "session.turn" && event.sessionId === childId,
+    );
+    expect(childTurns.map((event) => event.type === "session.turn" && event.state)).toEqual([
+      "started",
+      "completed",
+    ]);
+  });
+
+  it("normalizes workflows and drops shells, housekeeping, and undeclared tasks", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield taskStarted("t-wf", "tu-wf", {
+        task_type: "local_workflow",
+        subagent_type: undefined,
+        description: "Spec workflow",
+        prompt: "console.log('source')",
+      });
+      yield taskStarted("t-bash", "tu-bash", { task_type: "local_bash", subagent_type: undefined });
+      yield taskStarted("t-skip", "tu-skip", { skip_transcript: true });
+      yield taskNotification("t-ghost", "completed");
+      yield taskNotification("t-bash", "completed");
+      yield taskNotification("t-wf", "completed");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Go"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const opened = events.filter((event) => event.type === "session.opened");
+    // Only the root and the workflow child.
+    expect(opened.map((event) => event.type === "session.opened" && event.sessionId).sort()).toEqual(
+      ["s", "subagent:s:tu-wf"],
+    );
+    const workflow = opened.find(
+      (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-wf",
+    );
+    expect(workflow).toMatchObject({ title: "Workflow", description: "Spec workflow" });
+    const workflowPrompt = events.find(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.sessionId === "subagent:s:tu-wf" &&
+        event.item.type === "user_message",
+    );
+    // A workflow prompt is script source; the opener uses the summary instead.
+    expect(workflowPrompt).toMatchObject({ item: { text: "Spec workflow" } });
+  });
+
+  it("treats a resumed task alias as the same child and nests grandchildren", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-task", "tu-1", "Task", { subagent_type: "Explore" });
+      yield taskStarted("t-1", "tu-1");
+      // A resumed task is re-announced with a new tool id for the same task.
+      yield taskStarted("t-1", "tu-1-resumed");
+      // A Task call inside the child's sidechain spawns a grandchild.
+      yield {
+        type: "assistant",
+        message: {
+          content: [{ type: "tool_use", id: "tu-2", name: "Task", input: { subagent_type: "Bash" } }],
+        },
+        parent_tool_use_id: "tu-1",
+        uuid: "s-task",
+        session_id: "cs-1",
+      } as unknown as SDKMessage;
+      yield taskStarted("t-2", "tu-2");
+      yield taskNotification("t-2", "completed");
+      yield taskNotification("t-1", "completed");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Go"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const childOpens = events.filter(
+      (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-1",
+    );
+    expect(childOpens).toHaveLength(1);
+    const grandchild = events.find(
+      (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-2",
+    );
+    expect(grandchild).toMatchObject({ parentSessionId: "subagent:s:tu-1", toolCallId: "tu-2" });
+  });
+
+  it("keeps backgrounded children running across an interrupt", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fake.use(async function* () {
+      yield rootToolUse("a-fg", "tu-fg", "Task", { subagent_type: "Explore" });
+      yield taskStarted("t-fg", "tu-fg");
+      yield rootToolUse("a-bg", "tu-bg", "Task", { subagent_type: "Explore" });
+      yield taskStarted("t-bg", "tu-bg", { is_backgrounded: true });
+      await gate;
+      return END_ITERATOR;
+    });
+    await send(promptInput("Work"));
+    await waitFor(
+      events,
+      (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-bg",
+    );
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" &&
+        event.sessionId === "subagent:s:tu-fg" &&
+        event.state === "canceled",
+    );
+    // The backgrounded child outlives the turn: no terminal event for it.
+    expect(
+      events.some(
+        (event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg",
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "session.turn" &&
+          event.sessionId === "subagent:s:tu-bg" &&
+          event.state !== "started",
+      ),
+    ).toBe(false);
+    (release as unknown as () => void)();
+  });
+});
+
+describe("translate claude provider extended protocol", () => {
+  it("steers the active turn with next priority and reports unavailable when idle", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fake.use(async function* () {
+      yield assistantText("a-1", "Working");
+      await gate;
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "timeline.item");
+    const steerTurn = events.find(
+      (event) => event.type === "session.turn" && event.state === "started",
+    );
+    if (steerTurn?.type !== "session.turn") throw new Error("turn missing");
+    await send({
+      type: "session.prompt",
+      sessionId: "s",
+      prompt: {
+        clientMessageId: "m-steer",
+        delivery: "steer",
+        input: { type: "message", content: [{ type: "text", text: "actually use pnpm" }] },
+      },
+    });
+    await waitFor(
+      events,
+      (event) => event.type === "session.prompt_result" && event.clientMessageId === "m-steer",
+    );
+    const steerResult = events.find(
+      (event) => event.type === "session.prompt_result" && event.clientMessageId === "m-steer",
+    );
+    expect(steerResult).toMatchObject({ result: { type: "steer", turnId: steerTurn.turnId } });
+    // No new turn opens for a steer; the follow-up queues behind the running one.
+    expect(
+      events.filter((event) => event.type === "session.turn" && event.state === "started"),
+    ).toHaveLength(1);
+    (release as unknown as () => void)();
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // The fake consumes queued input sequentially, so the steer lands after
+    // the gate releases; a live SDK reads it concurrently mid-turn.
+    await waitFor(events, (_event) => fake.state.received.length >= 2);
+    expect(fake.state.received[1]).toMatchObject({ priority: "next" });
+    expect(JSON.stringify(fake.state.received[1].message.content)).toContain(
+      "DE(actually use pnpm)",
+    );
+
+    await send({
+      type: "session.prompt",
+      sessionId: "s",
+      prompt: {
+        clientMessageId: "m-steer-idle",
+        delivery: "steer",
+        input: { type: "message", content: [{ type: "text", text: "later" }] },
+      },
+    });
+    await waitFor(
+      events,
+      (event) => event.type === "session.prompt_result" && event.clientMessageId === "m-steer-idle",
+    );
+    expect(
+      events.find(
+        (event) => event.type === "session.prompt_result" && event.clientMessageId === "m-steer-idle",
+      ),
+    ).toMatchObject({ result: { type: "failed" } });
+  });
+
+  it("accepts slash commands with a verbatim command word", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send({
+      type: "session.prompt",
+      sessionId: "s",
+      prompt: {
+        clientMessageId: "m-cmd",
+        delivery: "auto",
+        input: { type: "command", name: "review", arguments: "fix the login flow" },
+      },
+    });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const pushed = String(JSON.stringify(fake.state.received[0].message.content));
+    expect(pushed).toContain("/review DE(fix the login flow)");
+  });
+
+  it("passes image blocks to Claude natively", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send({
+      type: "session.prompt",
+      sessionId: "s",
+      prompt: {
+        clientMessageId: "m-img",
+        delivery: "auto",
+        input: {
+          type: "message",
+          content: [
+            { type: "text", text: "What is this?" },
+            { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+          ],
+        },
+      },
+    });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const content = fake.state.received[0].message.content as unknown[];
+    const image = content.find(
+      (block) => typeof block === "object" && block !== null && (block as { type: unknown }).type === "image",
+    ) as { source: { media_type: string; data: string } };
+    expect(image.source).toMatchObject({ media_type: "image/png", data: "aGVsbG8=" });
+    expect(JSON.stringify(content)).toContain("DE(What is this?)");
+  });
+
+  it("maps tool calls to structured details and reports usage", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-bash", "tu-bash", "Bash", { command: "pnpm test" });
+      yield {
+        type: "user",
+        message: {
+          content: [{ type: "tool_result", tool_use_id: "tu-bash", content: "2 passed" }],
+        },
+        parent_tool_use_id: null,
+      } as unknown as SDKMessage;
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        errors: [],
+        session_id: "cs-1",
+        modelUsage: {
+          "claude-sonnet-4-5": { inputTokens: 100, outputTokens: 50, costUSD: 0.01 },
+        },
+      } as unknown as SDKMessage;
+    });
+    await send(promptInput("Run tests"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const running = events.find(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "tool_call" &&
+        event.item.callId === "tu-bash",
+    );
+    expect(running).toMatchObject({
+      item: { name: "Bash", status: "running", detail: { type: "shell", command: "pnpm test" } },
+    });
+    const usage = events.find((event) => event.type === "session.usage");
+    expect(usage).toMatchObject({ usage: { inputTokens: 100, outputTokens: 50 } });
+  });
+
+  it("publishes slash commands reported by the CLI", async () => {
+    const { fake, events, send } = await createHarness();
+    fake.state.supportedCommands = [{ name: "review", description: "Review code" }];
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hi"));
+    await waitFor(events, (event) => event.type === "session.commands");
+    expect(events.find((event) => event.type === "session.commands")).toMatchObject({
+      sessionId: "s",
+      commands: [{ name: "review", description: "Review code" }],
+    });
+  });
+
+  it("replays persisted transcripts including subagent sidecars", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = pathModule.join(configDir, "projects", encoded);
+    await fs.mkdir(pathModule.join(projectDir, "cs-replay", "subagents"), { recursive: true });
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-replay.jsonl"),
+      [
+        JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Hello" }] },
+          parent_tool_use_id: null,
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Hi" }] },
+          parent_tool_use_id: null,
+        }),
+      ].join("\n"),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-replay", "subagents", "agent-a1.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "Explore", toolUseId: "tu-9" }),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-replay", "subagents", "agent-a1.jsonl"),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Child found it" }] },
+      }),
+    );
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      const { events, send } = await createHarness();
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-replay" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      const rootTexts = events
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "s")
+        .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+      expect(rootTexts).toContain("Hello");
+      expect(rootTexts).toContain("Hi");
+      const childOpened = events.find(
+        (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-9",
+      );
+      expect(childOpened).toMatchObject({ parentSessionId: "s", title: "Explore" });
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("replays newer transcript shapes (inline usage, string prompts, sidechain flags)", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = pathModule.join(configDir, "projects", encoded);
+    await fs.mkdir(pathModule.join(projectDir, "cs-new", "subagents"), { recursive: true });
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-new.jsonl"),
+      [
+        JSON.stringify({ type: "queue-operation", operation: "enqueue" }),
+        JSON.stringify({
+          type: "assistant",
+          isSidechain: true,
+          message: { content: [{ type: "text", text: "leaked sidechain" }] },
+        }),
+        JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Hello" }] },
+        }),
+      ].join("\n"),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-new", "subagents", "agent-b1.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "Explore", toolUseId: "tu-10" }),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-new", "subagents", "agent-b1.jsonl"),
+      [
+        JSON.stringify({ type: "user", message: { role: "user", content: "Do a review" } }),
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            content: [{ type: "text", text: "Reviewed" }],
+            usage: {
+              input_tokens: 10,
+              cache_creation_input_tokens: 20,
+              cache_read_input_tokens: 30,
+              output_tokens: 40,
+            },
+          },
+        }),
+      ].join("\n"),
+    );
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      const { events, send } = await createHarness();
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-new" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      const rootTexts = events
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "s")
+        .map((event) =>
+          event.type === "timeline.item" && "text" in event.item ? event.item.text : null,
+        );
+      expect(rootTexts).toContain("Hello");
+      expect(rootTexts).not.toContain("leaked sidechain");
+      const childItems = events.filter(
+        (event) => event.type === "timeline.item" && event.sessionId === "subagent:s:tu-10",
+      );
+      expect(childItems.map((event) => event.type === "timeline.item" && event.item.type)).toEqual([
+        "user_message",
+        "assistant_message",
+      ]);
+      const usage = events.find(
+        (event) => event.type === "session.usage" && event.sessionId === "subagent:s:tu-10",
+      );
+      expect(usage).toMatchObject({ usage: { contextWindowUsedTokens: 100 } });
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
   });
 });
 

@@ -69,12 +69,16 @@ the app after each turn.
   restarts). Permissions pass through to you with Allow/Deny; interrupt maps
   to Claude's interrupt. "Always allow" style permission upgrades from the
   CLI's suggestions are not offered — every request is a plain Allow/Deny.
-- MVP surface: message prompts, streaming text, tool-call snapshots,
-  permissions, interrupt, persistence. Not supported (capability-gated, the
-  daemon will not offer them): steering, slash commands, image prompts,
-  sub-agent tracks, model discovery, rewind. Model selection passes the
-  daemon-configured model through; the default catalog entry uses the CLI's
-  default model.
+- Full surface: message/command/image prompts, active-turn steering, slash
+  commands reported by the CLI, streaming text and thinking, structured
+  tool-call cards (shell/read/write/edit/search/fetch/plan/sub-agent),
+  Task subagents as provider subsessions (track rows with read-only
+  timelines, nesting, backgrounded children, resume aliases), usage
+  reporting, and history replay from Claude's own transcript files
+  (including subagent sidecars). Archive/unarchive/revert/session-listing
+  stay capability-gated off — the daemon handles their absence gracefully.
+  Model selection passes the daemon-configured model through; the default
+  catalog entry uses the CLI's default model.
 
 ## Develop
 

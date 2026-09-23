@@ -6,6 +6,7 @@ import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-a
 import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
+  type ProviderCommand,
   type ProviderConnection,
   type ProviderEvent,
   type ProviderInput,
@@ -17,17 +18,28 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslator, type TranslatorDeps } from "./translate";
 import { translatePromptFragment } from "./prompt-text";
+import { ClaudeSubagentTracker } from "./claude-subagents";
+import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
+import { readClaudeReplay } from "./claude-transcript";
 import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
   TRANSLATE_CLAUDE_PROVIDER_LABEL,
   type TranslateSettingsValues,
 } from "../shared/translate";
 
+/** Subset of the SDK's SlashCommand used for the session command list. */
+export interface CommandInfoLike {
+  name: string;
+  description?: string;
+  argumentHint?: string;
+}
+
 /** Minimal SDK Query surface this provider uses; test fakes implement the same. */
 export interface ClaudeQueryHandle {
   interrupt(): Promise<unknown>;
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage>;
   supportedModels?(): Promise<readonly ModelInfoLike[]>;
+  supportedCommands?(): Promise<readonly CommandInfoLike[]>;
   setModel?(model?: string): Promise<void>;
   setPermissionMode?(mode: string): Promise<void>;
   applyFlagSettings?(settings: Record<string, unknown>): Promise<void>;
@@ -55,9 +67,13 @@ export interface ClaudeProviderDeps extends TranslatorDeps {
 
 const CAPABILITIES = [
   "prompt.message",
+  "prompt.command",
+  "prompt.image",
+  "prompt.steer",
   "permission",
   "session.persistence",
   "session.configure",
+  "session.subsession",
 ] as const;
 
 /** Mirrors the native Claude provider's modes (auto requires the API transport). */
@@ -130,39 +146,71 @@ interface ClaudeSession {
   interrupted: boolean;
   closed: boolean;
   toolNames: Map<string, string>;
+  toolInputs: Map<string, unknown>;
   pendingPermissions: Map<string, (response: PermissionResultLike | null) => void>;
+  /** Live Task-protocol children, surfaced as provider subsessions. */
+  subagents: ClaudeSubagentTracker | null;
+  commandsPublished: boolean;
 }
 
 interface PromptSink {
   push(message: SDKUserMessage): void;
+  /**
+   * Queue a steer behind the running turn. Returns an id the sink tracks
+   * until the SDK actually dequeues the message, so an interrupt can discard
+   * steers Claude never read instead of resuming a stopped turn.
+   */
+  pushSteer(message: SDKUserMessage): void;
+  discardPendingSteers(): void;
   iterable: AsyncIterable<SDKUserMessage>;
 }
 
+interface SinkEntry {
+  message: SDKUserMessage;
+  steer: boolean;
+  delivered: boolean;
+}
+
 function createPromptSink(): PromptSink {
-  const queue: SDKUserMessage[] = [];
+  const queue: SinkEntry[] = [];
   let wake: (() => void) | null = null;
   const iterable: AsyncIterable<SDKUserMessage> = {
     [Symbol.asyncIterator]() {
       return {
         async next(): Promise<IteratorResult<SDKUserMessage>> {
           const pending = queue.shift();
-          if (pending !== undefined) return { value: pending, done: false };
+          if (pending !== undefined) {
+            pending.delivered = true;
+            return { value: pending.message, done: false };
+          }
           await new Promise<void>((resolve) => {
             wake = resolve;
           });
           wake = null;
           const message = queue.shift();
-          return message === undefined
-            ? { value: undefined, done: true }
-            : { value: message, done: false };
+          if (message === undefined) return { value: undefined, done: true };
+          message.delivered = true;
+          return { value: message.message, done: false };
         },
       };
     },
   };
   return {
     push(message) {
-      queue.push(message);
+      queue.push({ message, steer: false, delivered: false });
       wake?.();
+    },
+    pushSteer(message) {
+      queue.push({ message, steer: true, delivered: false });
+      wake?.();
+    },
+    discardPendingSteers() {
+      for (let index = queue.length - 1; index >= 0; index -= 1) {
+        const entry = queue[index];
+        if (entry !== undefined && entry.steer && !entry.delivered) {
+          queue.splice(index, 1);
+        }
+      }
     },
     iterable,
   };
@@ -174,10 +222,14 @@ function createPromptSink(): PromptSink {
  * agent language before Claude sees them. Claude's replies stream back in the
  * agent language; the client renderer translates them after each turn.
  *
- * MVP surface: message prompts, streaming text, tool-call snapshots,
- * permission pass-through, interrupt, and session persistence via Claude's
- * session id. Steer, slash commands, images, subagent tracks, and model
- * discovery are not declared as capabilities, so the daemon never sends them.
+ * Surface: message/command/image prompts, active-turn steering, streaming
+ * text and thinking, structured tool-call cards, Task subagents as provider
+ * subsessions (track rows with read-only timelines, including nesting,
+ * backgrounded children, and resume aliases), permission pass-through,
+ * interrupt, slash-command listing, usage reporting, session persistence via
+ * Claude's session id, and best-effort history replay from Claude's own
+ * transcript files. Archive/unarchive/revert/session-listing stay
+ * capability-gated off: the daemon handles their absence gracefully.
  */
 export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): ProviderRegistration {
   const translator = createTranslator(deps);
@@ -273,7 +325,13 @@ async function dispatch(
       const session = context.sessions.get(input.sessionId);
       if (session !== undefined && session.query !== null) {
         session.interrupted = true;
+        // Discard steers Claude never read first: the SDK would otherwise
+        // dequeue one and resume the turn just stopped.
+        session.sink.discardPendingSteers();
         await session.query.interrupt().catch(() => undefined);
+        // A canceled turn ends its foreground children; backgrounded ones
+        // outlive it and keep their descriptors for the later settle.
+        session.subagents?.cancelRunningForegroundTasks();
       }
       context.emit({ type: "request.completed", requestId: input.requestId });
       return;
@@ -369,8 +427,16 @@ async function openSession(
     interrupted: false,
     closed: false,
     toolNames: new Map(),
+    toolInputs: new Map(),
     pendingPermissions: new Map(),
+    subagents: null,
+    commandsPublished: false,
   };
+  session.subagents = new ClaudeSubagentTracker(
+    session.id,
+    session.config.cwd,
+    (event) => context.emit(event),
+  );
   context.sessions.set(input.sessionId, session);
   context.emit({
     type: "session.opened",
@@ -384,6 +450,7 @@ async function openSession(
     title: input.config.title,
     cwd: input.config.cwd,
   });
+  await replayHistory(session, input.history, context);
   context.emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
   context.emit({
     type: "session.config",
@@ -396,6 +463,56 @@ async function openSession(
 function readConfigured(value: string | undefined): string | null {
   if (typeof value !== "string" || value.length === 0 || value === "default") return null;
   return value;
+}
+
+/**
+ * Best-effort history replay from Claude's own transcript files. Failures
+ * read as empty replay: the session still opens and stays fully usable live.
+ */
+async function replayHistory(
+  session: ClaudeSession,
+  history: "replay" | "skip",
+  context: DispatchContext,
+): Promise<void> {
+  if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
+  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId);
+  for (const item of replay.rootItems) {
+    if (session.closed) return;
+    context.emit({ type: "timeline.item", sessionId: session.id, item });
+  }
+  for (const child of replay.children) {
+    if (session.closed) return;
+    const providerId = `subagent:${session.id}:${child.canonicalId}`;
+    const parentProviderId =
+      child.parentCanonicalId !== undefined
+        ? `subagent:${session.id}:${child.parentCanonicalId}`
+        : session.id;
+    const turnId = randomUUID();
+    context.emit({
+      type: "session.opened",
+      sessionId: providerId,
+      parentSessionId: parentProviderId,
+      toolCallId: child.canonicalId,
+      capabilities: [],
+      restoration: "parent",
+      title: child.title ?? "Subagent",
+      ...(child.description !== undefined ? { description: child.description } : {}),
+      cwd: session.config.cwd,
+    });
+    context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
+    for (const item of child.items) {
+      context.emit({ type: "timeline.item", sessionId: providerId, item });
+    }
+    if (child.totalTokens !== undefined) {
+      context.emit({
+        type: "session.usage",
+        sessionId: providerId,
+        turnId,
+        usage: { contextWindowUsedTokens: child.totalTokens },
+      });
+    }
+    context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "completed" });
+  }
 }
 
 function configStateFor(session: ClaudeSession): {
@@ -436,6 +553,14 @@ async function promptSession(
 ): Promise<void> {
   const session = context.sessions.get(input.sessionId);
   if (session === undefined) throw new Error(`Unknown session: ${input.sessionId}`);
+  if (input.prompt.input.type === "command") {
+    await commandSession(input, context, session);
+    return;
+  }
+  if (input.prompt.delivery === "steer") {
+    await steerSession(input, context, session);
+    return;
+  }
   if (session.active !== null) {
     context.emit({
       type: "session.prompt_result",
@@ -445,12 +570,9 @@ async function promptSession(
     });
     return;
   }
-  if (input.prompt.input.type !== "message") {
-    throw new Error("Translate Claude provider only accepts message prompts");
-  }
-  let translated: string;
+  let blocks: SdkContentBlock[];
   try {
-    translated = await translatePromptContent(input.prompt.input.content, context);
+    blocks = await buildMessageBlocks(input.prompt.input.content, context);
   } catch (error) {
     // Fail closed: the prompt never reaches Claude untranslated.
     context.emit({
@@ -474,20 +596,174 @@ async function promptSession(
   context.emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "started" });
   session.sink.push({
     type: "user",
-    message: { role: "user", content: [{ type: "text", text: translated }] },
+    message: { role: "user", content: blocks },
     parent_tool_use_id: null,
+  });
+  await publishCommands(session, context);
+}
+
+/**
+ * Slash-command prompts (`prompt.command`). The command word travels
+ * verbatim; only free-text arguments are translated, matching the flattened
+ * `/name args` handling of the ACP provider.
+ */
+async function commandSession(
+  input: Extract<ProviderInput, { type: "session.prompt" }>,
+  context: DispatchContext,
+  session: ClaudeSession,
+): Promise<void> {
+  if (session.active !== null) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input.sessionId,
+      clientMessageId: input.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "A turn is already running on this session" } },
+    });
+    return;
+  }
+  if (input.prompt.input.type !== "command") return;
+  let text = `/${input.prompt.input.name}`;
+  const args = input.prompt.input.arguments;
+  if (args.trim().length > 0) {
+    try {
+      const values = await context.loadValues();
+      const translated = values.translatePrompts
+        ? await context.translator.translate(args, "user-to-agent")
+        : args;
+      text += ` ${translated}`;
+    } catch (error) {
+      context.emit({
+        type: "session.prompt_result",
+        sessionId: input.sessionId,
+        clientMessageId: input.prompt.clientMessageId,
+        result: { type: "failed", error: { message: describe(error) } },
+      });
+      return;
+    }
+  }
+  await ensureQuery(session, context);
+  const turnId = randomUUID();
+  session.active = { clientMessageId: input.prompt.clientMessageId, turnId };
+  session.interrupted = false;
+  context.emit({
+    type: "session.prompt_result",
+    sessionId: input.sessionId,
+    clientMessageId: input.prompt.clientMessageId,
+    result: { type: "turn", turnId },
+  });
+  context.emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "started" });
+  session.sink.push({
+    type: "user",
+    message: { role: "user", content: [{ type: "text", text }] },
+    parent_tool_use_id: null,
+  });
+  await publishCommands(session, context);
+}
+
+/**
+ * Active-turn steering (`prompt.steer`). The message is queued behind the
+ * running turn with SDK `next` priority instead of opening a new turn; the
+ * daemon falls back to interrupt-and-replace when this reports failure.
+ */
+async function steerSession(
+  input: Extract<ProviderInput, { type: "session.prompt" }>,
+  context: DispatchContext,
+  session: ClaudeSession,
+): Promise<void> {
+  const active = session.active;
+  if (active === null || session.query === null) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input.sessionId,
+      clientMessageId: input.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "There is no active turn to steer" } },
+    });
+    return;
+  }
+  if (input.prompt.input.type !== "message") {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input.sessionId,
+      clientMessageId: input.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "Cannot steer with a slash command" } },
+    });
+    return;
+  }
+  let blocks: SdkContentBlock[];
+  try {
+    blocks = await buildMessageBlocks(input.prompt.input.content, context);
+  } catch (error) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input.sessionId,
+      clientMessageId: input.prompt.clientMessageId,
+      result: { type: "failed", error: { message: describe(error) } },
+    });
+    return;
+  }
+  if (input.prompt.clearPendingPermissions === true) {
+    denyPendingForSteer(session, (event) => context.emit(event));
+  }
+  session.sink.pushSteer({
+    type: "user",
+    message: { role: "user", content: blocks },
+    parent_tool_use_id: null,
+    priority: "next",
+    uuid: randomUUID(),
+  });
+  context.emit({
+    type: "session.prompt_result",
+    sessionId: input.sessionId,
+    clientMessageId: input.prompt.clientMessageId,
+    result: { type: "steer", turnId: active.turnId },
   });
 }
 
-async function translatePromptContent(
-  content: ReadonlyArray<{ type?: unknown; text?: unknown } | unknown>,
+/**
+ * Permissions a steer supersedes are denied immediately: leaving them open
+ * would block the steered turn on a card the user already moved past.
+ */
+function denyPendingForSteer(
+  session: ClaudeSession,
+  emit: (event: ProviderEvent) => void,
+): void {
+  for (const permissionId of session.pendingPermissions.keys()) {
+    const pending = session.pendingPermissions.get(permissionId);
+    if (pending === undefined) continue;
+    session.pendingPermissions.delete(permissionId);
+    pending({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+    emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
+  }
+}
+
+type SdkContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; source: { type: "base64"; media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp"; data: string } };
+
+const IMAGE_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+function isImageMimeType(
+  mimeType: string,
+): mimeType is "image/jpeg" | "image/png" | "image/gif" | "image/webp" {
+  return IMAGE_MIME_TYPES.has(mimeType);
+}
+
+/**
+ * Translates text blocks and flattens the rest. Image blocks with a Claude
+ * supported mime type travel natively; every other structured attachment
+ * passes through serialized (exactly like the ACP provider flattens them),
+ * so its JSON is never machine-translated.
+ */
+async function buildMessageBlocks(
+  content: ReadonlyArray<{ type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown } | unknown>,
   context: DispatchContext,
-): Promise<string> {
+): Promise<SdkContentBlock[]> {
   const values = await context.loadValues();
   const translate = values.translatePrompts
     ? (text: string) => context.translator.translate(text, "user-to-agent")
     : async (text: string) => text;
-  const parts: string[] = [];
+  const blocks: SdkContentBlock[] = [];
+  let hasContent = false;
   for (const block of content) {
     if (
       typeof block === "object" &&
@@ -495,18 +771,36 @@ async function translatePromptContent(
       (block as { type?: unknown }).type === "text" &&
       typeof (block as { text?: unknown }).text === "string"
     ) {
-      parts.push(await translatePromptFragment((block as { text: string }).text, translate));
+      const translated = await translatePromptFragment((block as { text: string }).text, translate);
+      if (translated.trim().length > 0) hasContent = true;
+      blocks.push({ type: "text", text: translated });
+    } else if (
+      typeof block === "object" &&
+      block !== null &&
+      (block as { type?: unknown }).type === "image" &&
+      typeof (block as { data?: unknown }).data === "string" &&
+      typeof (block as { mimeType?: unknown }).mimeType === "string" &&
+      isImageMimeType((block as { mimeType: string }).mimeType)
+    ) {
+      hasContent = true;
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: (block as { mimeType: "image/jpeg" }).mimeType,
+          data: (block as { data: string }).data,
+        },
+      });
     } else {
-      // Structured attachments pass through serialized, exactly like the ACP
-      // provider flattens them; their JSON must not be machine-translated.
-      parts.push(JSON.stringify(block));
+      // Structured attachments pass through serialized; their JSON must not
+      // be machine-translated.
+      blocks.push({ type: "text", text: JSON.stringify(block) });
     }
   }
-  const joined = parts.join("\n");
-  if (joined.trim().length === 0) {
+  if (!hasContent) {
     throw new Error("Refusing to send an empty prompt");
   }
-  return joined;
+  return blocks;
 }
 
 async function ensureQuery(session: ClaudeSession, context: DispatchContext): Promise<void> {
@@ -547,7 +841,47 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
   };
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
-  session.pump = pumpQuery(session, query, context.emit);
+  session.pump = pumpQuery(session, query, context);
+}
+
+/**
+ * Publishes the CLI's slash-command list once the query exists. Failures are
+ * silent and retried on the next turn or init frame: commands are
+ * discoverability, never a turn blocker.
+ */
+async function publishCommands(session: ClaudeSession, context: DispatchContext): Promise<void> {
+  if (session.commandsPublished || session.query?.supportedCommands === undefined || session.closed) {
+    return;
+  }
+  try {
+    const commands = await withTimeout(
+      session.query.supportedCommands(),
+      10_000,
+      "command probe timed out",
+    );
+    if (session.closed) return;
+    session.commandsPublished = true;
+    const seen = new Map<string, ProviderCommand>();
+    for (const command of commands) {
+      if (command === null || typeof command !== "object") continue;
+      const info = command as { name?: unknown; description?: unknown; argumentHint?: unknown };
+      if (typeof info.name !== "string" || info.name.length === 0 || seen.has(info.name)) continue;
+      seen.set(info.name, {
+        name: info.name,
+        description: typeof info.description === "string" ? info.description : "",
+        ...(typeof info.argumentHint === "string" && info.argumentHint.length > 0
+          ? { argumentHint: info.argumentHint }
+          : {}),
+      });
+    }
+    context.emit({
+      type: "session.commands",
+      sessionId: session.id,
+      commands: [...seen.values()],
+    });
+  } catch {
+    // Retry on the next turn or init frame.
+  }
 }
 
 /** Thinking selection → query-start options (none for "default"). */
@@ -795,12 +1129,13 @@ function respondToPermission(
 async function pumpQuery(
   session: ClaudeSession,
   query: ClaudeQueryHandle,
-  emit: (event: ProviderEvent) => void,
+  context: DispatchContext,
 ): Promise<void> {
+  const emit = (event: ProviderEvent) => context.emit(event);
   try {
     for await (const message of query) {
       if (session.closed) return;
-      handleSdkMessage(session, message, emit);
+      handleSdkMessage(session, message, context);
     }
   } catch (error) {
     if (!session.closed) finishDeadQuery(session, describe(error), emit);
@@ -840,6 +1175,10 @@ function finishDeadQuery(
       });
     }
   }
+  // An interrupt ends foreground children; a dead process fails everything
+  // still running, including backgrounded work that outlived its turn.
+  if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
+  else session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
     pending({ behavior: "deny", message: "Claude session ended" });
   }
@@ -856,8 +1195,21 @@ function finishDeadQuery(
 function handleSdkMessage(
   session: ClaudeSession,
   message: SDKMessage,
-  emit: (event: ProviderEvent) => void,
+  context: DispatchContext,
 ): void {
+  const emit = (event: ProviderEvent) => context.emit(event);
+  // The Task protocol owns subagent identity and status; sidechain frames
+  // only feed the timelines of children it declared.
+  if (session.subagents?.observeSystemMessage(message) === true) return;
+  if (message.type === "system") {
+    if (message.subtype === "init") void publishCommands(session, context);
+    return;
+  }
+  const parentToolUseId = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id;
+  if (typeof parentToolUseId === "string" && parentToolUseId.length > 0) {
+    session.subagents?.handleSidechainMessage(message, parentToolUseId);
+    return;
+  }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
     const content = message.message.content;
     if (!Array.isArray(content)) return;
@@ -902,10 +1254,15 @@ function handleSdkMessage(
       } else if (
         typeof block === "object" &&
         block !== null &&
-        (block as { type?: unknown }).type === "tool_use"
+        ((block as { type?: unknown }).type === "tool_use" ||
+          (block as { type?: unknown }).type === "mcp_tool_use" ||
+          (block as { type?: unknown }).type === "server_tool_use")
       ) {
         const use = block as { id: string; name: string; input?: unknown };
+        if (typeof use.id !== "string" || typeof use.name !== "string") continue;
         session.toolNames.set(use.id, use.name);
+        session.toolInputs.set(use.id, use.input);
+        session.subagents?.noteRootToolUse(use.id, use.name, use.input);
         emit({
           type: "timeline.item",
           sessionId: session.id,
@@ -916,11 +1273,7 @@ function handleSdkMessage(
             name: use.name,
             status: "running",
             error: null,
-            detail: {
-              type: "plain_text",
-              label: use.name,
-              text: JSON.stringify(use.input ?? {}),
-            },
+            detail: describeRunningTool(use.name, use.input),
           },
         });
       }
@@ -937,7 +1290,8 @@ function handleSdkMessage(
         (block as { type?: unknown }).type === "tool_result"
       ) {
         const result = block as { tool_use_id: string; content?: unknown; is_error?: boolean };
-        const output = flattenToolResultContent(result.content);
+        const output = flattenToolResult(result.content);
+        const name = session.toolNames.get(result.tool_use_id) ?? "tool";
         emit({
           type: "timeline.item",
           sessionId: session.id,
@@ -945,12 +1299,26 @@ function handleSdkMessage(
             type: "tool_call",
             id: result.tool_use_id,
             callId: result.tool_use_id,
-            name: session.toolNames.get(result.tool_use_id) ?? "tool",
+            name,
             ...(result.is_error
-              ? { status: "failed" as const, error: output ?? "Tool failed" }
+              ? { status: "failed" as const, error: output.text ?? "Tool failed" }
               : { status: "completed" as const, error: null }),
-            detail: { type: "plain_text", label: "output", text: output ?? "" },
+            detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output.text),
           },
+        });
+        // Tool results can carry screenshots as base64 image blocks. Base64
+        // must never reach the tool output text; each image renders as its
+        // own markdown message instead (matching the native provider).
+        output.images.forEach((image, index) => {
+          emit({
+            type: "timeline.item",
+            sessionId: session.id,
+            item: {
+              type: "assistant_message",
+              id: `${result.tool_use_id}-image-${index}`,
+              text: `![tool image](data:${image.mimeType};base64,${image.data})`,
+            },
+          });
         });
       }
     }
@@ -965,6 +1333,12 @@ function handleSdkMessage(
     });
     const active = session.active;
     if (active === null) return;
+    const usage = summarizeModelUsage(
+      (message as { modelUsage?: unknown }).modelUsage,
+    );
+    if (usage !== undefined) {
+      emit({ type: "session.usage", sessionId: session.id, turnId: active.turnId, usage });
+    }
     session.active = null;
     const wasInterrupted = session.interrupted;
     session.interrupted = false;
@@ -988,29 +1362,73 @@ function handleSdkMessage(
   }
 }
 
-function flattenToolResultContent(content: unknown): string | null {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const block of content) {
+interface ToolResultOutput {
+  text: string | null;
+  images: Array<{ mimeType: string; data: string }>;
+}
+
+function flattenToolResult(content: unknown): ToolResultOutput {
+  if (typeof content === "string") return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: null, images: [] };
+  const parts: string[] = [];
+  const images: Array<{ mimeType: string; data: string }> = [];
+  for (const block of content) {
+    if (typeof block !== "object" || block === null) continue;
+    const record = block as { type?: unknown };
+    if (record.type === "text" && typeof (block as { text?: unknown }).text === "string") {
+      parts.push((block as { text: string }).text);
+    } else if (record.type === "image") {
+      const source = (block as { source?: unknown }).source;
       if (
-        typeof block === "object" &&
-        block !== null &&
-        (block as { type?: unknown }).type === "text" &&
-        typeof (block as { text?: unknown }).text === "string"
+        typeof source === "object" &&
+        source !== null &&
+        typeof (source as { data?: unknown }).data === "string" &&
+        typeof (source as { media_type?: unknown }).media_type === "string"
       ) {
-        parts.push((block as { text: string }).text);
+        images.push({
+          mimeType: (source as { media_type: string }).media_type,
+          data: (source as { data: string }).data,
+        });
+        parts.push("[image]");
       }
     }
-    return parts.length > 0 ? parts.join("\n") : null;
   }
-  return null;
+  return { text: parts.length > 0 ? parts.join("\n") : null, images };
+}
+
+/**
+ * Per-model totals (`modelUsage`) are cumulative across turns in a
+ * streaming-input session and cover the main loop plus Task subagents, so
+ * the latest result is the correct accounting signal — never a sum across
+ * results.
+ */
+function summarizeModelUsage(modelUsage: unknown):
+  | { inputTokens?: number; outputTokens?: number; totalCostUsd?: number }
+  | undefined {
+  if (typeof modelUsage !== "object" || modelUsage === null) return undefined;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalCostUsd = 0;
+  for (const entry of Object.values(modelUsage)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as { inputTokens?: unknown; outputTokens?: unknown; costUSD?: unknown };
+    if (typeof record.inputTokens === "number") inputTokens += record.inputTokens;
+    if (typeof record.outputTokens === "number") outputTokens += record.outputTokens;
+    if (typeof record.costUSD === "number") totalCostUsd += record.costUSD;
+  }
+  if (inputTokens === 0 && outputTokens === 0 && totalCostUsd === 0) return undefined;
+  return {
+    ...(inputTokens > 0 ? { inputTokens: Math.round(inputTokens) } : {}),
+    ...(outputTokens > 0 ? { outputTokens: Math.round(outputTokens) } : {}),
+    ...(totalCostUsd > 0 ? { totalCostUsd } : {}),
+  };
 }
 
 async function teardownSession(session: ClaudeSession): Promise<void> {
   if (session.closed) return;
   session.closed = true;
   session.abort.abort();
+  session.subagents?.reset();
   for (const pending of session.pendingPermissions.values()) {
     pending({ behavior: "deny", message: "Session closed" });
   }

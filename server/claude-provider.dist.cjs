@@ -34,9 +34,9 @@ __export(claude_provider_exports, {
   scanPathForClaude: () => scanPathForClaude
 });
 module.exports = __toCommonJS(claude_provider_exports);
-var import_node_crypto3 = require("node:crypto");
-var import_node_fs = require("node:fs");
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_crypto4 = require("node:crypto");
+var import_node_fs2 = require("node:fs");
+var import_node_path3 = __toESM(require("node:path"));
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_node_module = require("node:module");
@@ -51517,12 +51517,823 @@ async function translatePromptFragment(text, translate) {
   return `${match[1]}${await translate(match[2])}`;
 }
 
+// server/claude-subagents.ts
+var import_node_crypto3 = require("node:crypto");
+
+// server/claude-tool-details.ts
+var SHELL_NAMES = /* @__PURE__ */ new Set(["Bash", "bash", "shell", "exec_command"]);
+var READ_NAMES = /* @__PURE__ */ new Set(["Read", "read", "read_file", "view_file"]);
+var WRITE_NAMES = /* @__PURE__ */ new Set(["Write", "write", "write_file", "create_file"]);
+var EDIT_NAMES = /* @__PURE__ */ new Set([
+  "Edit",
+  "MultiEdit",
+  "multi_edit",
+  "edit",
+  "apply_patch",
+  "apply_diff",
+  "str_replace_editor"
+]);
+var SEARCH_NAMES = /* @__PURE__ */ new Set([
+  "WebSearch",
+  "web_search",
+  "search",
+  "Grep",
+  "grep",
+  "Glob",
+  "glob"
+]);
+var FETCH_NAMES = /* @__PURE__ */ new Set([
+  "WebFetch",
+  "web_fetch",
+  "WebFetchTool",
+  "web_fetch_tool",
+  "webfetch"
+]);
+function readString(input2, key) {
+  if (typeof input2 !== "object" || input2 === null) return void 0;
+  const value = input2[key];
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function readInputJson(input2) {
+  try {
+    return JSON.stringify(input2 ?? {});
+  } catch {
+    return "{}";
+  }
+}
+function describeRunningTool(name, input2) {
+  const trimmed = name.trim();
+  if (trimmed === "Task") {
+    return {
+      type: "sub_agent",
+      ...readString(input2, "subagent_type") !== void 0 ? { subAgentType: readString(input2, "subagent_type") } : {},
+      ...readString(input2, "description") !== void 0 ? { description: readString(input2, "description") } : {},
+      log: ""
+    };
+  }
+  if (trimmed === "ExitPlanMode") {
+    const plan = readString(input2, "plan");
+    if (plan !== void 0) return { type: "plan", text: plan };
+    return { type: "plain_text", label: trimmed, text: readInputJson(input2) };
+  }
+  if (SHELL_NAMES.has(trimmed)) {
+    return {
+      type: "shell",
+      command: readString(input2, "command") ?? readInputJson(input2),
+      ...readString(input2, "cwd") !== void 0 ? { cwd: readString(input2, "cwd") } : {}
+    };
+  }
+  if (READ_NAMES.has(trimmed)) {
+    return {
+      type: "read",
+      filePath: readString(input2, "file_path") ?? readString(input2, "path") ?? trimmed
+    };
+  }
+  if (WRITE_NAMES.has(trimmed)) {
+    return {
+      type: "write",
+      filePath: readString(input2, "file_path") ?? readString(input2, "path") ?? trimmed,
+      ...readString(input2, "content") !== void 0 ? { content: readString(input2, "content") } : {}
+    };
+  }
+  if (EDIT_NAMES.has(trimmed)) {
+    return {
+      type: "edit",
+      filePath: readString(input2, "file_path") ?? readString(input2, "path") ?? trimmed,
+      ...readString(input2, "old_string") !== void 0 ? { oldString: readString(input2, "old_string") } : {},
+      ...readString(input2, "new_string") !== void 0 ? { newString: readString(input2, "new_string") } : {}
+    };
+  }
+  if (SEARCH_NAMES.has(trimmed)) {
+    return {
+      type: "search",
+      query: readString(input2, "query") ?? readString(input2, "pattern") ?? readString(input2, "path") ?? readInputJson(input2)
+    };
+  }
+  if (FETCH_NAMES.has(trimmed)) {
+    return {
+      type: "fetch",
+      url: readString(input2, "url") ?? readInputJson(input2),
+      ...readString(input2, "prompt") !== void 0 ? { prompt: readString(input2, "prompt") } : {}
+    };
+  }
+  return { type: "plain_text", label: trimmed, text: readInputJson(input2) };
+}
+function describeFinishedTool(name, input2, output2) {
+  const running = describeRunningTool(name, input2);
+  if (output2 === null) return running;
+  switch (running.type) {
+    case "shell":
+      return { ...running, output: output2, exitCode: null };
+    case "search":
+      return { ...running, content: output2 };
+    case "fetch":
+      return { ...running, result: output2 };
+    case "sub_agent":
+      return { ...running, log: output2 };
+    case "plan":
+      return running;
+    case "read":
+    case "write":
+    case "edit":
+      return running;
+    case "plain_text":
+      return { ...running, text: `${running.text ?? ""}
+${output2}`.trim() };
+    default:
+      return running;
+  }
+}
+
+// server/claude-subagents.ts
+var SUBAGENT_TASK_TYPE = "local_agent";
+var WORKFLOW_TASK_TYPE = "local_workflow";
+function readString2(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
+}
+function isProviderSubagentTask(message) {
+  if (typeof message.task_type === "string" && message.task_type.length > 0) {
+    return message.task_type === SUBAGENT_TASK_TYPE || message.task_type === WORKFLOW_TASK_TYPE;
+  }
+  return readString2(message.subagent_type) !== void 0;
+}
+function isWorkflowTask(message) {
+  if (message.task_type === WORKFLOW_TASK_TYPE) return true;
+  return readString2(message.workflow_name) !== void 0;
+}
+function mapTaskStatus(status) {
+  switch (status) {
+    case "pending":
+    case "running":
+    case "paused":
+      return "running";
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "killed":
+    case "stopped":
+      return "canceled";
+    default:
+      return void 0;
+  }
+}
+function readTotalTokens(usage) {
+  if (!usage || typeof usage.total_tokens !== "number" || usage.total_tokens <= 0) return void 0;
+  return Math.round(usage.total_tokens);
+}
+function timelineId(fallback, ...candidates) {
+  for (const candidate of candidates) {
+    if (candidate !== void 0 && candidate.length > 0) return candidate;
+  }
+  return fallback;
+}
+var ClaudeSubagentTracker = class {
+  constructor(rootSessionId, cwd, emit) {
+    this.rootSessionId = rootSessionId;
+    this.cwd = cwd;
+    this.emit = emit;
+    /** task_id -> canonical subagent (first Task tool_use) id. */
+    this.subagentIdByTaskId = /* @__PURE__ */ new Map();
+    /** Every announced tool id -> canonical id (resume aliases included). */
+    this.canonicalIdByToolUseId = /* @__PURE__ */ new Map();
+    /** Tool calls made inside a sidechain -> owning child canonical id. */
+    this.ownerCanonicalByToolUseId = /* @__PURE__ */ new Map();
+    /** Non-subagent tasks (e.g. local_bash) -> emitting sidechain canonical id. */
+    this.ownerCanonicalByTaskId = /* @__PURE__ */ new Map();
+    /** Parent Task tool input by tool_use id (for titles). */
+    this.taskInputs = /* @__PURE__ */ new Map();
+    this.declaredIds = /* @__PURE__ */ new Set();
+    this.workflowTaskIds = /* @__PURE__ */ new Set();
+    this.backgroundedIds = /* @__PURE__ */ new Set();
+    this.children = /* @__PURE__ */ new Map();
+    this.lastStatusById = /* @__PURE__ */ new Map();
+  }
+  reset() {
+    this.subagentIdByTaskId.clear();
+    this.canonicalIdByToolUseId.clear();
+    this.ownerCanonicalByToolUseId.clear();
+    this.ownerCanonicalByTaskId.clear();
+    this.taskInputs.clear();
+    this.declaredIds.clear();
+    this.workflowTaskIds.clear();
+    this.backgroundedIds.clear();
+    this.children.clear();
+    this.lastStatusById.clear();
+  }
+  /** Record a `tool_use` block from a root (non-sidechain) assistant message. */
+  noteRootToolUse(toolUseId, name, input2) {
+    if (name === "Task" && typeof input2 === "object" && input2 !== null) {
+      this.taskInputs.set(toolUseId, input2);
+    }
+  }
+  /**
+   * Entry point for every SDK message that is NOT a root assistant/user
+   * message or turn result. Returns true when the message was a task-protocol
+   * announcement (the caller then skips its own handling).
+   */
+  observeSystemMessage(message) {
+    if (message.type !== "system") return false;
+    switch (message.subtype) {
+      case "task_started":
+        this.observeTaskStarted(message);
+        return true;
+      case "task_updated":
+        this.observeTaskUpdated(message);
+        return true;
+      case "task_notification":
+        this.observeTaskNotification(message);
+        return true;
+      case "task_progress":
+        this.observeTaskProgress(message);
+        return true;
+      default:
+        return false;
+    }
+  }
+  /**
+   * Route a sidechain frame (`parent_tool_use_id` set) to its owning child
+   * timeline. Frames for undeclared tasks are dropped by design (see above).
+   */
+  handleSidechainMessage(message, parentToolUseId) {
+    const canonical = this.canonicalIdByToolUseId.get(parentToolUseId);
+    const child = (canonical !== void 0 ? this.children.get(canonical) : void 0) ?? (this.ownerCanonicalByToolUseId.get(parentToolUseId) !== void 0 ? this.children.get(this.ownerCanonicalByToolUseId.get(parentToolUseId)) : void 0);
+    if (!child) return;
+    if (message.type === "assistant") {
+      this.handleSidechainAssistant(child, message);
+    } else if (message.type === "user") {
+      this.handleSidechainUser(child, message);
+    }
+  }
+  /** Terminalize foreground children on turn cancel; backgrounded survive. */
+  cancelRunningForegroundTasks() {
+    for (const [id2, child] of this.children) {
+      if (this.backgroundedIds.has(id2) || !child.turnOpen) continue;
+      this.closeChildTurn(child, "canceled");
+    }
+  }
+  /** A lost process fails every child with an open turn. */
+  failRunningTasks() {
+    for (const child of this.children.values()) {
+      if (!child.turnOpen) continue;
+      this.closeChildTurn(child, "failed", "Claude session ended");
+    }
+  }
+  childProviderId(canonicalId) {
+    return `subagent:${this.rootSessionId}:${canonicalId}`;
+  }
+  observeTaskStarted(message) {
+    const id2 = readString2(message.tool_use_id);
+    const ownerCanonical = id2 !== void 0 ? this.ownerCanonicalByToolUseId.get(id2) : void 0;
+    if (ownerCanonical !== void 0) this.ownerCanonicalByTaskId.set(message.task_id, ownerCanonical);
+    if (id2 === void 0 || message.skip_transcript === true || !isProviderSubagentTask(message)) {
+      return;
+    }
+    const existingId = this.subagentIdByTaskId.get(message.task_id);
+    if (existingId !== void 0) {
+      this.canonicalIdByToolUseId.set(id2, existingId);
+      const child = this.children.get(existingId);
+      if (!child) return;
+      if (!child.turnOpen) {
+        child.turnId = (0, import_node_crypto3.randomUUID)();
+        child.turnOpen = true;
+        this.emit({
+          type: "session.turn",
+          sessionId: child.providerId,
+          turnId: child.turnId,
+          state: "started"
+        });
+      }
+      const prompt2 = readString2(message.prompt);
+      if (prompt2 !== void 0) {
+        this.emit({
+          type: "timeline.item",
+          sessionId: child.providerId,
+          item: { type: "user_message", id: (0, import_node_crypto3.randomUUID)(), text: prompt2 }
+        });
+      }
+      return;
+    }
+    const workflow = isWorkflowTask(message);
+    this.subagentIdByTaskId.set(message.task_id, id2);
+    this.canonicalIdByToolUseId.set(id2, id2);
+    this.declaredIds.add(id2);
+    if (workflow) this.workflowTaskIds.add(message.task_id);
+    if (message.is_backgrounded === true) this.backgroundedIds.add(id2);
+    const parentProviderId = ownerCanonical !== void 0 ? this.children.get(ownerCanonical)?.providerId ?? this.rootSessionId : this.rootSessionId;
+    const providerId = this.childProviderId(id2);
+    const input2 = this.taskInputs.get(id2);
+    const title = workflow ? "Workflow" : readString2(input2?.["name"]) ?? readString2(message.subagent_type) ?? "Subagent";
+    const description = readString2(message.description);
+    const turnId = (0, import_node_crypto3.randomUUID)();
+    this.children.set(id2, {
+      providerId,
+      canonicalId: id2,
+      turnId,
+      turnOpen: true,
+      toolNames: /* @__PURE__ */ new Map(),
+      toolInputs: /* @__PURE__ */ new Map()
+    });
+    this.lastStatusById.set(id2, "running");
+    this.emit({
+      type: "session.opened",
+      sessionId: providerId,
+      parentSessionId: parentProviderId,
+      toolCallId: id2,
+      capabilities: [],
+      restoration: "parent",
+      title,
+      ...description !== void 0 ? { description } : {},
+      cwd: this.cwd
+    });
+    this.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
+    const prompt = workflow ? description : readString2(message.prompt);
+    if (prompt !== void 0) {
+      this.emit({
+        type: "timeline.item",
+        sessionId: providerId,
+        item: { type: "user_message", id: (0, import_node_crypto3.randomUUID)(), text: prompt }
+      });
+    }
+  }
+  observeTaskUpdated(message) {
+    const id2 = this.subagentIdByTaskId.get(message.task_id);
+    if (id2 !== void 0 && typeof message.patch?.is_backgrounded === "boolean") {
+      if (message.patch.is_backgrounded) this.backgroundedIds.add(id2);
+      else this.backgroundedIds.delete(id2);
+    }
+    this.applyStatus(message.task_id, message.patch?.status);
+  }
+  observeTaskNotification(message) {
+    const totalTokens = readTotalTokens(message.usage);
+    if (totalTokens !== void 0) {
+      const id2 = this.subagentIdByTaskId.get(message.task_id);
+      const child = id2 !== void 0 ? this.children.get(id2) : void 0;
+      if (child !== void 0) {
+        this.emit({
+          type: "session.usage",
+          sessionId: child.providerId,
+          turnId: child.turnId,
+          usage: { contextWindowUsedTokens: totalTokens }
+        });
+      }
+    }
+    this.applyStatus(message.task_id, message.status);
+  }
+  observeTaskProgress(message) {
+    const totalTokens = readTotalTokens(message.usage);
+    if (totalTokens === void 0) return;
+    const id2 = this.subagentIdByTaskId.get(message.task_id);
+    const child = id2 !== void 0 ? this.children.get(id2) : void 0;
+    if (child === void 0) return;
+    this.emit({
+      type: "session.usage",
+      sessionId: child.providerId,
+      turnId: child.turnId,
+      usage: { contextWindowUsedTokens: totalTokens }
+    });
+  }
+  applyStatus(taskId, rawStatus) {
+    const id2 = this.subagentIdByTaskId.get(taskId);
+    const child = id2 !== void 0 ? this.children.get(id2) : void 0;
+    if (id2 === void 0 || child === void 0) return;
+    const status = mapTaskStatus(rawStatus);
+    if (status === void 0 || this.lastStatusById.get(id2) === status) return;
+    this.lastStatusById.set(id2, status);
+    if (status === "running") {
+      if (!child.turnOpen) {
+        child.turnId = (0, import_node_crypto3.randomUUID)();
+        child.turnOpen = true;
+        this.emit({
+          type: "session.turn",
+          sessionId: child.providerId,
+          turnId: child.turnId,
+          state: "started"
+        });
+      }
+      return;
+    }
+    this.closeChildTurn(child, status);
+  }
+  closeChildTurn(child, status, error62) {
+    if (!child.turnOpen) return;
+    child.turnOpen = false;
+    this.emit({
+      type: "session.turn",
+      sessionId: child.providerId,
+      turnId: child.turnId,
+      state: status,
+      ...error62 !== void 0 ? { error: { message: error62 } } : {}
+    });
+  }
+  handleSidechainAssistant(child, message) {
+    const assistant = message;
+    const content = assistant.message?.content;
+    if (!Array.isArray(content)) return;
+    const messageId = readString2(assistant.message?.id);
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const record2 = block;
+      if (record2.type === "text" && typeof record2.text === "string" && record2.text.trim().length > 0) {
+        this.emit({
+          type: "timeline.item",
+          sessionId: child.providerId,
+          item: {
+            type: "assistant_message",
+            id: timelineId((0, import_node_crypto3.randomUUID)(), readString2(assistant.uuid)),
+            text: record2.text,
+            ...messageId !== void 0 ? { messageId } : {}
+          }
+        });
+      } else if (record2.type === "thinking" && typeof record2.thinking === "string" && record2.thinking.trim().length > 0) {
+        this.emit({
+          type: "timeline.item",
+          sessionId: child.providerId,
+          item: {
+            type: "reasoning",
+            id: timelineId((0, import_node_crypto3.randomUUID)(), readString2(assistant.uuid)),
+            text: record2.thinking
+          }
+        });
+      } else if (record2.type === "tool_use" || record2.type === "mcp_tool_use" || record2.type === "server_tool_use") {
+        const use2 = block;
+        if (typeof use2.id !== "string" || typeof use2.name !== "string") continue;
+        if (use2.name === "Task" && typeof use2.input === "object" && use2.input !== null) {
+          this.taskInputs.set(use2.id, use2.input);
+        }
+        child.toolNames.set(use2.id, use2.name);
+        child.toolInputs.set(use2.id, use2.input);
+        this.ownerCanonicalByToolUseId.set(use2.id, child.canonicalId);
+        child.toolInputs.set(use2.id, use2.input);
+        if (use2.name === "Task" && typeof use2.input === "object" && use2.input !== null) {
+          this.taskInputs.set(use2.id, use2.input);
+        }
+        const detail = describeRunningTool(use2.name, use2.input);
+        const item = {
+          type: "tool_call",
+          id: use2.id,
+          callId: use2.id,
+          name: use2.name,
+          status: "running",
+          error: null,
+          detail
+        };
+        this.emit({ type: "timeline.item", sessionId: child.providerId, item });
+      }
+    }
+  }
+  handleSidechainUser(child, message) {
+    const user = message;
+    const content = user.message?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const record2 = block;
+      if (record2.type !== "tool_result") continue;
+      const result = block;
+      if (typeof result.tool_use_id !== "string") continue;
+      const name = child.toolNames.get(result.tool_use_id) ?? "tool";
+      const output2 = flattenBlockContent(result.content);
+      const detail = describeFinishedTool(name, child.toolInputs.get(result.tool_use_id), output2);
+      const item = {
+        type: "tool_call",
+        id: result.tool_use_id,
+        callId: result.tool_use_id,
+        name,
+        ...result.is_error === true ? { status: "failed", error: output2 ?? "Tool failed" } : { status: "completed", error: null },
+        detail
+      };
+      this.emit({ type: "timeline.item", sessionId: child.providerId, item });
+    }
+  }
+};
+function flattenBlockContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const parts = [];
+  for (const block of content) {
+    if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+
+// server/claude-transcript.ts
+var import_node_fs = require("node:fs");
+var import_promises10 = require("node:fs/promises");
+var import_node_os2 = require("node:os");
+var import_node_path2 = require("node:path");
+var PROJECT_DIR_LENGTH_CAP = 200;
+var MAX_REPLAY_LINES = 3e3;
+var MAX_REPLAY_ITEMS = 500;
+function resolveConfigDir() {
+  const override = process.env["CLAUDE_CONFIG_DIR"];
+  if (typeof override === "string" && override.length > 0) return override;
+  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude");
+}
+function encodeProjectDir(input2) {
+  const replaced = input2.replace(/[^a-zA-Z0-9]/g, "-");
+  if (replaced.length <= PROJECT_DIR_LENGTH_CAP) return replaced;
+  let hash2 = 0;
+  for (let i = 0; i < input2.length; i++) {
+    hash2 = (hash2 << 5) - hash2 + input2.charCodeAt(i) | 0;
+  }
+  return `${replaced.slice(0, PROJECT_DIR_LENGTH_CAP)}-${Math.abs(hash2).toString(36)}`;
+}
+function canonicalize(input2) {
+  try {
+    return import_node_fs.realpathSync.native(input2);
+  } catch {
+    return input2;
+  }
+}
+function readString3(value) {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
+}
+async function readJsonLines(path2) {
+  const raw = await (0, import_promises10.readFile)(path2, "utf8");
+  const lines = raw.split("\n");
+  const entries = [];
+  for (const line of lines) {
+    if (entries.length >= MAX_REPLAY_LINES) break;
+    if (line.trim().length === 0) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed === "object" && parsed !== null) entries.push(parsed);
+    } catch {
+    }
+  }
+  return entries;
+}
+function readTotalTokens2(entry) {
+  const usage = typeof entry.message?.usage === "object" && entry.message.usage !== null ? entry.message.usage : entry.usage;
+  if (typeof usage !== "object" || usage === null) return void 0;
+  const counters = [
+    usage.input_tokens,
+    usage.cache_creation_input_tokens,
+    usage.cache_read_input_tokens,
+    usage.output_tokens
+  ];
+  if (!counters.some((counter) => typeof counter === "number")) return void 0;
+  let total = 0;
+  for (const counter of counters) {
+    if (typeof counter === "number") total += counter;
+  }
+  return total;
+}
+function createCollector(contextCanonicalId) {
+  return {
+    items: [],
+    toolNames: /* @__PURE__ */ new Map(),
+    toolInputs: /* @__PURE__ */ new Map(),
+    taskInputs: /* @__PURE__ */ new Map(),
+    ownerCanonicalByToolUseId: /* @__PURE__ */ new Map(),
+    contextCanonicalId,
+    totalTokens: void 0
+  };
+}
+function pushCapped(collector, item) {
+  if (collector.items.length >= MAX_REPLAY_ITEMS) return;
+  collector.items.push(item);
+}
+function collectEntry(collector, entry, idSeed) {
+  const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : void 0;
+  const withTimestamp = (item) => timestamp !== void 0 ? { ...item, timestamp } : item;
+  if (entry.type === "assistant") {
+    const tokens = readTotalTokens2(entry);
+    if (tokens !== void 0) collector.totalTokens = tokens;
+    const rawContent = entry.message?.content;
+    if (typeof rawContent === "string") {
+      const text = rawContent.trim();
+      if (text.length > 0) {
+        pushCapped(
+          collector,
+          withTimestamp({
+            type: "assistant_message",
+            id: `${idSeed}`,
+            text
+          })
+        );
+      }
+      return;
+    }
+    const content = rawContent;
+    if (!Array.isArray(content)) return;
+    const messageId = readString3(entry.message?.id);
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const record2 = block;
+      if (record2.type === "text") {
+        const text = readString3(block.text);
+        if (text === void 0) continue;
+        pushCapped(
+          collector,
+          withTimestamp({
+            type: "assistant_message",
+            id: `${idSeed}`,
+            text,
+            ...messageId !== void 0 ? { messageId } : {}
+          })
+        );
+      } else if (record2.type === "thinking") {
+        const thinking = readString3(block.thinking);
+        if (thinking === void 0) continue;
+        pushCapped(
+          collector,
+          withTimestamp({
+            type: "reasoning",
+            id: `${idSeed}`,
+            text: thinking
+          })
+        );
+      } else if (record2.type === "tool_use") {
+        const use2 = block;
+        if (typeof use2.id !== "string" || typeof use2.name !== "string") continue;
+        collector.toolNames.set(use2.id, use2.name);
+        collector.toolInputs.set(use2.id, use2.input);
+        if (collector.contextCanonicalId !== null) {
+          collector.ownerCanonicalByToolUseId.set(use2.id, collector.contextCanonicalId);
+        }
+        if (use2.name === "Task" && typeof use2.input === "object" && use2.input !== null) {
+          collector.taskInputs.set(use2.id, use2.input);
+        }
+        pushCapped(
+          collector,
+          withTimestamp({
+            type: "tool_call",
+            id: use2.id,
+            callId: use2.id,
+            name: use2.name,
+            status: "running",
+            error: null,
+            detail: describeRunningTool(use2.name, use2.input)
+          })
+        );
+      }
+    }
+    return;
+  }
+  if (entry.type === "user") {
+    const content = entry.message?.content;
+    if (typeof content === "string") {
+      const text = content.trim();
+      if (text.length > 0) {
+        pushCapped(
+          collector,
+          withTimestamp({
+            type: "user_message",
+            id: `${idSeed}`,
+            text
+          })
+        );
+      }
+      return;
+    }
+    if (!Array.isArray(content)) return;
+    const texts = [];
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const record2 = block;
+      if (record2.type === "text") {
+        const text = readString3(block.text);
+        if (text !== void 0) texts.push(text);
+      } else if (record2.type === "tool_result") {
+        const result = block;
+        if (typeof result.tool_use_id !== "string") continue;
+        const name = collector.toolNames.get(result.tool_use_id) ?? "tool";
+        const output2 = flattenReplayContent(result.content);
+        pushCapped(
+          collector,
+          withTimestamp({
+            type: "tool_call",
+            id: result.tool_use_id,
+            callId: result.tool_use_id,
+            name,
+            ...result.is_error === true ? { status: "failed", error: output2 ?? "Tool failed" } : { status: "completed", error: null },
+            detail: describeFinishedTool(name, collector.toolInputs.get(result.tool_use_id), output2)
+          })
+        );
+      }
+    }
+    if (texts.length > 0) {
+      pushCapped(
+        collector,
+        withTimestamp({
+          type: "user_message",
+          id: `${idSeed}`,
+          text: texts.join("\n")
+        })
+      );
+    }
+  }
+}
+function flattenReplayContent(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return null;
+  const parts = [];
+  for (const block of content) {
+    if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  return parts.length > 0 ? parts.join("\n") : null;
+}
+async function readClaudeReplay(cwd, claudeSessionId) {
+  const empty = { rootItems: [], children: [] };
+  try {
+    return await readReplayInner(cwd, claudeSessionId);
+  } catch {
+    return empty;
+  }
+}
+async function readReplayInner(cwd, claudeSessionId) {
+  const projectDir = (0, import_node_path2.join)(resolveConfigDir(), "projects", encodeProjectDir(canonicalize(cwd)));
+  const entries = await readJsonLines((0, import_node_path2.join)(projectDir, `${claudeSessionId}.jsonl`));
+  if (entries.length === 0) return { rootItems: [], children: [] };
+  const root = createCollector(null);
+  let seed = 0;
+  for (const entry of entries) {
+    if (typeof entry.parent_tool_use_id === "string" && entry.parent_tool_use_id.length > 0 || entry.isSidechain === true) {
+      continue;
+    }
+    collectEntry(root, entry, `replay-${seed++}`);
+  }
+  const children = await readReplayChildren(projectDir, claudeSessionId, root);
+  return { rootItems: root.items, children };
+}
+async function readReplayChildren(projectDir, claudeSessionId, root) {
+  let files;
+  try {
+    files = await (0, import_promises10.readdir)((0, import_node_path2.join)(projectDir, claudeSessionId, "subagents"));
+  } catch {
+    return [];
+  }
+  const sidecars = files.filter((file2) => file2.startsWith("agent-") && file2.endsWith(".jsonl"));
+  const staged = [];
+  for (const file2 of sidecars) {
+    try {
+      const agentId = file2.slice("agent-".length, -".jsonl".length);
+      const stagedChild = await stageReplayChild(projectDir, claudeSessionId, agentId);
+      if (stagedChild) {
+        staged.push(stagedChild);
+        for (const [toolUseId, owner] of stagedChild.collector.ownerCanonicalByToolUseId) {
+          root.ownerCanonicalByToolUseId.set(toolUseId, owner);
+        }
+        for (const [toolUseId, input2] of stagedChild.collector.taskInputs) {
+          root.taskInputs.set(toolUseId, input2);
+        }
+      }
+    } catch {
+    }
+    if (staged.length >= 50) break;
+  }
+  return staged.map(({ canonicalId, meta: meta3, collector }) => {
+    const parentCanonicalId = root.ownerCanonicalByToolUseId.get(canonicalId);
+    return {
+      canonicalId,
+      ...readString3(meta3?.agentType) !== void 0 ? { title: readString3(meta3?.agentType) } : {},
+      ...readString3(meta3?.description) !== void 0 ? { description: readString3(meta3?.description) } : {},
+      ...parentCanonicalId !== void 0 ? { parentCanonicalId } : {},
+      items: collector.items,
+      ...collector.totalTokens !== void 0 ? { totalTokens: collector.totalTokens } : {}
+    };
+  });
+}
+async function stageReplayChild(projectDir, claudeSessionId, agentId) {
+  const base = (0, import_node_path2.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
+  let meta3 = null;
+  try {
+    const raw = await (0, import_promises10.readFile)(`${base}.meta.json`, "utf8");
+    const parsed = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null) {
+      meta3 = parsed;
+    }
+  } catch {
+    meta3 = null;
+  }
+  const canonicalId = readString3(meta3?.toolUseId);
+  if (canonicalId === void 0) return null;
+  const entries = await readJsonLines(`${base}.jsonl`);
+  if (entries.length === 0) return null;
+  const collector = createCollector(canonicalId);
+  let seed = 0;
+  for (const entry of entries) {
+    collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`);
+  }
+  return { canonicalId, meta: meta3 ?? {}, collector };
+}
+
 // server/claude-provider.ts
 var CAPABILITIES = [
   "prompt.message",
+  "prompt.command",
+  "prompt.image",
+  "prompt.steer",
   "permission",
   "session.persistence",
-  "session.configure"
+  "session.configure",
+  "session.subsession"
 ];
 var STATIC_MODES = [
   { id: "plan", label: "Plan Mode", description: "Analyze the codebase without executing tools or edits" },
@@ -51540,9 +52351,9 @@ function scanPathForClaude(pathValue, platform) {
   for (const name of names) {
     for (const directory of directories) {
       if (directory.length === 0) continue;
-      const candidate = import_node_path2.default.join(directory, name);
+      const candidate = import_node_path3.default.join(directory, name);
       try {
-        (0, import_node_fs.accessSync)(candidate, import_node_fs.constants.X_OK);
+        (0, import_node_fs2.accessSync)(candidate, import_node_fs2.constants.X_OK);
         return candidate;
       } catch {
       }
@@ -51565,21 +52376,38 @@ function createPromptSink() {
       return {
         async next() {
           const pending = queue.shift();
-          if (pending !== void 0) return { value: pending, done: false };
+          if (pending !== void 0) {
+            pending.delivered = true;
+            return { value: pending.message, done: false };
+          }
           await new Promise((resolve5) => {
             wake = resolve5;
           });
           wake = null;
           const message = queue.shift();
-          return message === void 0 ? { value: void 0, done: true } : { value: message, done: false };
+          if (message === void 0) return { value: void 0, done: true };
+          message.delivered = true;
+          return { value: message.message, done: false };
         }
       };
     }
   };
   return {
     push(message) {
-      queue.push(message);
+      queue.push({ message, steer: false, delivered: false });
       wake?.();
+    },
+    pushSteer(message) {
+      queue.push({ message, steer: true, delivered: false });
+      wake?.();
+    },
+    discardPendingSteers() {
+      for (let index = queue.length - 1; index >= 0; index -= 1) {
+        const entry = queue[index];
+        if (entry !== void 0 && entry.steer && !entry.delivered) {
+          queue.splice(index, 1);
+        }
+      }
     },
     iterable
   };
@@ -51656,7 +52484,9 @@ async function dispatch(input2, context, capabilities) {
       const session = context.sessions.get(input2.sessionId);
       if (session !== void 0 && session.query !== null) {
         session.interrupted = true;
+        session.sink.discardPendingSteers();
         await session.query.interrupt().catch(() => void 0);
+        session.subagents?.cancelRunningForegroundTasks();
       }
       context.emit({ type: "request.completed", requestId: input2.requestId });
       return;
@@ -51747,8 +52577,16 @@ async function openSession(input2, context, capabilities) {
     interrupted: false,
     closed: false,
     toolNames: /* @__PURE__ */ new Map(),
-    pendingPermissions: /* @__PURE__ */ new Map()
+    toolInputs: /* @__PURE__ */ new Map(),
+    pendingPermissions: /* @__PURE__ */ new Map(),
+    subagents: null,
+    commandsPublished: false
   };
+  session.subagents = new ClaudeSubagentTracker(
+    session.id,
+    session.config.cwd,
+    (event) => context.emit(event)
+  );
   context.sessions.set(input2.sessionId, session);
   context.emit({
     type: "session.opened",
@@ -51760,6 +52598,7 @@ async function openSession(input2, context, capabilities) {
     title: input2.config.title,
     cwd: input2.config.cwd
   });
+  await replayHistory(session, input2.history, context);
   context.emit({ type: "session.ready", requestId: input2.requestId, sessionId: input2.sessionId });
   context.emit({
     type: "session.config",
@@ -51770,6 +52609,44 @@ async function openSession(input2, context, capabilities) {
 function readConfigured(value) {
   if (typeof value !== "string" || value.length === 0 || value === "default") return null;
   return value;
+}
+async function replayHistory(session, history, context) {
+  if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
+  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId);
+  for (const item of replay.rootItems) {
+    if (session.closed) return;
+    context.emit({ type: "timeline.item", sessionId: session.id, item });
+  }
+  for (const child of replay.children) {
+    if (session.closed) return;
+    const providerId = `subagent:${session.id}:${child.canonicalId}`;
+    const parentProviderId = child.parentCanonicalId !== void 0 ? `subagent:${session.id}:${child.parentCanonicalId}` : session.id;
+    const turnId = (0, import_node_crypto4.randomUUID)();
+    context.emit({
+      type: "session.opened",
+      sessionId: providerId,
+      parentSessionId: parentProviderId,
+      toolCallId: child.canonicalId,
+      capabilities: [],
+      restoration: "parent",
+      title: child.title ?? "Subagent",
+      ...child.description !== void 0 ? { description: child.description } : {},
+      cwd: session.config.cwd
+    });
+    context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
+    for (const item of child.items) {
+      context.emit({ type: "timeline.item", sessionId: providerId, item });
+    }
+    if (child.totalTokens !== void 0) {
+      context.emit({
+        type: "session.usage",
+        sessionId: providerId,
+        turnId,
+        usage: { contextWindowUsedTokens: child.totalTokens }
+      });
+    }
+    context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "completed" });
+  }
 }
 function configStateFor(session) {
   return {
@@ -51792,6 +52669,14 @@ function readStoredSessionId(persistence) {
 async function promptSession(input2, context) {
   const session = context.sessions.get(input2.sessionId);
   if (session === void 0) throw new Error(`Unknown session: ${input2.sessionId}`);
+  if (input2.prompt.input.type === "command") {
+    await commandSession(input2, context, session);
+    return;
+  }
+  if (input2.prompt.delivery === "steer") {
+    await steerSession(input2, context, session);
+    return;
+  }
   if (session.active !== null) {
     context.emit({
       type: "session.prompt_result",
@@ -51801,12 +52686,9 @@ async function promptSession(input2, context) {
     });
     return;
   }
-  if (input2.prompt.input.type !== "message") {
-    throw new Error("Translate Claude provider only accepts message prompts");
-  }
-  let translated;
+  let blocks;
   try {
-    translated = await translatePromptContent(input2.prompt.input.content, context);
+    blocks = await buildMessageBlocks(input2.prompt.input.content, context);
   } catch (error62) {
     context.emit({
       type: "session.prompt_result",
@@ -51817,7 +52699,7 @@ async function promptSession(input2, context) {
     return;
   }
   await ensureQuery(session, context);
-  const turnId = (0, import_node_crypto3.randomUUID)();
+  const turnId = (0, import_node_crypto4.randomUUID)();
   session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
   session.interrupted = false;
   context.emit({
@@ -51829,26 +52711,147 @@ async function promptSession(input2, context) {
   context.emit({ type: "session.turn", sessionId: input2.sessionId, turnId, state: "started" });
   session.sink.push({
     type: "user",
-    message: { role: "user", content: [{ type: "text", text: translated }] },
+    message: { role: "user", content: blocks },
     parent_tool_use_id: null
   });
+  await publishCommands(session, context);
 }
-async function translatePromptContent(content, context) {
-  const values = await context.loadValues();
-  const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent") : async (text) => text;
-  const parts = [];
-  for (const block of content) {
-    if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
-      parts.push(await translatePromptFragment(block.text, translate));
-    } else {
-      parts.push(JSON.stringify(block));
+async function commandSession(input2, context, session) {
+  if (session.active !== null) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input2.sessionId,
+      clientMessageId: input2.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "A turn is already running on this session" } }
+    });
+    return;
+  }
+  if (input2.prompt.input.type !== "command") return;
+  let text = `/${input2.prompt.input.name}`;
+  const args = input2.prompt.input.arguments;
+  if (args.trim().length > 0) {
+    try {
+      const values = await context.loadValues();
+      const translated = values.translatePrompts ? await context.translator.translate(args, "user-to-agent") : args;
+      text += ` ${translated}`;
+    } catch (error62) {
+      context.emit({
+        type: "session.prompt_result",
+        sessionId: input2.sessionId,
+        clientMessageId: input2.prompt.clientMessageId,
+        result: { type: "failed", error: { message: describe3(error62) } }
+      });
+      return;
     }
   }
-  const joined = parts.join("\n");
-  if (joined.trim().length === 0) {
+  await ensureQuery(session, context);
+  const turnId = (0, import_node_crypto4.randomUUID)();
+  session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
+  session.interrupted = false;
+  context.emit({
+    type: "session.prompt_result",
+    sessionId: input2.sessionId,
+    clientMessageId: input2.prompt.clientMessageId,
+    result: { type: "turn", turnId }
+  });
+  context.emit({ type: "session.turn", sessionId: input2.sessionId, turnId, state: "started" });
+  session.sink.push({
+    type: "user",
+    message: { role: "user", content: [{ type: "text", text }] },
+    parent_tool_use_id: null
+  });
+  await publishCommands(session, context);
+}
+async function steerSession(input2, context, session) {
+  const active = session.active;
+  if (active === null || session.query === null) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input2.sessionId,
+      clientMessageId: input2.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "There is no active turn to steer" } }
+    });
+    return;
+  }
+  if (input2.prompt.input.type !== "message") {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input2.sessionId,
+      clientMessageId: input2.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "Cannot steer with a slash command" } }
+    });
+    return;
+  }
+  let blocks;
+  try {
+    blocks = await buildMessageBlocks(input2.prompt.input.content, context);
+  } catch (error62) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input2.sessionId,
+      clientMessageId: input2.prompt.clientMessageId,
+      result: { type: "failed", error: { message: describe3(error62) } }
+    });
+    return;
+  }
+  if (input2.prompt.clearPendingPermissions === true) {
+    denyPendingForSteer(session, (event) => context.emit(event));
+  }
+  session.sink.pushSteer({
+    type: "user",
+    message: { role: "user", content: blocks },
+    parent_tool_use_id: null,
+    priority: "next",
+    uuid: (0, import_node_crypto4.randomUUID)()
+  });
+  context.emit({
+    type: "session.prompt_result",
+    sessionId: input2.sessionId,
+    clientMessageId: input2.prompt.clientMessageId,
+    result: { type: "steer", turnId: active.turnId }
+  });
+}
+function denyPendingForSteer(session, emit) {
+  for (const permissionId of session.pendingPermissions.keys()) {
+    const pending = session.pendingPermissions.get(permissionId);
+    if (pending === void 0) continue;
+    session.pendingPermissions.delete(permissionId);
+    pending({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+    emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
+  }
+}
+var IMAGE_MIME_TYPES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+function isImageMimeType(mimeType) {
+  return IMAGE_MIME_TYPES.has(mimeType);
+}
+async function buildMessageBlocks(content, context) {
+  const values = await context.loadValues();
+  const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent") : async (text) => text;
+  const blocks = [];
+  let hasContent = false;
+  for (const block of content) {
+    if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
+      const translated = await translatePromptFragment(block.text, translate);
+      if (translated.trim().length > 0) hasContent = true;
+      blocks.push({ type: "text", text: translated });
+    } else if (typeof block === "object" && block !== null && block.type === "image" && typeof block.data === "string" && typeof block.mimeType === "string" && isImageMimeType(block.mimeType)) {
+      hasContent = true;
+      blocks.push({
+        type: "image",
+        source: {
+          type: "base64",
+          media_type: block.mimeType,
+          data: block.data
+        }
+      });
+    } else {
+      blocks.push({ type: "text", text: JSON.stringify(block) });
+    }
+  }
+  if (!hasContent) {
     throw new Error("Refusing to send an empty prompt");
   }
-  return joined;
+  return blocks;
 }
 async function ensureQuery(session, context) {
   if (session.query !== null) return;
@@ -51878,7 +52881,38 @@ async function ensureQuery(session, context) {
   };
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
-  session.pump = pumpQuery(session, query, context.emit);
+  session.pump = pumpQuery(session, query, context);
+}
+async function publishCommands(session, context) {
+  if (session.commandsPublished || session.query?.supportedCommands === void 0 || session.closed) {
+    return;
+  }
+  try {
+    const commands = await withTimeout(
+      session.query.supportedCommands(),
+      1e4,
+      "command probe timed out"
+    );
+    if (session.closed) return;
+    session.commandsPublished = true;
+    const seen = /* @__PURE__ */ new Map();
+    for (const command of commands) {
+      if (command === null || typeof command !== "object") continue;
+      const info = command;
+      if (typeof info.name !== "string" || info.name.length === 0 || seen.has(info.name)) continue;
+      seen.set(info.name, {
+        name: info.name,
+        description: typeof info.description === "string" ? info.description : "",
+        ...typeof info.argumentHint === "string" && info.argumentHint.length > 0 ? { argumentHint: info.argumentHint } : {}
+      });
+    }
+    context.emit({
+      type: "session.commands",
+      sessionId: session.id,
+      commands: [...seen.values()]
+    });
+  } catch {
+  }
 }
 function thinkingStartOptions(thinking) {
   if (thinking === null || thinking === "default") return {};
@@ -52054,11 +53088,12 @@ function respondToPermission(session, permissionId, response, emit) {
   }
   emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
 }
-async function pumpQuery(session, query, emit) {
+async function pumpQuery(session, query, context) {
+  const emit = (event) => context.emit(event);
   try {
     for await (const message of query) {
       if (session.closed) return;
-      handleSdkMessage(session, message, emit);
+      handleSdkMessage(session, message, context);
     }
   } catch (error62) {
     if (!session.closed) finishDeadQuery(session, describe3(error62), emit);
@@ -52086,6 +53121,8 @@ function finishDeadQuery(session, message, emit) {
       });
     }
   }
+  if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
+  else session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
     pending({ behavior: "deny", message: "Claude session ended" });
   }
@@ -52098,7 +53135,18 @@ function finishDeadQuery(session, message, emit) {
     });
   }
 }
-function handleSdkMessage(session, message, emit) {
+function handleSdkMessage(session, message, context) {
+  const emit = (event) => context.emit(event);
+  if (session.subagents?.observeSystemMessage(message) === true) return;
+  if (message.type === "system") {
+    if (message.subtype === "init") void publishCommands(session, context);
+    return;
+  }
+  const parentToolUseId = message.parent_tool_use_id;
+  if (typeof parentToolUseId === "string" && parentToolUseId.length > 0) {
+    session.subagents?.handleSidechainMessage(message, parentToolUseId);
+    return;
+  }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
     const content = message.message.content;
     if (!Array.isArray(content)) return;
@@ -52128,9 +53176,12 @@ function handleSdkMessage(session, message, emit) {
             text: thinking
           }
         });
-      } else if (typeof block === "object" && block !== null && block.type === "tool_use") {
+      } else if (typeof block === "object" && block !== null && (block.type === "tool_use" || block.type === "mcp_tool_use" || block.type === "server_tool_use")) {
         const use2 = block;
+        if (typeof use2.id !== "string" || typeof use2.name !== "string") continue;
         session.toolNames.set(use2.id, use2.name);
+        session.toolInputs.set(use2.id, use2.input);
+        session.subagents?.noteRootToolUse(use2.id, use2.name, use2.input);
         emit({
           type: "timeline.item",
           sessionId: session.id,
@@ -52141,11 +53192,7 @@ function handleSdkMessage(session, message, emit) {
             name: use2.name,
             status: "running",
             error: null,
-            detail: {
-              type: "plain_text",
-              label: use2.name,
-              text: JSON.stringify(use2.input ?? {})
-            }
+            detail: describeRunningTool(use2.name, use2.input)
           }
         });
       }
@@ -52158,7 +53205,8 @@ function handleSdkMessage(session, message, emit) {
     for (const block of content) {
       if (typeof block === "object" && block !== null && block.type === "tool_result") {
         const result = block;
-        const output2 = flattenToolResultContent(result.content);
+        const output2 = flattenToolResult(result.content);
+        const name = session.toolNames.get(result.tool_use_id) ?? "tool";
         emit({
           type: "timeline.item",
           sessionId: session.id,
@@ -52166,10 +53214,21 @@ function handleSdkMessage(session, message, emit) {
             type: "tool_call",
             id: result.tool_use_id,
             callId: result.tool_use_id,
-            name: session.toolNames.get(result.tool_use_id) ?? "tool",
-            ...result.is_error ? { status: "failed", error: output2 ?? "Tool failed" } : { status: "completed", error: null },
-            detail: { type: "plain_text", label: "output", text: output2 ?? "" }
+            name,
+            ...result.is_error ? { status: "failed", error: output2.text ?? "Tool failed" } : { status: "completed", error: null },
+            detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output2.text)
           }
+        });
+        output2.images.forEach((image, index) => {
+          emit({
+            type: "timeline.item",
+            sessionId: session.id,
+            item: {
+              type: "assistant_message",
+              id: `${result.tool_use_id}-image-${index}`,
+              text: `![tool image](data:${image.mimeType};base64,${image.data})`
+            }
+          });
         });
       }
     }
@@ -52184,6 +53243,12 @@ function handleSdkMessage(session, message, emit) {
     });
     const active = session.active;
     if (active === null) return;
+    const usage = summarizeModelUsage(
+      message.modelUsage
+    );
+    if (usage !== void 0) {
+      emit({ type: "session.usage", sessionId: session.id, turnId: active.turnId, usage });
+    }
     session.active = null;
     const wasInterrupted = session.interrupted;
     session.interrupted = false;
@@ -52203,23 +53268,53 @@ function handleSdkMessage(session, message, emit) {
     }
   }
 }
-function flattenToolResultContent(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    const parts = [];
-    for (const block of content) {
-      if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
-        parts.push(block.text);
+function flattenToolResult(content) {
+  if (typeof content === "string") return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: null, images: [] };
+  const parts = [];
+  const images = [];
+  for (const block of content) {
+    if (typeof block !== "object" || block === null) continue;
+    const record2 = block;
+    if (record2.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    } else if (record2.type === "image") {
+      const source = block.source;
+      if (typeof source === "object" && source !== null && typeof source.data === "string" && typeof source.media_type === "string") {
+        images.push({
+          mimeType: source.media_type,
+          data: source.data
+        });
+        parts.push("[image]");
       }
     }
-    return parts.length > 0 ? parts.join("\n") : null;
   }
-  return null;
+  return { text: parts.length > 0 ? parts.join("\n") : null, images };
+}
+function summarizeModelUsage(modelUsage) {
+  if (typeof modelUsage !== "object" || modelUsage === null) return void 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let totalCostUsd = 0;
+  for (const entry of Object.values(modelUsage)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record2 = entry;
+    if (typeof record2.inputTokens === "number") inputTokens += record2.inputTokens;
+    if (typeof record2.outputTokens === "number") outputTokens += record2.outputTokens;
+    if (typeof record2.costUSD === "number") totalCostUsd += record2.costUSD;
+  }
+  if (inputTokens === 0 && outputTokens === 0 && totalCostUsd === 0) return void 0;
+  return {
+    ...inputTokens > 0 ? { inputTokens: Math.round(inputTokens) } : {},
+    ...outputTokens > 0 ? { outputTokens: Math.round(outputTokens) } : {},
+    ...totalCostUsd > 0 ? { totalCostUsd } : {}
+  };
 }
 async function teardownSession(session) {
   if (session.closed) return;
   session.closed = true;
   session.abort.abort();
+  session.subagents?.reset();
   for (const pending of session.pendingPermissions.values()) {
     pending({ behavior: "deny", message: "Session closed" });
   }
