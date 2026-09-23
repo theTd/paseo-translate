@@ -72,6 +72,14 @@ export const translateSettings = defineSettings({
     translateResponses: z.boolean().default(true),
     translateAllTimelines: z.boolean().default(false),
     translationTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000),
+    /**
+     * Language of this plugin's own client screens and hints. "system"
+     * follows the device locale via Intl (the host does not expose its app
+     * language to plugins); any other value pins one of the host's locales.
+     */
+    uiLanguage: z
+      .enum(["system", "ar", "en", "es", "fr", "ja", "ko", "pt-BR", "ru", "zh-CN"])
+      .default("system"),
   }),
 });
 

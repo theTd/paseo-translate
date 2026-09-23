@@ -27,6 +27,7 @@ const configured: TranslateSettingsValues = {
   translateResponses: true,
   translateAllTimelines: false,
   translationTimeoutMs: 30_000,
+  uiLanguage: "system" as const,
 };
 
 describe("translate settings schema", () => {
@@ -41,6 +42,7 @@ describe("translate settings schema", () => {
     expect(parsed.data.agentLanguage).toBe("de");
     expect(parsed.data.translationSystemPrompt).toBe("");
     expect(parsed.data.translationTimeoutMs).toBe(30_000);
+    expect(parsed.data.uiLanguage).toBe("system");
   });
 
   it("accepts every reasoning-effort gear including none", () => {

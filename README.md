@@ -81,6 +81,18 @@ the app after each turn.
   Model selection passes the daemon-configured model through; the default
   catalog entry uses the CLI's default model.
 
+## Interface language
+
+The plugin's own screens and hints ship in nine languages (`ar`, `en`, `es`,
+`fr`, `ja`, `ko`, `pt-BR`, `ru`, `zh-CN`), matching the host app's locales.
+By default the interface follows the device locale (detected via `Intl`); the
+Translate settings screen has an **Interface language** picker to pin one
+instead. The host does not expose its app-language setting to plugins, so
+"System" tracks the device rather than the app: it reads only the device's
+primary locale, so on multi-locale devices it can differ from the host app
+language by one fallback step. The settings-screen title
+is snapshotted at registration. Server-side and daemon-log text stays English.
+
 ## Develop
 
 ```bash
