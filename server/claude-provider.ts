@@ -723,6 +723,30 @@ async function openSession(
   }
 }
 
+/**
+ * Parents before descendants. Sidecar files are ordered by mtime, which can
+ * list a grandchild before its parent; the daemon rejects a child
+ * `session.opened` whose parent is not yet registered with session.subsession.
+ */
+function orderReplayedChildren<T extends { canonicalId: string; parentCanonicalId?: string }>(
+  children: readonly T[],
+): T[] {
+  const byId = new Map(children.map((child) => [child.canonicalId, child]));
+  const ordered: T[] = [];
+  const seen = new Set<string>();
+  const visit = (child: T): void => {
+    if (seen.has(child.canonicalId)) return;
+    seen.add(child.canonicalId);
+    if (child.parentCanonicalId !== undefined) {
+      const parent = byId.get(child.parentCanonicalId);
+      if (parent !== undefined) visit(parent);
+    }
+    ordered.push(child);
+  };
+  for (const child of children) visit(child);
+  return ordered;
+}
+
 /** Normalizes a configured selection: empty/unknown/"default" means none. */
 function readConfigured(value: string | undefined): string | null {
   if (typeof value !== "string" || value.length === 0 || value === "default") return null;
@@ -745,7 +769,7 @@ async function replayHistory(
     if (session.closed) return;
     context.emit({ type: "timeline.item", sessionId: session.id, item });
   }
-  for (const child of replay.children) {
+  for (const child of orderReplayedChildren(replay.children)) {
     if (session.closed) return;
     if (!session.supportsSubsessions) {
       // Same degradation as the live tracker: no child sessions, child
@@ -761,17 +785,21 @@ async function replayHistory(
       continue;
     }
     const providerId = `subagent:${session.id}:${child.canonicalId}`;
-    const parentProviderId =
-      child.parentCanonicalId !== undefined
-        ? `subagent:${session.id}:${child.parentCanonicalId}`
-        : session.id;
+    const parentKnown =
+      child.parentCanonicalId !== undefined &&
+      replay.children.some((candidate) => candidate.canonicalId === child.parentCanonicalId);
+    const parentProviderId = parentKnown
+      ? `subagent:${session.id}:${child.parentCanonicalId}`
+      : session.id;
     const turnId = randomUUID();
     context.emit({
       type: "session.opened",
       sessionId: providerId,
       parentSessionId: parentProviderId,
       toolCallId: child.canonicalId,
-      capabilities: [],
+      // Nested children check the immediate parent for session.subsession.
+      // An empty list here makes the daemon kill the whole connection.
+      capabilities: ["session.subsession"],
       restoration: "parent",
       title: child.title ?? "Subagent",
       ...(child.description !== undefined ? { description: child.description } : {}),

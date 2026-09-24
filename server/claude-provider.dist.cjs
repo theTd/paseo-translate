@@ -53354,7 +53354,8 @@ var ClaudeSubagentTracker = class {
       sessionId: providerId,
       parentSessionId: parentProviderId,
       toolCallId: id2,
-      capabilities: [],
+      // Nested children look at this session's caps for session.subsession.
+      capabilities: ["session.subsession"],
       restoration: "parent",
       title,
       ...description !== void 0 ? { description } : {},
@@ -54379,6 +54380,22 @@ async function openSession(input2, context, capabilities) {
     });
   }
 }
+function orderReplayedChildren(children) {
+  const byId = new Map(children.map((child) => [child.canonicalId, child]));
+  const ordered = [];
+  const seen = /* @__PURE__ */ new Set();
+  const visit2 = (child) => {
+    if (seen.has(child.canonicalId)) return;
+    seen.add(child.canonicalId);
+    if (child.parentCanonicalId !== void 0) {
+      const parent = byId.get(child.parentCanonicalId);
+      if (parent !== void 0) visit2(parent);
+    }
+    ordered.push(child);
+  };
+  for (const child of children) visit2(child);
+  return ordered;
+}
 function readConfigured(value) {
   if (typeof value !== "string" || value.length === 0 || value === "default") return null;
   return value;
@@ -54391,7 +54408,7 @@ async function replayHistory(session, history, context) {
     if (session.closed) return;
     context.emit({ type: "timeline.item", sessionId: session.id, item });
   }
-  for (const child of replay.children) {
+  for (const child of orderReplayedChildren(replay.children)) {
     if (session.closed) return;
     if (!session.supportsSubsessions) {
       for (const item of child.items) {
@@ -54404,14 +54421,17 @@ async function replayHistory(session, history, context) {
       continue;
     }
     const providerId = `subagent:${session.id}:${child.canonicalId}`;
-    const parentProviderId = child.parentCanonicalId !== void 0 ? `subagent:${session.id}:${child.parentCanonicalId}` : session.id;
+    const parentKnown = child.parentCanonicalId !== void 0 && replay.children.some((candidate) => candidate.canonicalId === child.parentCanonicalId);
+    const parentProviderId = parentKnown ? `subagent:${session.id}:${child.parentCanonicalId}` : session.id;
     const turnId = (0, import_node_crypto5.randomUUID)();
     context.emit({
       type: "session.opened",
       sessionId: providerId,
       parentSessionId: parentProviderId,
       toolCallId: child.canonicalId,
-      capabilities: [],
+      // Nested children check the immediate parent for session.subsession.
+      // An empty list here makes the daemon kill the whole connection.
+      capabilities: ["session.subsession"],
       restoration: "parent",
       title: child.title ?? "Subagent",
       ...child.description !== void 0 ? { description: child.description } : {},

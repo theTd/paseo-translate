@@ -1063,7 +1063,11 @@ describe("translate claude provider subagents", () => {
     const workflow = opened.find(
       (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-wf",
     );
-    expect(workflow).toMatchObject({ title: "Workflow", description: "Spec workflow" });
+    expect(workflow).toMatchObject({
+      title: "Workflow",
+      description: "Spec workflow",
+      capabilities: ["session.subsession"],
+    });
     const workflowPrompt = events.find(
       (event) =>
         event.type === "timeline.item" &&
@@ -1106,7 +1110,12 @@ describe("translate claude provider subagents", () => {
     const grandchild = events.find(
       (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-2",
     );
-    expect(grandchild).toMatchObject({ parentSessionId: "subagent:s:tu-1", toolCallId: "tu-2" });
+    expect(grandchild).toMatchObject({
+      parentSessionId: "subagent:s:tu-1",
+      toolCallId: "tu-2",
+      capabilities: ["session.subsession"],
+    });
+    expect(childOpens[0]).toMatchObject({ capabilities: ["session.subsession"] });
   });
 
   it("keeps backgrounded children running across an interrupt", async () => {

@@ -346,7 +346,8 @@ export class ClaudeSubagentTracker {
       sessionId: providerId,
       parentSessionId: parentProviderId,
       toolCallId: id,
-      capabilities: [],
+      // Nested children look at this session's caps for session.subsession.
+      capabilities: ["session.subsession"],
       restoration: "parent",
       title,
       ...(description !== undefined ? { description } : {}),
