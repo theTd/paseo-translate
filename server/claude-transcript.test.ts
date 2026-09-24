@@ -174,6 +174,35 @@ describe("claude transcript replay windows", () => {
     expect(toolCalls[0]).toMatchObject({ id: "tu-old", callId: "tu-old", name: "tool" });
   });
 
+  it("marks replayed screenshot blocks without leaking base64", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tu-shot",
+              content: [
+                { type: "text", text: "captured" },
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    ]);
+    const result = await replay(fixture);
+    const toolCalls = result.rootItems.filter((item) => item.type === "tool_call");
+    expect(toolCalls).toHaveLength(1);
+    expect(JSON.stringify(toolCalls[0])).toContain("[image]");
+    expect(JSON.stringify(result)).not.toContain("base64");
+  });
+
   it("bounds sidecar items by the shared child budget, newest children first", async () => {
     const fixture = createFixture();
     writeRootSession(fixture, [userText("hello")]);

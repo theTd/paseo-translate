@@ -34,9 +34,9 @@ __export(claude_provider_exports, {
   scanPathForClaude: () => scanPathForClaude
 });
 module.exports = __toCommonJS(claude_provider_exports);
-var import_node_crypto4 = require("node:crypto");
-var import_node_fs2 = require("node:fs");
-var import_node_path3 = __toESM(require("node:path"));
+var import_node_crypto5 = require("node:crypto");
+var import_node_fs3 = require("node:fs");
+var import_node_path4 = __toESM(require("node:path"));
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_node_module = require("node:module");
@@ -32543,10 +32543,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path2) {
-  if (!path2)
+function getElementAtPath(obj, path3) {
+  if (!path3)
     return obj;
-  return path2.reduce((acc, key) => acc?.[key], obj);
+  return path3.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -32886,11 +32886,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path2, issues) {
+function prefixIssues(path3, issues) {
   return issues.map((iss) => {
     var _a4;
     (_a4 = iss).path ?? (_a4.path = []);
-    iss.path.unshift(path2);
+    iss.path.unshift(path3);
     return iss;
   });
 }
@@ -33340,16 +33340,16 @@ function flattenError(error62, mapper = (issue2) => issue2.message) {
 }
 function formatError(error62, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error63, path2 = []) => {
+  const processError = (error63, path3 = []) => {
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else {
-        const fullpath = [...path2, ...issue2.path];
+        const fullpath = [...path3, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -33388,17 +33388,17 @@ function formatError(error62, mapper = (issue2) => issue2.message) {
 }
 function treeifyError(error62, mapper = (issue2) => issue2.message) {
   const result = { errors: [] };
-  const processError = (error63, path2 = []) => {
+  const processError = (error63, path3 = []) => {
     var _a4;
     for (const issue2 of error63.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else {
-        const fullpath = [...path2, ...issue2.path];
+        const fullpath = [...path3, ...issue2.path];
         if (fullpath.length === 0) {
           result.errors.push(mapper(issue2));
           continue;
@@ -33437,8 +33437,8 @@ function treeifyError(error62, mapper = (issue2) => issue2.message) {
 }
 function toDotPath(_path) {
   const segs = [];
-  const path2 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
-  for (const seg of path2) {
+  const path3 = _path.map((seg) => typeof seg === "object" ? seg.key : seg);
+  for (const seg of path3) {
     if (typeof seg === "number")
       segs.push(`[${seg}]`);
     else if (typeof seg === "symbol")
@@ -50540,13 +50540,13 @@ function resolveRef(ref, ctx) {
   if (!ref.startsWith("#")) {
     throw new Error("External $ref is not supported, only local refs (#/...) are allowed");
   }
-  const path2 = ref.slice(1).split("/").filter(Boolean);
-  if (path2.length === 0) {
+  const path3 = ref.slice(1).split("/").filter(Boolean);
+  if (path3.length === 0) {
     return ctx.rootSchema;
   }
   const defsKey = ctx.version === "draft-2020-12" ? "$defs" : "definitions";
-  if (path2[0] === defsKey) {
-    const key = path2[1] === void 0 ? void 0 : decodeJSONPointerSegment(path2[1]);
+  if (path3[0] === defsKey) {
+    const key = path3[1] === void 0 ? void 0 : decodeJSONPointerSegment(path3[1]);
     if (!key || !ctx.defs[key]) {
       throw new Error(`Reference not found: ${ref}`);
     }
@@ -51507,6 +51507,11 @@ var translatedReasoningDataSchema = external_exports.object({
   phase: external_exports.enum(["streaming", "complete"]),
   messageId: external_exports.string().nullable()
 });
+var DATA_URI_IMAGE_PATTERN = /!\[[^\]]*\]\(data:[^)]*\)/g;
+function isDataUriImageOnlyText(text) {
+  if (text.trim().length === 0) return false;
+  return text.replace(DATA_URI_IMAGE_PATTERN, "").trim().length === 0;
+}
 function resolveLanguagePair(values, direction) {
   return direction === "user-to-agent" ? { source: values.userLanguage, target: values.agentLanguage } : { source: values.agentLanguage, target: values.userLanguage };
 }
@@ -51736,7 +51741,7 @@ function summarizeQuestions(input2) {
   return labels.length > 0 ? { title, description: labels.join(" / ") } : { title };
 }
 function isTranslatable(value) {
-  return typeof value === "string" && value.trim().length > 0;
+  return typeof value === "string" && value.trim().length > 0 && !isDataUriImageOnlyText(value);
 }
 async function translateQuestionItem(item, translate) {
   if (!isRecord(item)) return item;
@@ -51803,7 +51808,7 @@ async function resolveQuestionAnswers(translatedQuestions, originalQuestions, up
       continue;
     }
     const questionText = headerToQuestion.get(key) ?? questionToQuestion.get(key) ?? key;
-    resolved[questionText] = value.trim().length === 0 ? value : await translate(value);
+    resolved[questionText] = value.trim().length === 0 || isDataUriImageOnlyText(value) ? value : await translate(value);
   }
   return resolved;
 }
@@ -51979,11 +51984,20 @@ function timelineId(fallback, ...candidates) {
   }
   return fallback;
 }
+function flattenSubagentItemForParent(title, item) {
+  if (item.type !== "user_message") return item;
+  return {
+    type: "assistant_message",
+    id: item.id,
+    text: `[${title}] ${item.text}`
+  };
+}
 var ClaudeSubagentTracker = class {
-  constructor(rootSessionId, cwd, emit) {
+  constructor(rootSessionId, cwd, emit, supportsSubsessions) {
     this.rootSessionId = rootSessionId;
     this.cwd = cwd;
     this.emit = emit;
+    this.supportsSubsessions = supportsSubsessions;
     /** task_id -> canonical subagent (first Task tool_use) id. */
     this.subagentIdByTaskId = /* @__PURE__ */ new Map();
     /** Every announced tool id -> canonical id (resume aliases included). */
@@ -52017,6 +52031,24 @@ var ClaudeSubagentTracker = class {
     if (name === "Task" && typeof input2 === "object" && input2 !== null) {
       this.taskInputs.set(toolUseId, input2);
     }
+  }
+  /**
+   * Emits one child-scoped event. With `session.subsession` negotiated this
+   * is a passthrough; without it every child session event is dropped (a
+   * child `session.opened` would make the daemon fail the whole provider
+   * connection) and timeline items fall back to flat parent rendering.
+   */
+  emitChildEvent(child, event) {
+    if (this.supportsSubsessions) {
+      this.emit(event);
+      return;
+    }
+    if (event.type !== "timeline.item") return;
+    this.emit({
+      type: "timeline.item",
+      sessionId: this.rootSessionId,
+      item: flattenSubagentItemForParent(child.title, event.item)
+    });
   }
   /**
    * Entry point for every SDK message that is NOT a root assistant/user
@@ -52083,23 +52115,23 @@ var ClaudeSubagentTracker = class {
     const existingId = this.subagentIdByTaskId.get(message.task_id);
     if (existingId !== void 0) {
       this.canonicalIdByToolUseId.set(id2, existingId);
-      const child = this.children.get(existingId);
-      if (!child) return;
-      if (!child.turnOpen) {
-        child.turnId = (0, import_node_crypto3.randomUUID)();
-        child.turnOpen = true;
-        this.emit({
+      const child2 = this.children.get(existingId);
+      if (!child2) return;
+      if (!child2.turnOpen) {
+        child2.turnId = (0, import_node_crypto3.randomUUID)();
+        child2.turnOpen = true;
+        this.emitChildEvent(child2, {
           type: "session.turn",
-          sessionId: child.providerId,
-          turnId: child.turnId,
+          sessionId: child2.providerId,
+          turnId: child2.turnId,
           state: "started"
         });
       }
       const prompt2 = readString2(message.prompt);
       if (prompt2 !== void 0) {
-        this.emit({
+        this.emitChildEvent(child2, {
           type: "timeline.item",
-          sessionId: child.providerId,
+          sessionId: child2.providerId,
           item: { type: "user_message", id: (0, import_node_crypto3.randomUUID)(), text: prompt2 }
         });
       }
@@ -52117,16 +52149,18 @@ var ClaudeSubagentTracker = class {
     const title = workflow ? "Workflow" : readString2(input2?.["name"]) ?? readString2(message.subagent_type) ?? "Subagent";
     const description = readString2(message.description);
     const turnId = (0, import_node_crypto3.randomUUID)();
-    this.children.set(id2, {
+    const child = {
       providerId,
       canonicalId: id2,
+      title,
       turnId,
       turnOpen: true,
       toolNames: /* @__PURE__ */ new Map(),
       toolInputs: /* @__PURE__ */ new Map()
-    });
+    };
+    this.children.set(id2, child);
     this.lastStatusById.set(id2, "running");
-    this.emit({
+    this.emitChildEvent(child, {
       type: "session.opened",
       sessionId: providerId,
       parentSessionId: parentProviderId,
@@ -52137,10 +52171,10 @@ var ClaudeSubagentTracker = class {
       ...description !== void 0 ? { description } : {},
       cwd: this.cwd
     });
-    this.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
+    this.emitChildEvent(child, { type: "session.turn", sessionId: providerId, turnId, state: "started" });
     const prompt = workflow ? description : readString2(message.prompt);
     if (prompt !== void 0) {
-      this.emit({
+      this.emitChildEvent(child, {
         type: "timeline.item",
         sessionId: providerId,
         item: { type: "user_message", id: (0, import_node_crypto3.randomUUID)(), text: prompt }
@@ -52161,7 +52195,7 @@ var ClaudeSubagentTracker = class {
       const id2 = this.subagentIdByTaskId.get(message.task_id);
       const child = id2 !== void 0 ? this.children.get(id2) : void 0;
       if (child !== void 0) {
-        this.emit({
+        this.emitChildEvent(child, {
           type: "session.usage",
           sessionId: child.providerId,
           turnId: child.turnId,
@@ -52177,7 +52211,7 @@ var ClaudeSubagentTracker = class {
     const id2 = this.subagentIdByTaskId.get(message.task_id);
     const child = id2 !== void 0 ? this.children.get(id2) : void 0;
     if (child === void 0) return;
-    this.emit({
+    this.emitChildEvent(child, {
       type: "session.usage",
       sessionId: child.providerId,
       turnId: child.turnId,
@@ -52195,7 +52229,7 @@ var ClaudeSubagentTracker = class {
       if (!child.turnOpen) {
         child.turnId = (0, import_node_crypto3.randomUUID)();
         child.turnOpen = true;
-        this.emit({
+        this.emitChildEvent(child, {
           type: "session.turn",
           sessionId: child.providerId,
           turnId: child.turnId,
@@ -52209,7 +52243,7 @@ var ClaudeSubagentTracker = class {
   closeChildTurn(child, status, error62) {
     if (!child.turnOpen) return;
     child.turnOpen = false;
-    this.emit({
+    this.emitChildEvent(child, {
       type: "session.turn",
       sessionId: child.providerId,
       turnId: child.turnId,
@@ -52226,7 +52260,7 @@ var ClaudeSubagentTracker = class {
       if (typeof block !== "object" || block === null) continue;
       const record2 = block;
       if (record2.type === "text" && typeof record2.text === "string" && record2.text.trim().length > 0) {
-        this.emit({
+        this.emitChildEvent(child, {
           type: "timeline.item",
           sessionId: child.providerId,
           item: {
@@ -52237,7 +52271,7 @@ var ClaudeSubagentTracker = class {
           }
         });
       } else if (record2.type === "thinking" && typeof record2.thinking === "string" && record2.thinking.trim().length > 0) {
-        this.emit({
+        this.emitChildEvent(child, {
           type: "timeline.item",
           sessionId: child.providerId,
           item: {
@@ -52269,7 +52303,7 @@ var ClaudeSubagentTracker = class {
           error: null,
           detail
         };
-        this.emit({ type: "timeline.item", sessionId: child.providerId, item });
+        this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
       }
     }
   }
@@ -52294,7 +52328,7 @@ var ClaudeSubagentTracker = class {
         ...result.is_error === true ? { status: "failed", error: output2 ?? "Tool failed" } : { status: "completed", error: null },
         detail
       };
-      this.emit({ type: "timeline.item", sessionId: child.providerId, item });
+      this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
     }
   }
 };
@@ -52310,11 +52344,108 @@ function flattenBlockContent(content) {
   return parts.length > 0 ? parts.join("\n") : null;
 }
 
-// server/claude-transcript.ts
+// server/image-output.ts
+var import_node_crypto4 = require("node:crypto");
 var import_node_fs = require("node:fs");
+var import_node_os2 = __toESM(require("node:os"));
+var import_node_path2 = __toESM(require("node:path"));
+var IMAGE_ATTACHMENT_DIR = "paseo-attachments";
+var IMAGE_ATTACHMENT_DIR_PREFIX = `${IMAGE_ATTACHMENT_DIR}-`;
+var PRIVATE_DIR_MODE = 448;
+var IMAGE_FILE_MODE = 384;
+var materializedDir = null;
+function canReuseDir(dir) {
+  try {
+    if (!(0, import_node_fs.lstatSync)(dir).isDirectory()) return false;
+    (0, import_node_fs.chmodSync)(dir, PRIVATE_DIR_MODE);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function attachmentDir() {
+  if (materializedDir !== null && canReuseDir(materializedDir)) return materializedDir;
+  materializedDir = (0, import_node_fs.mkdtempSync)(import_node_path2.default.join(import_node_os2.default.tmpdir(), IMAGE_ATTACHMENT_DIR_PREFIX));
+  (0, import_node_fs.chmodSync)(materializedDir, PRIVATE_DIR_MODE);
+  return materializedDir;
+}
+function imageExtension(mimeType) {
+  switch (mimeType) {
+    case "image/jpeg":
+      return "jpg";
+    case "image/png":
+      return "png";
+    case "image/webp":
+      return "webp";
+    case "image/gif":
+      return "gif";
+    case "image/bmp":
+      return "bmp";
+    case "image/tiff":
+      return "tiff";
+    default:
+      return null;
+  }
+}
+function normalizeData(mimeType, data) {
+  if (data.startsWith("data:")) {
+    const match = /^data:([^;]+);base64,(.*)$/.exec(data);
+    if (match) return { mimeType: match[1], data: match[2] };
+  }
+  return { mimeType, data };
+}
+function encodeFilePath(value) {
+  return value.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
+function fileUri(absolutePath) {
+  const forward = absolutePath.replace(/\\/g, "/");
+  const unc = /^\/\/\?\/UNC\//i.test(forward) ? `//${forward.slice(8)}` : /^\/\/\?\/[A-Za-z]:\//.test(forward) ? forward.slice(4) : forward;
+  if (/^[A-Za-z]:\//.test(unc)) {
+    return `file:///${unc.slice(0, 2)}${encodeFilePath(unc.slice(2))}`;
+  }
+  if (absolutePath.startsWith("\\\\") && unc.startsWith("//")) {
+    return `file:${encodeFilePath(unc)}`;
+  }
+  if (unc.startsWith("/")) return `file://${encodeFilePath(unc)}`;
+  return unc;
+}
+function escapeMarkdownSource(uri) {
+  return uri.replace(/\\/g, "\\\\").replace(/\)/g, "\\)");
+}
+function escapeMarkdownAlt(value) {
+  return value.replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
+}
+function materializeImageOutput(data, mimeType) {
+  if (data.trim().length === 0) return null;
+  const normalized = normalizeData(mimeType ?? "image/png", data);
+  const extension = imageExtension(normalized.mimeType);
+  if (extension === null) return null;
+  let bytes;
+  try {
+    bytes = Buffer.from(normalized.data, "base64");
+  } catch {
+    return null;
+  }
+  if (bytes.length === 0) return null;
+  const hash2 = (0, import_node_crypto4.createHash)("sha256").update(bytes).digest("hex");
+  const filePath = import_node_path2.default.join(attachmentDir(), `${hash2}.${extension}`);
+  try {
+    if (!(0, import_node_fs.existsSync)(filePath)) (0, import_node_fs.writeFileSync)(filePath, bytes, { mode: IMAGE_FILE_MODE });
+    (0, import_node_fs.chmodSync)(filePath, IMAGE_FILE_MODE);
+  } catch {
+    return null;
+  }
+  return { uri: fileUri(filePath), path: filePath };
+}
+function renderImageOutputMarkdown(uri, altText = "Image") {
+  return `![${escapeMarkdownAlt(altText)}](${escapeMarkdownSource(uri)})`;
+}
+
+// server/claude-transcript.ts
+var import_node_fs2 = require("node:fs");
 var import_promises10 = require("node:fs/promises");
-var import_node_os2 = require("node:os");
-var import_node_path2 = require("node:path");
+var import_node_os3 = require("node:os");
+var import_node_path3 = require("node:path");
 var PROJECT_DIR_LENGTH_CAP = 200;
 var MAX_REPLAY_LINES = 1e4;
 var MAX_REPLAY_ITEMS = 2e3;
@@ -52323,7 +52454,7 @@ var MAX_REPLAY_SIDECARS = 50;
 function resolveConfigDir() {
   const override = process.env["CLAUDE_CONFIG_DIR"];
   if (typeof override === "string" && override.length > 0) return override;
-  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude");
+  return (0, import_node_path3.join)((0, import_node_os3.homedir)(), ".claude");
 }
 function encodeProjectDir(input2) {
   const replaced = input2.replace(/[^a-zA-Z0-9]/g, "-");
@@ -52336,7 +52467,7 @@ function encodeProjectDir(input2) {
 }
 function canonicalize(input2) {
   try {
-    return import_node_fs.realpathSync.native(input2);
+    return import_node_fs2.realpathSync.native(input2);
   } catch {
     return input2;
   }
@@ -52344,8 +52475,8 @@ function canonicalize(input2) {
 function readString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
 }
-async function readJsonLines(path2) {
-  const raw = await (0, import_promises10.readFile)(path2, "utf8");
+async function readJsonLines(path3) {
+  const raw = await (0, import_promises10.readFile)(path3, "utf8");
   const rawLines = raw.split("\n");
   const windowed = rawLines.length > MAX_REPLAY_LINES ? rawLines.slice(-MAX_REPLAY_LINES) : rawLines;
   const entries = [];
@@ -52538,8 +52669,15 @@ function flattenReplayContent(content) {
   if (!Array.isArray(content)) return null;
   const parts = [];
   for (const block of content) {
-    if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
+    if (typeof block !== "object" || block === null) continue;
+    const record2 = block;
+    if (record2.type === "text" && typeof block.text === "string") {
       parts.push(block.text);
+    } else if (record2.type === "image") {
+      const source = block.source;
+      if (typeof source === "object" && source !== null && typeof source.data === "string" && typeof source.media_type === "string") {
+        parts.push("[image]");
+      }
     }
   }
   return parts.length > 0 ? parts.join("\n") : null;
@@ -52553,8 +52691,8 @@ async function readClaudeReplay(cwd, claudeSessionId, restore) {
   }
 }
 async function readReplayInner(cwd, claudeSessionId, restore) {
-  const projectDir = (0, import_node_path2.join)(resolveConfigDir(), "projects", encodeProjectDir(canonicalize(cwd)));
-  const entries = await readJsonLines((0, import_node_path2.join)(projectDir, `${claudeSessionId}.jsonl`));
+  const projectDir = (0, import_node_path3.join)(resolveConfigDir(), "projects", encodeProjectDir(canonicalize(cwd)));
+  const entries = await readJsonLines((0, import_node_path3.join)(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
   const root = createCollector(null);
   let seed = 0;
@@ -52584,7 +52722,7 @@ async function readReplayInner(cwd, claudeSessionId, restore) {
 async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   let files;
   try {
-    files = await (0, import_promises10.readdir)((0, import_node_path2.join)(projectDir, claudeSessionId, "subagents"));
+    files = await (0, import_promises10.readdir)((0, import_node_path3.join)(projectDir, claudeSessionId, "subagents"));
   } catch {
     return [];
   }
@@ -52593,7 +52731,7 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
     sidecars.map(async (file2) => {
       let mtimeMs = 0;
       try {
-        const fileStat = await (0, import_promises10.stat)((0, import_node_path2.join)(projectDir, claudeSessionId, "subagents", file2));
+        const fileStat = await (0, import_promises10.stat)((0, import_node_path3.join)(projectDir, claudeSessionId, "subagents", file2));
         if (Number.isFinite(fileStat.mtimeMs)) mtimeMs = fileStat.mtimeMs;
       } catch {
         mtimeMs = 0;
@@ -52638,7 +52776,7 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   });
 }
 async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUserBlock) {
-  const base = (0, import_node_path2.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
+  const base = (0, import_node_path3.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
   let meta3 = null;
   try {
     const raw = await (0, import_promises10.readFile)(`${base}.meta.json`, "utf8");
@@ -52689,9 +52827,9 @@ function scanPathForClaude(pathValue, platform) {
   for (const name of names) {
     for (const directory of directories) {
       if (directory.length === 0) continue;
-      const candidate = import_node_path3.default.join(directory, name);
+      const candidate = import_node_path4.default.join(directory, name);
       try {
-        (0, import_node_fs2.accessSync)(candidate, import_node_fs2.constants.X_OK);
+        (0, import_node_fs3.accessSync)(candidate, import_node_fs3.constants.X_OK);
         return candidate;
       } catch {
       }
@@ -52918,12 +53056,14 @@ async function openSession(input2, context, capabilities) {
     toolInputs: /* @__PURE__ */ new Map(),
     pendingPermissions: /* @__PURE__ */ new Map(),
     subagents: null,
+    supportsSubsessions: capabilities.includes("session.subsession"),
     commandsPublished: false
   };
   session.subagents = new ClaudeSubagentTracker(
     session.id,
     session.config.cwd,
-    (event) => context.emit(event)
+    (event) => context.emit(event),
+    session.supportsSubsessions
   );
   context.sessions.set(input2.sessionId, session);
   context.emit({
@@ -52958,9 +53098,19 @@ async function replayHistory(session, history, context) {
   }
   for (const child of replay.children) {
     if (session.closed) return;
+    if (!session.supportsSubsessions) {
+      for (const item of child.items) {
+        context.emit({
+          type: "timeline.item",
+          sessionId: session.id,
+          item: flattenSubagentItemForParent(child.title ?? "Subagent", item)
+        });
+      }
+      continue;
+    }
     const providerId = `subagent:${session.id}:${child.canonicalId}`;
     const parentProviderId = child.parentCanonicalId !== void 0 ? `subagent:${session.id}:${child.parentCanonicalId}` : session.id;
-    const turnId = (0, import_node_crypto4.randomUUID)();
+    const turnId = (0, import_node_crypto5.randomUUID)();
     context.emit({
       type: "session.opened",
       sessionId: providerId,
@@ -53096,7 +53246,7 @@ async function promptSession(input2, context) {
     return;
   }
   await ensureQuery(session, context);
-  const turnId = (0, import_node_crypto4.randomUUID)();
+  const turnId = (0, import_node_crypto5.randomUUID)();
   session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
   session.interrupted = false;
   context.emit({
@@ -53142,7 +53292,7 @@ async function commandSession(input2, context, session) {
     }
   }
   await ensureQuery(session, context);
-  const turnId = (0, import_node_crypto4.randomUUID)();
+  const turnId = (0, import_node_crypto5.randomUUID)();
   session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
   session.interrupted = false;
   context.emit({
@@ -53199,7 +53349,7 @@ async function steerSession(input2, context, session) {
     message: { role: "user", content: blocks },
     parent_tool_use_id: null,
     priority: "next",
-    uuid: (0, import_node_crypto4.randomUUID)()
+    uuid: (0, import_node_crypto5.randomUUID)()
   });
   context.emit({
     type: "session.prompt_result",
@@ -53693,6 +53843,18 @@ function handleSdkMessage(session, message, context) {
             detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output2.text)
           }
         });
+        for (const [index, image] of output2.images.entries()) {
+          const materialized = materializeImageOutput(image.data, image.mimeType);
+          emit({
+            type: "timeline.item",
+            sessionId: session.id,
+            item: {
+              type: "assistant_message",
+              id: `${result.tool_use_id}-image-${index}`,
+              text: materialized !== null ? renderImageOutputMarkdown(materialized.uri) : "Image output was omitted because it was not available as a file path or URL."
+            }
+          });
+        }
       }
     }
     return;
@@ -53732,9 +53894,10 @@ function handleSdkMessage(session, message, context) {
   }
 }
 function flattenToolResult(content) {
-  if (typeof content === "string") return { text: content };
-  if (!Array.isArray(content)) return { text: null };
+  if (typeof content === "string") return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: null, images: [] };
   const parts = [];
+  const images = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) continue;
     const record2 = block;
@@ -53743,11 +53906,15 @@ function flattenToolResult(content) {
     } else if (record2.type === "image") {
       const source = block.source;
       if (typeof source === "object" && source !== null && typeof source.data === "string" && typeof source.media_type === "string") {
+        images.push({
+          mimeType: source.media_type,
+          data: source.data
+        });
         parts.push("[image]");
       }
     }
   }
-  return { text: parts.length > 0 ? parts.join("\n") : null };
+  return { text: parts.length > 0 ? parts.join("\n") : null, images };
 }
 function summarizeModelUsage(modelUsage) {
   if (typeof modelUsage !== "object" || modelUsage === null) return void 0;

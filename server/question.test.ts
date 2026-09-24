@@ -139,4 +139,27 @@ describe("question helpers", () => {
       ),
     ).rejects.toThrow("endpoint down");
   });
+
+  it("leaves data-URI image texts untranslated on both directions", async () => {
+    const shot = "![tool image](data:image/png;base64,aGVsbG8=)";
+    const seen: string[] = [];
+    const spy = (text: string): Promise<string> => {
+      seen.push(text);
+      return Promise.resolve(`EN(${text})`);
+    };
+    const translated = await translateQuestionsForDisplay(
+      [{ header: "Farbe", question: shot, options: [{ label: shot }] }],
+      spy,
+    );
+    expect(translated).toEqual([{ header: "EN(Farbe)", question: shot, options: [{ label: shot }] }]);
+    const resolved = await resolveQuestionAnswers(
+      translated,
+      [{ header: "Farbe", question: shot }],
+      { answers: { "EN(Farbe)": shot } },
+      spy,
+    );
+    // Only the header round-tripped; the payload never reached the endpoint.
+    expect(seen).toEqual(["Farbe"]);
+    expect(resolved).toEqual({ [shot]: shot });
+  });
 });

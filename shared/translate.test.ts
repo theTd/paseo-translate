@@ -5,6 +5,7 @@ import {
   assertAcpConfigured,
   assertConfigured,
   isDataUriImageOnlyText,
+  isProviderImageMarkdown,
   isReasoningTranslationEligible,
   knownAcpCommand,
   resolveTranslationSystemPrompt,
@@ -195,6 +196,22 @@ describe("data-URI image text gate", () => {
   it("leaves empty texts to the length gate", () => {
     expect(isDataUriImageOnlyText("")).toBe(false);
     expect(isDataUriImageOnlyText("   \n  ")).toBe(false);
+  });
+});
+
+describe("provider image markdown gate", () => {
+  const hash = "a".repeat(64);
+  it("matches materialized file references in both URI shapes", () => {
+    expect(isProviderImageMarkdown(`![Image](/tmp/paseo-attachments/${hash}.png)`)).toBe(true);
+    expect(
+      isProviderImageMarkdown(`![Image](file:///C:/Users/me/AppData/Local/Temp/paseo-attachments-x1/${hash}.webp)`),
+    ).toBe(true);
+  });
+
+  it("leaves user-authored and remote images translatable", () => {
+    expect(isProviderImageMarkdown("![diagram](./paseo-attachments/notes.png)")).toBe(false);
+    expect(isProviderImageMarkdown("![logo](https://example.com/logo.png)")).toBe(false);
+    expect(isProviderImageMarkdown("Hello world")).toBe(false);
   });
 });
 

@@ -386,13 +386,22 @@ function flattenReplayContent(content: unknown): string | null {
   if (!Array.isArray(content)) return null;
   const parts: string[] = [];
   for (const block of content) {
-    if (
-      typeof block === "object" &&
-      block !== null &&
-      (block as { type?: unknown }).type === "text" &&
-      typeof (block as { text?: unknown }).text === "string"
-    ) {
+    if (typeof block !== "object" || block === null) continue;
+    const record = block as { type?: unknown };
+    if (record.type === "text" && typeof (block as { text?: unknown }).text === "string") {
       parts.push((block as { text: string }).text);
+    } else if (record.type === "image") {
+      // Same marker as the live path (flattenToolResult): the base64 payload
+      // itself never enters timeline text.
+      const source = (block as { source?: unknown }).source;
+      if (
+        typeof source === "object" &&
+        source !== null &&
+        typeof (source as { data?: unknown }).data === "string" &&
+        typeof (source as { media_type?: unknown }).media_type === "string"
+      ) {
+        parts.push("[image]");
+      }
     }
   }
   return parts.length > 0 ? parts.join("\n") : null;

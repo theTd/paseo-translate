@@ -282,6 +282,22 @@ export function isDataUriImageOnlyText(text: string): boolean {
 }
 
 /**
+ * Recognizes markdown rendered for a materialized provider image, mirroring
+ * the daemon's own recognizer (`isProviderImageMarkdown`): the source is a
+ * content-hashed file in a `paseo-attachments[-*]` dir. Matching the full
+ * `<64-hex>.<ext>` shape (not just a leading `![`) keeps user-authored
+ * image markdown and remote URLs translatable. The host app renders these
+ * natively (preview, lightbox), so the timeline transformer passes them
+ * through untouched instead of replacing them with the translated view.
+ */
+const PROVIDER_IMAGE_MARKDOWN_PATTERN =
+  /^!\[[^\]]*\]\([^)]*paseo-attachments(?:-[^/\\\)]+)?[/\\]+(?:[^/\\\)]+[/\\]+)?[0-9a-f]{64}\.[a-z0-9]+\)/;
+
+export function isProviderImageMarkdown(text: string): boolean {
+  return PROVIDER_IMAGE_MARKDOWN_PATTERN.test(text);
+}
+
+/**
  * Display eligibility for one reasoning block. Pure so the gating matrix is
  * unit-testable: only `complete` blocks translate (streaming shows the
  * original), empty texts would fail the RPC's min(1) contract, the pair is

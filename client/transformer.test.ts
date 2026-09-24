@@ -8,11 +8,11 @@ describe("translate assistant transformer", () => {
       item: { text: "Guten Tag", messageId: "m-1" },
       phase: "streaming",
     });
+    expect(result).not.toBeUndefined();
+    if (result === undefined) return;
     const item = result.items[0];
-    expect(item.type).toBe("plugin");
-    expect(item.kind).toBe("translated-message");
-    expect(item.version).toBe(1);
-    expect(translatedMessageDataSchema.parse(item.data)).toEqual({
+    expect(item).toMatchObject({ type: "plugin", kind: "translated-message", version: 1 });
+    expect(translatedMessageDataSchema.parse(item?.data)).toEqual({
       text: "Guten Tag",
       phase: "streaming",
       messageId: "m-1",
@@ -21,11 +21,22 @@ describe("translate assistant transformer", () => {
 
   it("marks committed messages complete and defaults a missing messageId to null", () => {
     const result = transformAssistantMessage({ item: { text: "Fertig." }, phase: "complete" });
-    expect(translatedMessageDataSchema.parse(result.items[0].data)).toEqual({
+    expect(result).not.toBeUndefined();
+    expect(translatedMessageDataSchema.parse(result?.items[0].data)).toEqual({
       text: "Fertig.",
       phase: "complete",
       messageId: null,
     });
+  });
+
+  it("passes materialized provider images through for native host rendering", () => {
+    const hash = "b".repeat(64);
+    expect(
+      transformAssistantMessage({
+        item: { text: `![Image](file:///tmp/paseo-attachments/${hash}.png)` },
+        phase: "complete",
+      }),
+    ).toBeUndefined();
   });
 });
 

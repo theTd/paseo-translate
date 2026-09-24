@@ -1,5 +1,6 @@
 import type { PluginTimelineTransformResult } from "@getpaseo/plugin";
 import {
+  isProviderImageMarkdown,
   TRANSLATED_MESSAGE_KIND,
   TRANSLATED_MESSAGE_VERSION,
   TRANSLATED_REASONING_KIND,
@@ -10,11 +11,17 @@ import {
  * Passthrough mapping from a canonical assistant message to the plugin item
  * the renderer owns. The canonical row keeps the agent's original text; only
  * the rendered projection can show a translation.
+ *
+ * Materialized provider images (`![Image](file://…paseo-attachments…/…)`)
+ * return undefined so the host renders them natively with its image
+ * pipeline: the translated Markdown view has no image support, and there is
+ * no prose worth translating in a lone image reference.
  */
 export function transformAssistantMessage(input: {
   item: { text: string; messageId?: string };
   phase: "streaming" | "complete";
-}): PluginTimelineTransformResult {
+}): PluginTimelineTransformResult | undefined {
+  if (isProviderImageMarkdown(input.item.text)) return undefined;
   return {
     items: [
       {

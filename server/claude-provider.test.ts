@@ -166,6 +166,7 @@ function resultSuccess(sessionId: string, text: string): SDKMessage {
 async function createHarness(
   overrides?: Partial<TranslateSettingsValues>,
   cacheStore?: import("./translation-cache-store").TranslationCacheStore,
+  connectCapabilities?: readonly string[],
 ) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
@@ -176,7 +177,7 @@ async function createHarness(
   });
   const registration = await provider.connect({
     versions: [1],
-    capabilities: [...PROVIDER_CAPABILITIES],
+    capabilities: [...(connectCapabilities ?? PROVIDER_CAPABILITIES)],
   });
   const events: ProviderEvent[] = [];
   registration.onEvent((event) => events.push(event));
@@ -931,6 +932,60 @@ describe("translate claude provider subagents", () => {
     ]);
   });
 
+  it("flattens subagents into the parent timeline without session.subsession", async () => {
+    const withoutSubsessions = PROVIDER_CAPABILITIES.filter(
+      (capability) => capability !== "session.subsession",
+    );
+    const { fake, events, send } = await createHarness(undefined, undefined, withoutSubsessions);
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-task", "tu-1", "Task", {
+        name: "Explorer",
+        subagent_type: "Explore",
+        description: "Explore the repo",
+      });
+      yield taskStarted("t-1", "tu-1");
+      yield sidechainText("tu-1", "s-1", "Found three files");
+      yield taskNotification("t-1", "completed");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Go"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // No child session may open: the daemon would fail the whole provider
+    // connection on a parentSessionId it never negotiated.
+    expect(
+      events.some(
+        (event) => event.type === "session.opened" && "parentSessionId" in event,
+      ),
+    ).toBe(false);
+    expect(
+      events.some((event) => event.type === "session.turn" && event.sessionId !== "s"),
+    ).toBe(false);
+    // The child prompt and text survive flattened into the parent timeline;
+    // the prompt is revoiced so it does not read as the user's own words.
+    const rootTexts = events
+      .filter((event) => event.type === "timeline.item" && event.sessionId === "s")
+      .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+    expect(rootTexts).toContain("[Explorer] List all source files");
+    expect(rootTexts).toContain("Found three files");
+    // The connection itself survives the degraded turn.
+    const turnsBefore = events.filter(
+      (event) => event.type === "session.turn" && event.sessionId === "s",
+    ).length;
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "again");
+    });
+    await send(promptInput("Again", "m-2"));
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" &&
+        event.sessionId === "s" &&
+        events.filter((e) => e.type === "session.turn" && e.sessionId === "s").length >
+          turnsBefore,
+    );
+  });
+
   it("normalizes workflows and drops shells, housekeeping, and undeclared tasks", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
@@ -1209,7 +1264,7 @@ describe("translate claude provider extended protocol", () => {
     expect(usage).toMatchObject({ usage: { inputTokens: 100, outputTokens: 50 } });
   });
 
-  it("keeps tool-result screenshots out of translatable timeline text", async () => {
+  it("materializes tool-result screenshots as file markdown without base64", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
     fake.use(async function* () {
@@ -1238,7 +1293,8 @@ describe("translate claude provider extended protocol", () => {
     await send(promptInput("Take a screenshot"));
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
     // The tool card keeps a marker so the screenshot is still visible as
-    // having been returned, but the base64 payload must never enter any
+    // having been returned, and the image itself is referenced as host
+    // rendered file markdown; the base64 payload must never enter any
     // timeline text (it would be sent to the translation endpoint).
     const toolCall = events.find(
       (event) =>
@@ -1253,18 +1309,20 @@ describe("translate claude provider extended protocol", () => {
     // the card itself, not just somewhere in the event envelope.
     expect(JSON.stringify(toolCall.item.detail)).toContain("[image]");
     expect(JSON.stringify(toolCall.item.detail)).not.toContain("base64");
+    const imageMessage = events.find(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "assistant_message" &&
+        event.item.id === "tu-shot-image-0",
+    );
+    expect(imageMessage).toMatchObject({
+      item: { text: expect.stringMatching(/^!\[Image\]\(file:\/\/\/.*[0-9a-f]{64}\.png\)$/) },
+    });
     const texts = events
       .filter((event) => event.type === "timeline.item" && "text" in event.item)
       .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : ""));
     expect(texts.some((text) => text.includes("base64") || text.includes("data:image"))).toBe(false);
-    expect(
-      events.some(
-        (event) =>
-          event.type === "timeline.item" &&
-          event.item.type === "assistant_message" &&
-          event.item.id === "tu-shot-image-0",
-      ),
-    ).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("aGVsbG8=");
   });
 
   it("marks image-only tool results without leaking base64", async () => {
@@ -1303,9 +1361,20 @@ describe("translate claude provider extended protocol", () => {
     );
     expect(toolCall).toBeDefined();
     if (toolCall?.type !== "timeline.item" || toolCall.item.type !== "tool_call") return;
-    // No text blocks at all: the whole output is the marker.
+    // No text blocks at all: the whole output is the marker, and the shot
+    // still materializes to a host rendered file reference.
     expect(JSON.stringify(toolCall.item.detail)).toContain("[image]");
     expect(JSON.stringify(events)).not.toContain("base64");
+    expect(
+      events.some(
+        (event) =>
+          event.type === "timeline.item" &&
+          event.item.type === "assistant_message" &&
+          event.item.id === "tu-shot-only-image-0" &&
+          "text" in event.item &&
+          event.item.text.startsWith("![Image](file://"),
+      ),
+    ).toBe(true);
   });
 
   it("publishes slash commands reported by the CLI", async () => {
@@ -1381,6 +1450,72 @@ describe("translate claude provider extended protocol", () => {
         (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-9",
       );
       expect(childOpened).toMatchObject({ parentSessionId: "s", title: "Explore" });
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("flattens replayed sidecars into the parent timeline without session.subsession", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
+    const projectDir = pathModule.join(configDir, "projects", encoded);
+    await fs.mkdir(pathModule.join(projectDir, "cs-replay-flat", "subagents"), { recursive: true });
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-replay-flat.jsonl"),
+      [
+        JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "text", text: "Hi" }] },
+          parent_tool_use_id: null,
+        }),
+      ].join("\n"),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-replay-flat", "subagents", "agent-a1.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "Explore", toolUseId: "tu-9" }),
+    );
+    await fs.writeFile(
+      pathModule.join(projectDir, "cs-replay-flat", "subagents", "agent-a1.jsonl"),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "Child found it" }] },
+      }),
+    );
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      const withoutSubsessions = PROVIDER_CAPABILITIES.filter(
+        (capability) => capability !== "session.subsession",
+      );
+      const { events, send } = await createHarness(
+        { translatePrompts: false },
+        undefined,
+        withoutSubsessions,
+      );
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-replay-flat" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      expect(
+        events.some(
+          (event) => event.type === "session.opened" && "parentSessionId" in event,
+        ),
+      ).toBe(false);
+      const rootTexts = events
+        .filter((event) => event.type === "timeline.item" && event.sessionId === "s")
+        .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
+      expect(rootTexts).toContain("Hi");
+      expect(rootTexts).toContain("Child found it");
     } finally {
       if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
       else process.env["CLAUDE_CONFIG_DIR"] = previous;

@@ -20,6 +20,8 @@
  *   leaking user-language text to the agent.
  */
 
+import { isDataUriImageOnlyText } from "../shared/translate";
+
 export const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 
 type RecordLike = Record<string, unknown>;
@@ -97,7 +99,11 @@ export function summarizeQuestions(input: RecordLike): { title?: string; descrip
 }
 
 function isTranslatable(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
+  // Data-URI image texts carry no language: translating them burns endpoint
+  // quota on base64 soup (see isDataUriImageOnlyText).
+  return (
+    typeof value === "string" && value.trim().length > 0 && !isDataUriImageOnlyText(value)
+  );
 }
 
 /**
@@ -210,7 +216,10 @@ export async function resolveQuestionAnswers(
       continue;
     }
     const questionText = headerToQuestion.get(key) ?? questionToQuestion.get(key) ?? key;
-    resolved[questionText] = value.trim().length === 0 ? value : await translate(value);
+    // Data URIs pass through verbatim like empty strings: they carry no
+    // language, so translating them could only corrupt the payload.
+    resolved[questionText] =
+      value.trim().length === 0 || isDataUriImageOnlyText(value) ? value : await translate(value);
   }
   return resolved;
 }

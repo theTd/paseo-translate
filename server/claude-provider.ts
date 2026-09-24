@@ -31,7 +31,8 @@ import {
   summarizeQuestions,
   translateQuestionsForDisplay,
 } from "./question";
-import { ClaudeSubagentTracker } from "./claude-subagents";
+import { ClaudeSubagentTracker, flattenSubagentItemForParent } from "./claude-subagents";
+import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
 import {
@@ -177,6 +178,13 @@ interface ClaudeSession {
   pendingPermissions: Map<string, PendingPermission>;
   /** Live Task-protocol children, surfaced as provider subsessions. */
   subagents: ClaudeSubagentTracker | null;
+  /**
+   * Whether the negotiated connection caps include `session.subsession`.
+   * Without it the daemon kills the whole provider connection on the first
+   * child `session.opened` (failProviderConnection), so the tracker and the
+   * replay path must degrade to flat parent-timeline rendering instead.
+   */
+  supportsSubsessions: boolean;
   commandsPublished: boolean;
 }
 
@@ -457,12 +465,14 @@ async function openSession(
     toolInputs: new Map(),
     pendingPermissions: new Map(),
     subagents: null,
+    supportsSubsessions: capabilities.includes("session.subsession"),
     commandsPublished: false,
   };
   session.subagents = new ClaudeSubagentTracker(
     session.id,
     session.config.cwd,
     (event) => context.emit(event),
+    session.supportsSubsessions,
   );
   context.sessions.set(input.sessionId, session);
   context.emit({
@@ -510,6 +520,19 @@ async function replayHistory(
   }
   for (const child of replay.children) {
     if (session.closed) return;
+    if (!session.supportsSubsessions) {
+      // Same degradation as the live tracker: no child sessions, child
+      // content flattened into the parent timeline (see
+      // flattenSubagentItemForParent).
+      for (const item of child.items) {
+        context.emit({
+          type: "timeline.item",
+          sessionId: session.id,
+          item: flattenSubagentItemForParent(child.title ?? "Subagent", item),
+        });
+      }
+      continue;
+    }
     const providerId = `subagent:${session.id}:${child.canonicalId}`;
     const parentProviderId =
       child.parentCanonicalId !== undefined
@@ -1550,15 +1573,30 @@ function handleSdkMessage(
             detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output.text),
           },
         });
-        // Tool results can carry screenshots as base64 image blocks. The
-        // provider protocol has no image timeline item, and base64 must never
-        // become translatable text: a data URI inside an assistant_message
-        // would be sent to the translation endpoint (burning quota and
-        // stalling on multi-hundred-KB payloads) while rendering as garbage
-        // in the translated Markdown view, which has no image support (the
-        // ACP-internal native path drops non-text content the same way).
-        // The tool text keeps one "[image]" marker per screenshot instead;
-        // the pixels stay available to Claude in the SDK transcript.
+        // Tool results can carry screenshots as base64 image blocks. Base64
+        // must never reach timeline text (it would be sent to the
+        // translation endpoint), so each image is materialized to a
+        // content-hashed file and referenced as `![Image](file://…)` markdown
+        // exactly like the native providers; the host app renders those
+        // natively and the timeline transformer passes them through
+        // untranslated. The tool text keeps one "[image]" marker per
+        // screenshot instead; the pixels stay available to Claude in the SDK
+        // transcript.
+        for (const [index, image] of output.images.entries()) {
+          const materialized = materializeImageOutput(image.data, image.mimeType);
+          emit({
+            type: "timeline.item",
+            sessionId: session.id,
+            item: {
+              type: "assistant_message",
+              id: `${result.tool_use_id}-image-${index}`,
+              text:
+                materialized !== null
+                  ? renderImageOutputMarkdown(materialized.uri)
+                  : "Image output was omitted because it was not available as a file path or URL.",
+            },
+          });
+        }
       }
     }
     return;
@@ -1603,12 +1641,14 @@ function handleSdkMessage(
 
 interface ToolResultOutput {
   text: string | null;
+  images: Array<{ mimeType: string; data: string }>;
 }
 
 function flattenToolResult(content: unknown): ToolResultOutput {
-  if (typeof content === "string") return { text: content };
-  if (!Array.isArray(content)) return { text: null };
+  if (typeof content === "string") return { text: content, images: [] };
+  if (!Array.isArray(content)) return { text: null, images: [] };
   const parts: string[] = [];
+  const images: Array<{ mimeType: string; data: string }> = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) continue;
     const record = block as { type?: unknown };
@@ -1622,13 +1662,17 @@ function flattenToolResult(content: unknown): ToolResultOutput {
         typeof (source as { data?: unknown }).data === "string" &&
         typeof (source as { media_type?: unknown }).media_type === "string"
       ) {
-        // One marker per screenshot; the base64 payload itself is never
-        // kept (see the tool_result handler above).
+        // The payload itself never reaches timeline text (see the
+        // tool_result handler above); the text keeps one marker per shot.
+        images.push({
+          mimeType: (source as { media_type: string }).media_type,
+          data: (source as { data: string }).data,
+        });
         parts.push("[image]");
       }
     }
   }
-  return { text: parts.length > 0 ? parts.join("\n") : null };
+  return { text: parts.length > 0 ? parts.join("\n") : null, images };
 }
 
 /**

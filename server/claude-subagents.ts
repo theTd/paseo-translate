@@ -70,6 +70,7 @@ interface TaskProgressShape {
 interface ChildState {
   providerId: string;
   canonicalId: string;
+  title: string;
   turnId: string;
   turnOpen: boolean;
   toolNames: Map<string, string>;
@@ -125,6 +126,26 @@ function timelineId(fallback: string, ...candidates: Array<string | undefined>):
   return fallback;
 }
 
+/**
+ * Degraded rendering of one child timeline item into its parent timeline,
+ * shared by the live tracker fallback and the replay path. Child prompts
+ * arrive as `user_message`, which would read as the user's own words in the
+ * parent timeline, so they are revoiced as assistant messages with the child
+ * title; every other item type keeps its shape and id (SDK ids are unique
+ * per Claude session, so no collision with root items).
+ */
+export function flattenSubagentItemForParent(
+  title: string,
+  item: ProviderTimelineItem,
+): ProviderTimelineItem {
+  if (item.type !== "user_message") return item;
+  return {
+    type: "assistant_message",
+    id: item.id,
+    text: `[${title}] ${item.text}`,
+  };
+}
+
 export class ClaudeSubagentTracker {
   /** task_id -> canonical subagent (first Task tool_use) id. */
   private readonly subagentIdByTaskId = new Map<string, string>();
@@ -146,6 +167,13 @@ export class ClaudeSubagentTracker {
     private readonly rootSessionId: string,
     private readonly cwd: string,
     private readonly emit: (event: ProviderEvent) => void,
+    /**
+     * Whether the negotiated connection caps include `session.subsession`.
+     * False degrades every child to flat parent-timeline rendering (see
+     * emitChildEvent): opening a child session would make the daemon kill
+     * the whole provider connection.
+     */
+    private readonly supportsSubsessions: boolean,
   ) {}
 
   reset(): void {
@@ -166,6 +194,25 @@ export class ClaudeSubagentTracker {
     if (name === "Task" && typeof input === "object" && input !== null) {
       this.taskInputs.set(toolUseId, input as Record<string, unknown>);
     }
+  }
+
+  /**
+   * Emits one child-scoped event. With `session.subsession` negotiated this
+   * is a passthrough; without it every child session event is dropped (a
+   * child `session.opened` would make the daemon fail the whole provider
+   * connection) and timeline items fall back to flat parent rendering.
+   */
+  private emitChildEvent(child: ChildState, event: ProviderEvent): void {
+    if (this.supportsSubsessions) {
+      this.emit(event);
+      return;
+    }
+    if (event.type !== "timeline.item") return;
+    this.emit({
+      type: "timeline.item",
+      sessionId: this.rootSessionId,
+      item: flattenSubagentItemForParent(child.title, event.item),
+    });
   }
 
   /**
@@ -247,7 +294,7 @@ export class ClaudeSubagentTracker {
       if (!child.turnOpen) {
         child.turnId = randomUUID();
         child.turnOpen = true;
-        this.emit({
+        this.emitChildEvent(child, {
           type: "session.turn",
           sessionId: child.providerId,
           turnId: child.turnId,
@@ -256,7 +303,7 @@ export class ClaudeSubagentTracker {
       }
       const prompt = readString(message.prompt);
       if (prompt !== undefined) {
-        this.emit({
+        this.emitChildEvent(child, {
           type: "timeline.item",
           sessionId: child.providerId,
           item: { type: "user_message", id: randomUUID(), text: prompt },
@@ -283,16 +330,18 @@ export class ClaudeSubagentTracker {
       : (readString(input?.["name"]) ?? readString(message.subagent_type) ?? "Subagent");
     const description = readString(message.description);
     const turnId = randomUUID();
-    this.children.set(id, {
+    const child: ChildState = {
       providerId,
       canonicalId: id,
+      title,
       turnId,
       turnOpen: true,
       toolNames: new Map(),
       toolInputs: new Map(),
-    });
+    };
+    this.children.set(id, child);
     this.lastStatusById.set(id, "running");
-    this.emit({
+    this.emitChildEvent(child, {
       type: "session.opened",
       sessionId: providerId,
       parentSessionId: parentProviderId,
@@ -303,12 +352,12 @@ export class ClaudeSubagentTracker {
       ...(description !== undefined ? { description } : {}),
       cwd: this.cwd,
     });
-    this.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
+    this.emitChildEvent(child, { type: "session.turn", sessionId: providerId, turnId, state: "started" });
     // Open the child timeline with the task it was actually given. A
     // workflow's prompt is its script source, so open with the summary.
     const prompt = workflow ? description : readString(message.prompt);
     if (prompt !== undefined) {
-      this.emit({
+      this.emitChildEvent(child, {
         type: "timeline.item",
         sessionId: providerId,
         item: { type: "user_message", id: randomUUID(), text: prompt },
@@ -331,7 +380,7 @@ export class ClaudeSubagentTracker {
       const id = this.subagentIdByTaskId.get(message.task_id);
       const child = id !== undefined ? this.children.get(id) : undefined;
       if (child !== undefined) {
-        this.emit({
+        this.emitChildEvent(child, {
           type: "session.usage",
           sessionId: child.providerId,
           turnId: child.turnId,
@@ -348,7 +397,7 @@ export class ClaudeSubagentTracker {
     const id = this.subagentIdByTaskId.get(message.task_id);
     const child = id !== undefined ? this.children.get(id) : undefined;
     if (child === undefined) return;
-    this.emit({
+    this.emitChildEvent(child, {
       type: "session.usage",
       sessionId: child.providerId,
       turnId: child.turnId,
@@ -367,7 +416,7 @@ export class ClaudeSubagentTracker {
       if (!child.turnOpen) {
         child.turnId = randomUUID();
         child.turnOpen = true;
-        this.emit({
+        this.emitChildEvent(child, {
           type: "session.turn",
           sessionId: child.providerId,
           turnId: child.turnId,
@@ -382,7 +431,7 @@ export class ClaudeSubagentTracker {
   private closeChildTurn(child: ChildState, status: "completed" | "failed" | "canceled", error?: string): void {
     if (!child.turnOpen) return;
     child.turnOpen = false;
-    this.emit({
+    this.emitChildEvent(child, {
       type: "session.turn",
       sessionId: child.providerId,
       turnId: child.turnId,
@@ -403,7 +452,7 @@ export class ClaudeSubagentTracker {
       if (typeof block !== "object" || block === null) continue;
       const record = block as { type?: unknown; id?: unknown; text?: unknown; thinking?: unknown };
       if (record.type === "text" && typeof record.text === "string" && record.text.trim().length > 0) {
-        this.emit({
+        this.emitChildEvent(child, {
           type: "timeline.item",
           sessionId: child.providerId,
           item: {
@@ -418,7 +467,7 @@ export class ClaudeSubagentTracker {
         typeof record.thinking === "string" &&
         record.thinking.trim().length > 0
       ) {
-        this.emit({
+        this.emitChildEvent(child, {
           type: "timeline.item",
           sessionId: child.providerId,
           item: {
@@ -454,7 +503,7 @@ export class ClaudeSubagentTracker {
           error: null,
           detail,
         };
-        this.emit({ type: "timeline.item", sessionId: child.providerId, item });
+        this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
       }
     }
   }
@@ -482,7 +531,7 @@ export class ClaudeSubagentTracker {
           : { status: "completed" as const, error: null }),
         detail,
       };
-      this.emit({ type: "timeline.item", sessionId: child.providerId, item });
+      this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
     }
   }
 }
