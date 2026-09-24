@@ -1,5 +1,10 @@
 import type { PluginTimelineTransformResult } from "@getpaseo/plugin";
-import { TRANSLATED_MESSAGE_KIND, TRANSLATED_MESSAGE_VERSION } from "../shared/translate";
+import {
+  TRANSLATED_MESSAGE_KIND,
+  TRANSLATED_MESSAGE_VERSION,
+  TRANSLATED_REASONING_KIND,
+  TRANSLATED_REASONING_VERSION,
+} from "../shared/translate";
 
 /**
  * Passthrough mapping from a canonical assistant message to the plugin item
@@ -20,6 +25,31 @@ export function transformAssistantMessage(input: {
           text: input.item.text,
           phase: input.phase,
           messageId: input.item.messageId ?? null,
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * Same passthrough for a canonical reasoning (thinking) block. Reasoning
+ * items carry no messageId; the emitted kind stays separate from assistant
+ * messages so the renderer can keep the muted reasoning presentation.
+ */
+export function transformReasoningMessage(input: {
+  item: { text: string };
+  phase: "streaming" | "complete";
+}): PluginTimelineTransformResult {
+  return {
+    items: [
+      {
+        type: "plugin",
+        kind: TRANSLATED_REASONING_KIND,
+        version: TRANSLATED_REASONING_VERSION,
+        data: {
+          text: input.item.text,
+          phase: input.phase,
+          messageId: null,
         },
       },
     ],

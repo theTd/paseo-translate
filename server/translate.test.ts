@@ -39,6 +39,7 @@ const values: TranslateSettingsValues = {
   claudeExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
+  translateReasoning: false,
   translateAllTimelines: false,
   translationTimeoutMs: 5_000,
   uiLanguage: "system" as const,

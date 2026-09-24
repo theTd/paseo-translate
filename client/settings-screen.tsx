@@ -39,6 +39,7 @@ interface Draft {
   timeoutText: string;
   translatePrompts: boolean;
   translateResponses: boolean;
+  translateReasoning: boolean;
   translateAllTimelines: boolean;
   uiLanguage: UiLanguageSetting;
   innerAgentEnv: ReadySettings["values"]["innerAgentEnv"];
@@ -60,6 +61,7 @@ function draftFrom(settings: ReadySettings): Draft {
     timeoutText: String(values.translationTimeoutMs),
     translatePrompts: values.translatePrompts,
     translateResponses: values.translateResponses,
+    translateReasoning: values.translateReasoning,
     translateAllTimelines: values.translateAllTimelines,
     uiLanguage: values.uiLanguage,
     innerAgentEnv: values.innerAgentEnv,
@@ -179,6 +181,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     (translateResponses: boolean) => patch({ translateResponses }),
     [patch],
   );
+  const toggleReasoning = useCallback(
+    (translateReasoning: boolean) => patch({ translateReasoning }),
+    [patch],
+  );
   const toggleAllTimelines = useCallback(
     (translateAllTimelines: boolean) => patch({ translateAllTimelines }),
     [patch],
@@ -233,6 +239,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         claudeExecutablePath: active.claudeExecutablePath,
         translatePrompts: active.translatePrompts,
         translateResponses: active.translateResponses,
+        translateReasoning: active.translateReasoning,
         translateAllTimelines: active.translateAllTimelines,
         uiLanguage: active.uiLanguage,
         translationTimeoutMs: timeoutMs,
@@ -411,6 +418,13 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           hint={t("translateResponsesHint")}
           value={active.translateResponses}
           onValueChange={toggleResponses}
+          disabled={settings.saving}
+        />
+        <SettingsSwitch
+          label={t("translateReasoning")}
+          hint={t("translateReasoningHint")}
+          value={active.translateReasoning}
+          onValueChange={toggleReasoning}
           disabled={settings.saving}
         />
         <SettingsSwitch

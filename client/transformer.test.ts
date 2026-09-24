@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { translatedMessageDataSchema } from "../shared/translate";
-import { transformAssistantMessage } from "./transformer";
+import { translatedMessageDataSchema, translatedReasoningDataSchema } from "../shared/translate";
+import { transformAssistantMessage, transformReasoningMessage } from "./transformer";
 
 describe("translate assistant transformer", () => {
   it("passes the accumulated text through with the streaming phase", () => {
@@ -24,6 +24,33 @@ describe("translate assistant transformer", () => {
     expect(translatedMessageDataSchema.parse(result.items[0].data)).toEqual({
       text: "Fertig.",
       phase: "complete",
+      messageId: null,
+    });
+  });
+});
+
+describe("translate reasoning transformer", () => {
+  it("emits a separate kind with a null messageId", () => {
+    const result = transformReasoningMessage({
+      item: { text: "Der Nutzer will…" },
+      phase: "complete",
+    });
+    const item = result.items[0];
+    expect(item.type).toBe("plugin");
+    expect(item.kind).toBe("translated-reasoning");
+    expect(item.version).toBe(1);
+    expect(translatedReasoningDataSchema.parse(item.data)).toEqual({
+      text: "Der Nutzer will…",
+      phase: "complete",
+      messageId: null,
+    });
+  });
+
+  it("passes the streaming phase through", () => {
+    const result = transformReasoningMessage({ item: { text: "Hmm" }, phase: "streaming" });
+    expect(translatedReasoningDataSchema.parse(result.items[0].data)).toEqual({
+      text: "Hmm",
+      phase: "streaming",
       messageId: null,
     });
   });

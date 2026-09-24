@@ -4,6 +4,7 @@ import {
   adapterCommand,
   assertAcpConfigured,
   assertConfigured,
+  isReasoningTranslationEligible,
   knownAcpCommand,
   resolveTranslationSystemPrompt,
   translateProvidersRpc,
@@ -25,6 +26,7 @@ const configured: TranslateSettingsValues = {
   claudeExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
+  translateReasoning: false,
   translateAllTimelines: false,
   translationTimeoutMs: 30_000,
   uiLanguage: "system" as const,
@@ -40,6 +42,7 @@ describe("translate settings schema", () => {
     expect(parsed.data.innerAgentCommand).toEqual([]);
     expect(parsed.data.userLanguage).toBe("en");
     expect(parsed.data.agentLanguage).toBe("de");
+    expect(parsed.data.translateReasoning).toBe(false);
     expect(parsed.data.translationSystemPrompt).toBe("");
     expect(parsed.data.translationTimeoutMs).toBe(30_000);
     expect(parsed.data.uiLanguage).toBe("system");
@@ -158,5 +161,54 @@ describe("translate settings schema", () => {
       translateProvidersRpc.output.safeParse({ providers: [{ id: "x", command: null, acp: "known" }] })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("reasoning translation eligibility", () => {
+  const base = {
+    phase: "complete" as const,
+    textLength: 12,
+    languagePair: "de>en",
+    translateReasoning: true,
+    translateResponses: true,
+    ownedByTranslateProvider: true,
+    translateAllTimelines: false,
+  };
+
+  it("translates a complete block for an owned provider when both switches are on", () => {
+    expect(isReasoningTranslationEligible(base)).toBe(true);
+  });
+
+  it("stays off by default (translateReasoning false)", () => {
+    expect(isReasoningTranslationEligible({ ...base, translateReasoning: false })).toBe(false);
+  });
+
+  it("requires the shared translateResponses display gate", () => {
+    expect(isReasoningTranslationEligible({ ...base, translateResponses: false })).toBe(false);
+  });
+
+  it("never translates while streaming", () => {
+    expect(isReasoningTranslationEligible({ ...base, phase: "streaming" })).toBe(false);
+  });
+
+  it("skips empty texts that would fail the RPC min(1) contract", () => {
+    expect(isReasoningTranslationEligible({ ...base, textLength: 0 })).toBe(false);
+  });
+
+  it("stays off before settings load (null pair)", () => {
+    expect(isReasoningTranslationEligible({ ...base, languagePair: null })).toBe(false);
+  });
+
+  it("covers foreign providers only when every timeline translates", () => {
+    expect(
+      isReasoningTranslationEligible({ ...base, ownedByTranslateProvider: false }),
+    ).toBe(false);
+    expect(
+      isReasoningTranslationEligible({
+        ...base,
+        ownedByTranslateProvider: false,
+        translateAllTimelines: true,
+      }),
+    ).toBe(true);
   });
 });

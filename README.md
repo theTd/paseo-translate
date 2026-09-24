@@ -14,6 +14,7 @@ user-language rendering of replies exists only in the app's plugin view.
 | --- | --- | --- |
 | Prompt (you → agent) | The plugin's `translate-acp` provider proxies the inner ACP agent and translates `session/prompt` text blocks and the per-agent system prompt on the wire | Fail closed: a failed translation blocks that request with an error instead of leaking your language to the agent |
 | Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message phase is `complete` and renders each poll as Markdown | Display only: stream-first against the endpoint's SSE with bounded retries from a fresh job (exponential backoff, longer for `busy`; fatal errors such as oversized text or an unconfigured endpoint fail fast), then a retried `translate.text` fallback. No total time limit: a stream attempt is dropped only when its text stops growing for 2 × `translationTimeoutMs` + 15s of awake time (device sleep does not count). On failure the original text stays, with an error hint and a manual Retry translation button; non-fatal failures also retry by themselves when a host comes back online or the app returns to the foreground |
+| Reasoning (agent thinking → you) | A separate client timeline transformer + renderer (`translated-reasoning`) with the same streaming job machinery, rendering muted so thoughts never look like replies | Opt-in via the **Translate thinking** setting (default off — thinking blocks are often long, so translating them doubles endpoint spend on auxiliary text) and additionally requires **Translate replies** (the server display path shares that gate). Same display-only failure policy as replies, plus a Show original / Show translation toggle |
 | Questions (agent ⇄ you) | Clarifying questions render in your language and your answers travel back in the agent's: the direct Claude provider maps `AskUserQuestion` to a `question` permission with translated question/option text and translates answers back (fail closed); the ACP proxy translates question-like `session/request_permission` titles, option names, and text content inbound for display | Approvals that are not questions (allow/reject tool cards) stay in the agent language; a failed question display translation degrades to the original text, while a failed answer translation declines the question |
 
 Slash-command frames keep their command word verbatim; only the free-text
@@ -58,8 +59,9 @@ the app after each turn.
   everything with an explicit path. PATH resolution is cached for the plugin
   process lifetime: after installing or upgrading `claude` on PATH, run
   `paseo plugin reload translate` to pick it up.
-- Reasoning (thinking) streams as reasoning timeline items; they stay in the
-  agent language untranslated.
+- Reasoning (thinking) streams as reasoning timeline items; by default they
+  stay in the agent language untranslated — turn on **Translate thinking** to
+  translate them for display (muted, with a Show original toggle).
 - Model switching, thinking intensity, and permission modes match the native
   provider's surface: the catalog is probed live from the CLI's reported
   models (effort levels become thinking options), modes are
@@ -122,9 +124,11 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
 
 ## Limitations
 
-- **Installing this plugin replaces the assistant-message rendering for every
-  agent on the daemon** with this plugin's translated view (timeline
+- **Installing this plugin replaces the assistant-message and reasoning
+  rendering for every agent on the daemon** with this plugin's translated views (timeline
   transformers are app-wide), not just agents using the Translate provider.
+  Reasoning keeps a muted style so it never looks like a reply; when thinking
+  translation is off (the default) the muted view shows the original text.
   Both the translation and the original render as Markdown through the
   plugin's own dependency-free renderer (the daemon's client compiler
   rejects Node builtins anywhere in the client import graph, which rules

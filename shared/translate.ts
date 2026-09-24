@@ -19,6 +19,15 @@ export const TRANSLATE_PROVIDER_IDS = [
 export const TRANSLATED_MESSAGE_KIND = "translated-message";
 export const TRANSLATED_MESSAGE_VERSION = 1;
 
+/**
+ * Timeline plugin item kind for translated reasoning (thinking) blocks.
+ * Separate from the assistant-message kind so the renderer can keep the
+ * muted reasoning look instead of styling thoughts as replies. Same data
+ * shape, same translation RPCs — only the presentation differs.
+ */
+export const TRANSLATED_REASONING_KIND = "translated-reasoning";
+export const TRANSLATED_REASONING_VERSION = 1;
+
 /** Hard cap on translated text so one giant message cannot stall a prompt turn. */
 export const TRANSLATION_TEXT_LIMIT = 100_000;
 /**
@@ -71,6 +80,13 @@ export const translateSettings = defineSettings({
     translatePrompts: z.boolean().default(true),
     translateResponses: z.boolean().default(true),
     translateAllTimelines: z.boolean().default(false),
+    /**
+     * Translate reasoning (thinking) blocks for display, like replies.
+     * Off by default: thinking blocks are often long, so translating them
+     * doubles endpoint spend on auxiliary text. Requires `translateResponses`
+     * (the server display path shares that gate).
+     */
+    translateReasoning: z.boolean().default(false),
     translationTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000),
     /**
      * Language of this plugin's own client screens and hints. "system"
@@ -232,11 +248,49 @@ export const translatedMessageDataSchema = z.object({
 });
 export type TranslatedMessageData = z.output<typeof translatedMessageDataSchema>;
 
+/**
+ * Data shape for translated reasoning items. Identical to the message shape
+ * (reasoning items carry no messageId, so it stays null); kept as a separate
+ * schema so the two kinds can evolve independently.
+ */
+export const translatedReasoningDataSchema = z.object({
+  text: z.string(),
+  phase: z.enum(["streaming", "complete"]),
+  messageId: z.string().nullable(),
+});
+export type TranslatedReasoningData = z.output<typeof translatedReasoningDataSchema>;
+
+/**
+ * Display eligibility for one reasoning block. Pure so the gating matrix is
+ * unit-testable: only `complete` blocks translate (streaming shows the
+ * original), empty texts would fail the RPC's min(1) contract, the pair is
+ * null before settings load, `translateReasoning` is the opt-in switch
+ * (default off) ANDed with the shared `translateResponses` display gate,
+ * and the provider scope matches replies (own provider or all timelines).
+ */
+export function isReasoningTranslationEligible(input: {
+  phase: "streaming" | "complete";
+  textLength: number;
+  languagePair: string | null;
+  translateReasoning: boolean;
+  translateResponses: boolean;
+  ownedByTranslateProvider: boolean;
+  translateAllTimelines: boolean;
+}): boolean {
+  return (
+    input.phase === "complete" &&
+    input.textLength > 0 &&
+    input.languagePair !== null &&
+    input.translateReasoning &&
+    input.translateResponses &&
+    (input.ownedByTranslateProvider || input.translateAllTimelines)
+  );
+}
+
 export interface LanguagePair {
   source: string;
   target: string;
 }
-
 export function resolveLanguagePair(
   values: TranslateSettingsValues,
   direction: TranslateDirection,

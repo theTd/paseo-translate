@@ -1,12 +1,16 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { TranslatedMessage } from "./client/translated-message";
-import { transformAssistantMessage } from "./client/transformer";
+import { TranslatedReasoning } from "./client/translated-reasoning";
+import { transformAssistantMessage, transformReasoningMessage } from "./client/transformer";
 import { TranslateSettingsScreen } from "./client/settings-screen";
 import { detectSystemLocale, translate } from "./client/i18n";
 import {
   TRANSLATED_MESSAGE_KIND,
   TRANSLATED_MESSAGE_VERSION,
+  TRANSLATED_REASONING_KIND,
+  TRANSLATED_REASONING_VERSION,
   translatedMessageDataSchema,
+  translatedReasoningDataSchema,
 } from "./shared/translate";
 
 export default function contribute(client: PluginClientContext) {
@@ -15,11 +19,22 @@ export default function contribute(client: PluginClientContext) {
     query: { itemType: "assistant_message" },
     transform: transformAssistantMessage,
   });
+  client.addTimelineTransformer({
+    id: "translate-reasoning",
+    query: { itemType: "reasoning" },
+    transform: transformReasoningMessage,
+  });
   client.addTimelineRenderer({
     kind: TRANSLATED_MESSAGE_KIND,
     version: TRANSLATED_MESSAGE_VERSION,
     schema: translatedMessageDataSchema,
     Component: TranslatedMessage,
+  });
+  client.addTimelineRenderer({
+    kind: TRANSLATED_REASONING_KIND,
+    version: TRANSLATED_REASONING_VERSION,
+    schema: translatedReasoningDataSchema,
+    Component: TranslatedReasoning,
   });
   client.addSettingsScreen({
     id: "translate",

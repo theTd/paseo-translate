@@ -8,23 +8,33 @@ import {
 } from "@getpaseo/plugin/client";
 import {
   TRANSLATE_PROVIDER_IDS,
+  isReasoningTranslationEligible,
   translateSettings,
-  type TranslatedMessageData,
+  type TranslatedReasoningData,
 } from "../shared/translate";
 import { hasVisibleTranslation } from "../shared/display-translation-chain";
 import { classifyTranslationError } from "../shared/translation-retry";
 import { useTranslate } from "./i18n";
-import { useRetryNonce, useReconnectAutoRetry, useStreamingTranslation } from "./streaming-translation";
+import {
+  useRetryNonce,
+  useReconnectAutoRetry,
+  useStreamingTranslation,
+} from "./streaming-translation";
 
 /**
- * Renders one assistant message. While the turn streams, the agent's original
- * text is shown untouched. Once the phase is `complete`, the plugin item is
- * re-rendered with the full text and a streaming translation starts,
- * rendering progressively once its first non-blank token arrives (until
- * then the original stays visible with a `Translating…` hint); the canonical
- * row always keeps the original, so this stays a display-only projection.
+ * Renders one reasoning (thinking) block. Mirrors TranslatedMessage: while
+ * the turn streams, the agent's original text is shown untouched in a muted
+ * tone. Once the phase is `complete` and reasoning translation is enabled, a
+ * streaming translation starts and renders progressively; the canonical row
+ * always keeps the original, so this stays a display-only projection.
+ *
+ * Differences from the message renderer: eligibility additionally requires
+ * the `translateReasoning` setting (default off — thinking blocks are often
+ * long, so translating them doubles endpoint spend on auxiliary text) plus
+ * `translateResponses` (the server display path shares that gate), and both
+ * original and translation render muted so thoughts never look like replies.
  */
-export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessageData>) {
+export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedReasoningData>) {
   const data = props.item.data;
   const provider = useAgent(props.agentId, (agent) => agent.provider);
   const settings = useSettings(translateSettings);
@@ -47,14 +57,21 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
       : null;
   const translateAllTimelines =
     settings.status === "ready" && settings.values.translateAllTimelines;
+  const translateReasoning =
+    settings.status === "ready" && settings.values.translateReasoning;
+  const translateResponses = settings.status === "ready" && settings.values.translateResponses;
   const ownedByTranslateProvider =
     provider !== null && (TRANSLATE_PROVIDER_IDS as readonly string[]).includes(provider);
-  // Empty assistant texts would fail the RPC's min(1) contract for nothing.
-  const eligible =
-    data.phase === "complete" &&
-    data.text.length > 0 &&
-    languagePair !== null &&
-    (ownedByTranslateProvider || translateAllTimelines);
+  // Empty thinking blocks would fail the RPC's min(1) contract for nothing.
+  const eligible = isReasoningTranslationEligible({
+    phase: data.phase,
+    textLength: data.text.length,
+    languagePair,
+    translateReasoning,
+    translateResponses,
+    ownedByTranslateProvider,
+    translateAllTimelines,
+  });
 
   const stream = useStreamingTranslation({
     enabled: eligible,
@@ -66,9 +83,6 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     retryNonce,
   });
 
-  // Reconnect retry: non-fatal failures re-run by themselves once a host
-  // is back online or the app returns to the foreground (see
-  // useReconnectAutoRetry); fatal ones wait for the manual button.
   const autoRetryable =
     stream.error !== undefined && classifyTranslationError(stream.error) !== "fatal";
   const attemptRunning = eligible && !stream.done && stream.error === undefined;
@@ -78,7 +92,7 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     () => ({
       muted: { color: props.theme.colors.foregroundMuted },
       toggle: { color: props.theme.colors.accent, marginTop: 4, paddingVertical: 2 },
-      foreground: props.theme.colors.foreground,
+      reasoning: props.theme.colors.foregroundMuted,
       accent: props.theme.colors.accent,
     }),
     [props.theme],
@@ -88,10 +102,10 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     (text: string) => (
       <MarkdownView
         text={text}
-        colors={{ foreground: styles.foreground, accent: styles.accent }}
+        colors={{ foreground: styles.reasoning, accent: styles.accent }}
       />
     ),
-    [styles.accent, styles.foreground],
+    [styles.accent, styles.reasoning],
   );
 
   if (!eligible) {
