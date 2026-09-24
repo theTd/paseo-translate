@@ -305,12 +305,41 @@ export function isProviderImageMarkdown(text: string): boolean {
 }
 
 /**
+ * When a display item is far enough along to open a translation job.
+ *
+ * `phase: "complete"` is the host's committed-history signal and always
+ * settles. The live-head item stays `streaming` until a later timeline
+ * mutation flushes it, so the last message of a turn would otherwise wait
+ * for the next tool call or user prompt. Two additional signals close that
+ * gap without translating mid-token-stream:
+ * - `agentIsBusy === false`: the agent snapshot is idle/error/closed, so
+ *   nothing more will be appended to this item.
+ * - `streamIdle`: the item's text has been unchanged for
+ *   `DISPLAY_STREAM_SETTLE_MS` (see shared/translation-retry.ts).
+ *
+ * `agentIsBusy === true` or `null` (snapshot not loaded) does not settle
+ * on its own; omitted flags default to the conservative "still busy / not
+ * idle" side so existing `phase === "streaming"` callers stay off.
+ */
+export function isDisplayTranslationSettled(input: {
+  phase: "streaming" | "complete";
+  agentIsBusy?: boolean | null;
+  streamIdle?: boolean;
+}): boolean {
+  if (input.phase === "complete") return true;
+  if (input.agentIsBusy === false) return true;
+  return input.streamIdle === true;
+}
+
+/**
  * Display eligibility for one reasoning block. Pure so the gating matrix is
- * unit-testable: only `complete` blocks translate (streaming shows the
- * original), empty texts would fail the RPC's min(1) contract, the pair is
- * null before settings load, `translateReasoning` is the opt-in switch
- * (default off) ANDed with the shared `translateResponses` display gate,
- * and the provider scope matches replies (own provider or all timelines).
+ * unit-testable: only settled blocks translate (streaming shows the
+ * original until the item is complete, the agent is idle, or the text has
+ * stopped growing), empty texts would fail the RPC's min(1) contract, the
+ * pair is null before settings load, `translateReasoning` is the opt-in
+ * switch (default off) ANDed with the shared `translateResponses` display
+ * gate, and the provider scope matches replies (own provider or all
+ * timelines).
  */
 export function isReasoningTranslationEligible(input: {
   phase: "streaming" | "complete";
@@ -320,9 +349,15 @@ export function isReasoningTranslationEligible(input: {
   translateResponses: boolean;
   ownedByTranslateProvider: boolean;
   translateAllTimelines: boolean;
+  agentIsBusy?: boolean | null;
+  streamIdle?: boolean;
 }): boolean {
   return (
-    input.phase === "complete" &&
+    isDisplayTranslationSettled({
+      phase: input.phase,
+      agentIsBusy: input.agentIsBusy,
+      streamIdle: input.streamIdle,
+    }) &&
     input.textLength > 0 &&
     input.languagePair !== null &&
     input.translateReasoning &&

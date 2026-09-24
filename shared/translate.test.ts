@@ -5,6 +5,7 @@ import {
   assertAcpConfigured,
   assertConfigured,
   isDataUriImageOnlyText,
+  isDisplayTranslationSettled,
   isProviderImageMarkdown,
   isReasoningTranslationEligible,
   knownAcpCommand,
@@ -216,6 +217,32 @@ describe("provider image markdown gate", () => {
   });
 });
 
+describe("display translation settled", () => {
+  it("treats complete as settled regardless of the live-head signals", () => {
+    expect(isDisplayTranslationSettled({ phase: "complete" })).toBe(true);
+    expect(
+      isDisplayTranslationSettled({ phase: "complete", agentIsBusy: true, streamIdle: false }),
+    ).toBe(true);
+  });
+
+  it("does not settle a live-head item while the agent is busy or unknown", () => {
+    expect(isDisplayTranslationSettled({ phase: "streaming" })).toBe(false);
+    expect(isDisplayTranslationSettled({ phase: "streaming", agentIsBusy: true })).toBe(false);
+    expect(isDisplayTranslationSettled({ phase: "streaming", agentIsBusy: null })).toBe(false);
+  });
+
+  it("settles a live-head item once the agent is no longer busy", () => {
+    expect(isDisplayTranslationSettled({ phase: "streaming", agentIsBusy: false })).toBe(true);
+  });
+
+  it("settles a live-head item whose text has stopped growing", () => {
+    expect(
+      isDisplayTranslationSettled({ phase: "streaming", agentIsBusy: true, streamIdle: true }),
+    ).toBe(true);
+    expect(isDisplayTranslationSettled({ phase: "streaming", streamIdle: true })).toBe(true);
+  });
+});
+
 describe("reasoning translation eligibility", () => {
   const base = {
     phase: "complete" as const,
@@ -239,8 +266,14 @@ describe("reasoning translation eligibility", () => {
     expect(isReasoningTranslationEligible({ ...base, translateResponses: false })).toBe(false);
   });
 
-  it("never translates while streaming", () => {
+  it("never translates while streaming unless the live-head item has settled", () => {
     expect(isReasoningTranslationEligible({ ...base, phase: "streaming" })).toBe(false);
+    expect(
+      isReasoningTranslationEligible({ ...base, phase: "streaming", agentIsBusy: false }),
+    ).toBe(true);
+    expect(
+      isReasoningTranslationEligible({ ...base, phase: "streaming", streamIdle: true }),
+    ).toBe(true);
   });
 
   it("skips empty texts that would fail the RPC min(1) contract", () => {

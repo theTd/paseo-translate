@@ -9,25 +9,38 @@ import {
 import {
   TRANSLATE_PROVIDER_IDS,
   isDataUriImageOnlyText,
+  isDisplayTranslationSettled,
   translateSettings,
   type TranslatedMessageData,
 } from "../shared/translate";
 import { hasVisibleTranslation } from "../shared/display-translation-chain";
 import { classifyTranslationError } from "../shared/translation-retry";
 import { useTranslate } from "./i18n";
+import { agentIsBusyForDisplay, useStreamIdle } from "./display-translation-settle";
 import { useRetryNonce, useReconnectAutoRetry, useStreamingTranslation } from "./streaming-translation";
 
 /**
  * Renders one assistant message. While the turn streams, the agent's original
- * text is shown untouched. Once the phase is `complete`, the plugin item is
- * re-rendered with the full text and a streaming translation starts,
- * rendering progressively once its first non-blank token arrives (until
- * then the original stays visible with a `Translating…` hint); the canonical
- * row always keeps the original, so this stays a display-only projection.
+ * text is shown untouched. Translation starts once the item is settled:
+ * `phase === "complete"` (committed history), the agent snapshot is no
+ * longer busy, or the live-head text has been unchanged for
+ * `DISPLAY_STREAM_SETTLE_MS`. Those last two close the host gap where the
+ * live-head item stays `streaming` until the next tool call or user prompt.
+ * The job renders progressively once its first non-blank token arrives
+ * (until then the original stays visible with a `Translating…` hint); the
+ * canonical row always keeps the original, so this stays a display-only
+ * projection.
  */
 export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessageData>) {
   const data = props.item.data;
   const provider = useAgent(props.agentId, (agent) => agent.provider);
+  const agentStatus = useAgent(props.agentId, (agent) => agent.status);
+  const streamIdle = useStreamIdle(data.text, data.phase);
+  const settled = isDisplayTranslationSettled({
+    phase: data.phase,
+    agentIsBusy: agentIsBusyForDisplay(agentStatus),
+    streamIdle,
+  });
   const settings = useSettings(translateSettings);
   const { t } = useTranslate(
     settings.status === "ready" ? settings.values.uiLanguage : "system",
@@ -55,7 +68,7 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
   // providers) would burn endpoint quota on base64 soup the Markdown view
   // cannot render anyway, so they keep the original without a job.
   const eligible =
-    data.phase === "complete" &&
+    settled &&
     data.text.length > 0 &&
     !isDataUriImageOnlyText(data.text) &&
     languagePair !== null &&

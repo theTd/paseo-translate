@@ -4,6 +4,7 @@ import {
   DISPLAY_DEFAULT_ENDPOINT_TIMEOUT_MS,
   DISPLAY_RETRY_BASE_MS,
   DISPLAY_STREAM_IDLE_MARGIN_MS,
+  DISPLAY_STREAM_SETTLE_MS,
   displayStreamIdleTimeoutMs,
   DISPLAY_RETRY_CAP_MS,
   TRANSLATION_BUSY_MESSAGE,
@@ -41,6 +42,12 @@ describe("displayStreamIdleTimeoutMs", () => {
     expect(displayStreamIdleTimeoutMs(undefined)).toBe(fallback);
     expect(displayStreamIdleTimeoutMs(Number.NaN)).toBe(fallback);
     expect(displayStreamIdleTimeoutMs(0)).toBe(fallback);
+  });
+});
+
+describe("DISPLAY_STREAM_SETTLE_MS", () => {
+  it("is longer than the host's 60ms stream-coalesce window so an active token stream keeps resetting", () => {
+    expect(DISPLAY_STREAM_SETTLE_MS).toBeGreaterThan(60);
   });
 });
 

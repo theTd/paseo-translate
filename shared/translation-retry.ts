@@ -56,6 +56,17 @@ export const DISPLAY_BUSY_RETRY_BASE_MS = 2_000;
 export const DISPLAY_RETRY_CAP_MS = 2_000;
 /** Fallback for `translationTimeoutMs` when the setting is unavailable. */
 export const DISPLAY_DEFAULT_ENDPOINT_TIMEOUT_MS = 30_000;
+/**
+ * How long a live-head (`phase: "streaming"`) item may sit with unchanged
+ * text before display translation treats it as settled. The host keeps the
+ * current live item at `streaming` until a later timeline mutation (next
+ * tool call, next user prompt) or `turn_completed` flushes it to history;
+ * the last message of a turn often never gets that flush in time. 800ms is
+ * well above the host's 60ms stream-coalesce window, so an active token
+ * stream keeps resetting, while a finished last message starts translating
+ * without waiting for the next prompt.
+ */
+export const DISPLAY_STREAM_SETTLE_MS = 800;
 /** Slack on top of the server's own worst case for RPC and daemon latency. */
 export const DISPLAY_STREAM_IDLE_MARGIN_MS = 15_000;
 /**
