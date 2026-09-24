@@ -175,6 +175,14 @@ interface ClaudeSession {
   closed: boolean;
   toolNames: Map<string, string>;
   toolInputs: Map<string, unknown>;
+  /**
+   * Latest main-loop prompt usage seen on an assistant message, kept across
+   * turns. This is the numerator of the app's context ring: each assistant
+   * message carries its own API call's usage, and the prompt side
+   * (input + cache read + cache write) is exactly the context that call
+   * carried — unlike the cumulative `result.modelUsage` totals.
+   */
+  contextUsage: { usedTokens: number; model: string | null } | null;
   pendingPermissions: Map<string, PendingPermission>;
   /** Live Task-protocol children, surfaced as provider subsessions. */
   subagents: ClaudeSubagentTracker | null;
@@ -463,6 +471,7 @@ async function openSession(
     closed: false,
     toolNames: new Map(),
     toolInputs: new Map(),
+    contextUsage: null,
     pendingPermissions: new Map(),
     subagents: null,
     supportsSubsessions: capabilities.includes("session.subsession"),
@@ -1478,6 +1487,7 @@ function handleSdkMessage(
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
+    noteAssistantContextUsage(session, message.message);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
     for (const block of content) {
@@ -1610,11 +1620,16 @@ function handleSdkMessage(
     });
     const active = session.active;
     if (active === null) return;
-    const usage = summarizeModelUsage(
-      (message as { modelUsage?: unknown }).modelUsage,
-    );
-    if (usage !== undefined) {
-      emit({ type: "session.usage", sessionId: session.id, turnId: active.turnId, usage });
+    const modelUsage = (message as { modelUsage?: unknown }).modelUsage;
+    const usage = summarizeModelUsage(modelUsage);
+    const context = contextWindowUsage(session, modelUsage);
+    if (usage !== undefined || context !== undefined) {
+      emit({
+        type: "session.usage",
+        sessionId: session.id,
+        turnId: active.turnId,
+        usage: { ...usage, ...context },
+      });
     }
     session.active = null;
     const wasInterrupted = session.interrupted;
@@ -1701,6 +1716,105 @@ function summarizeModelUsage(modelUsage: unknown):
     ...(outputTokens > 0 ? { outputTokens: Math.round(outputTokens) } : {}),
     ...(totalCostUsd > 0 ? { totalCostUsd } : {}),
   };
+}
+
+/**
+ * Records the prompt size of the latest main-loop API call from each
+ * assistant message's per-call usage: `input_tokens` plus cache reads and
+ * cache writes is exactly the context that request carried. The turn's
+ * `result` totals cannot serve as the ring numerator — `modelUsage` tokens
+ * are cumulative across the whole query, and the result's `usage` aggregates
+ * every call in the turn — so the last per-call measurement is the correct,
+ * persistent signal (context only grows between calls, and a later assistant
+ * message always supersedes an older one).
+ */
+function noteAssistantContextUsage(
+  session: ClaudeSession,
+  message: { model?: unknown; usage?: unknown },
+): void {
+  const usage = message.usage;
+  if (typeof usage !== "object" || usage === null) return;
+  const record = usage as {
+    input_tokens?: unknown;
+    cache_read_input_tokens?: unknown;
+    cache_creation_input_tokens?: unknown;
+  };
+  if (typeof record.input_tokens !== "number" || record.input_tokens < 0) return;
+  const used =
+    record.input_tokens +
+    (typeof record.cache_read_input_tokens === "number" && record.cache_read_input_tokens > 0
+      ? record.cache_read_input_tokens
+      : 0) +
+    (typeof record.cache_creation_input_tokens === "number" && record.cache_creation_input_tokens > 0
+      ? record.cache_creation_input_tokens
+      : 0);
+  // A frame with no measurable prompt (e.g. a zeroed synthetic /context
+  // helper message) must never zero the ring: keep the previous measurement.
+  // Note this intentionally keeps fully-cached calls (input_tokens 0 with a
+  // large cache read) — they are real prompt measurements.
+  if (used <= 0) return;
+  session.contextUsage = {
+    usedTokens: used,
+    model: typeof message.model === "string" ? message.model : (session.contextUsage?.model ?? null),
+  };
+}
+
+/**
+ * Ring fields for the app's context-usage display. Used comes from the
+ * latest assistant prompt measurement; the window comes from the matched
+ * model's `contextWindow` in `modelUsage`. Fail-soft on every miss: a turn
+ * without either signal emits no ring fields at all.
+ */
+function contextWindowUsage(
+  session: ClaudeSession,
+  modelUsage: unknown,
+): { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | undefined {
+  const context = session.contextUsage;
+  const used = context?.usedTokens;
+  const max = context === null ? undefined : contextWindowForModel(modelUsage, context.model);
+  if (used === undefined && max === undefined) return undefined;
+  return {
+    ...(used !== undefined ? { contextWindowUsedTokens: used } : {}),
+    ...(max !== undefined ? { contextWindowMaxTokens: max } : {}),
+  };
+}
+
+/**
+ * Resolves the context window for the model that served the latest prompt.
+ * `modelUsage` keys use aliases or provider ids that rarely equal the
+ * assistant's full wire model id (e.g. `claude-sonnet-4-5` vs
+ * `claude-sonnet-4-5-20250929`), so matching falls back to the key (or its
+ * canonical model) being a prefix of the wire id; the longest match wins when
+ * a prefix is ambiguous. With no match, a single candidate is still taken —
+ * the choice is then unambiguous — otherwise the window is unknown.
+ */
+function contextWindowForModel(modelUsage: unknown, model: string | null): number | undefined {
+  if (typeof modelUsage !== "object" || modelUsage === null) return undefined;
+  const candidates: Array<{ key: string; canonical: string | undefined; contextWindow: number }> = [];
+  for (const [key, entry] of Object.entries(modelUsage as Record<string, unknown>)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as { contextWindow?: unknown; canonicalModel?: unknown };
+    if (typeof record.contextWindow !== "number" || record.contextWindow <= 0) continue;
+    candidates.push({
+      key,
+      canonical: typeof record.canonicalModel === "string" ? record.canonicalModel : undefined,
+      contextWindow: record.contextWindow,
+    });
+  }
+  if (candidates.length === 0) return undefined;
+  if (model !== null) {
+    const matched = candidates
+      .filter(
+        (candidate) =>
+          candidate.key === model ||
+          candidate.canonical === model ||
+          model.startsWith(candidate.key) ||
+          (candidate.canonical !== undefined && model.startsWith(candidate.canonical)),
+      )
+      .sort((left, right) => right.key.length - left.key.length);
+    if (matched.length > 0) return matched[0]?.contextWindow;
+  }
+  return candidates.length === 1 ? candidates[0]?.contextWindow : undefined;
 }
 
 async function teardownSession(session: ClaudeSession): Promise<void> {

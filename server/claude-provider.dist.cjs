@@ -53054,6 +53054,7 @@ async function openSession(input2, context, capabilities) {
     closed: false,
     toolNames: /* @__PURE__ */ new Map(),
     toolInputs: /* @__PURE__ */ new Map(),
+    contextUsage: null,
     pendingPermissions: /* @__PURE__ */ new Map(),
     subagents: null,
     supportsSubsessions: capabilities.includes("session.subsession"),
@@ -53772,6 +53773,7 @@ function handleSdkMessage(session, message, context) {
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
+    noteAssistantContextUsage(session, message.message);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
     for (const block of content) {
@@ -53868,11 +53870,16 @@ function handleSdkMessage(session, message, context) {
     });
     const active = session.active;
     if (active === null) return;
-    const usage = summarizeModelUsage(
-      message.modelUsage
-    );
-    if (usage !== void 0) {
-      emit({ type: "session.usage", sessionId: session.id, turnId: active.turnId, usage });
+    const modelUsage = message.modelUsage;
+    const usage = summarizeModelUsage(modelUsage);
+    const context2 = contextWindowUsage(session, modelUsage);
+    if (usage !== void 0 || context2 !== void 0) {
+      emit({
+        type: "session.usage",
+        sessionId: session.id,
+        turnId: active.turnId,
+        usage: { ...usage, ...context2 }
+      });
     }
     session.active = null;
     const wasInterrupted = session.interrupted;
@@ -53934,6 +53941,50 @@ function summarizeModelUsage(modelUsage) {
     ...outputTokens > 0 ? { outputTokens: Math.round(outputTokens) } : {},
     ...totalCostUsd > 0 ? { totalCostUsd } : {}
   };
+}
+function noteAssistantContextUsage(session, message) {
+  const usage = message.usage;
+  if (typeof usage !== "object" || usage === null) return;
+  const record2 = usage;
+  if (typeof record2.input_tokens !== "number" || record2.input_tokens < 0) return;
+  const used = record2.input_tokens + (typeof record2.cache_read_input_tokens === "number" && record2.cache_read_input_tokens > 0 ? record2.cache_read_input_tokens : 0) + (typeof record2.cache_creation_input_tokens === "number" && record2.cache_creation_input_tokens > 0 ? record2.cache_creation_input_tokens : 0);
+  if (used <= 0) return;
+  session.contextUsage = {
+    usedTokens: used,
+    model: typeof message.model === "string" ? message.model : session.contextUsage?.model ?? null
+  };
+}
+function contextWindowUsage(session, modelUsage) {
+  const context = session.contextUsage;
+  const used = context?.usedTokens;
+  const max = context === null ? void 0 : contextWindowForModel(modelUsage, context.model);
+  if (used === void 0 && max === void 0) return void 0;
+  return {
+    ...used !== void 0 ? { contextWindowUsedTokens: used } : {},
+    ...max !== void 0 ? { contextWindowMaxTokens: max } : {}
+  };
+}
+function contextWindowForModel(modelUsage, model) {
+  if (typeof modelUsage !== "object" || modelUsage === null) return void 0;
+  const candidates = [];
+  for (const [key, entry] of Object.entries(modelUsage)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record2 = entry;
+    if (typeof record2.contextWindow !== "number" || record2.contextWindow <= 0) continue;
+    candidates.push({
+      key,
+      canonical: typeof record2.canonicalModel === "string" ? record2.canonicalModel : void 0,
+      contextWindow: record2.contextWindow
+    });
+  }
+  if (candidates.length === 0) return void 0;
+  if (model !== null) {
+    const matched = candidates.filter(
+      (candidate) => candidate.key === model || candidate.canonical === model || model.startsWith(candidate.key) || candidate.canonical !== void 0 && model.startsWith(candidate.canonical)
+    ).sort((left, right) => right.key.length - left.key.length);
+    if (matched.length > 0) return matched[0]?.contextWindow;
+  }
+  return candidates.length === 1 ? candidates[0]?.contextWindow : void 0;
 }
 async function teardownSession(session) {
   if (session.closed) return;

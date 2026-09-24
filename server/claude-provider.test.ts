@@ -888,6 +888,41 @@ function rootToolUse(uuid: string, id: string, name: string, input: unknown): SD
   } as unknown as SDKMessage;
 }
 
+/** Parent assistant message carrying its API call's per-request usage. */
+function assistantTextWithUsage(
+  uuid: string,
+  text: string,
+  model: string,
+  usage: {
+    input_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+    output_tokens: number;
+  },
+): SDKMessage {
+  return {
+    type: "assistant",
+    message: { content: [{ type: "text", text }], model, usage },
+    parent_tool_use_id: null,
+    uuid,
+    session_id: "cs-1",
+  } as unknown as SDKMessage;
+}
+
+function resultWithModelUsage(
+  modelUsage: Record<string, Record<string, unknown>>,
+): SDKMessage {
+  return {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "done",
+    errors: [],
+    session_id: "cs-1",
+    modelUsage,
+  } as unknown as SDKMessage;
+}
+
 describe("translate claude provider subagents", () => {
   it("declares Task children as subsessions with timelines and terminal turns", async () => {
     const { fake, events, send } = await createHarness();
@@ -1262,6 +1297,214 @@ describe("translate claude provider extended protocol", () => {
     });
     const usage = events.find((event) => event.type === "session.usage");
     expect(usage).toMatchObject({ usage: { inputTokens: 100, outputTokens: 50 } });
+    // No assistant usage and no contextWindow in modelUsage: the turn must
+    // not invent ring fields.
+    expect(usage).not.toHaveProperty("usage.contextWindowUsedTokens");
+    expect(usage).not.toHaveProperty("usage.contextWindowMaxTokens");
+  });
+
+  it("reports the context ring from the last assistant call and the model window", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-1", "halfway", "claude-sonnet-4-5-20250929", {
+        input_tokens: 1200,
+        cache_read_input_tokens: 3000,
+        cache_creation_input_tokens: 800,
+        output_tokens: 100,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": {
+          inputTokens: 5000,
+          outputTokens: 50,
+          costUSD: 0.01,
+          contextWindow: 200000,
+        },
+      });
+    });
+    await send(promptInput("Status"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const usage = events.find((event) => event.type === "session.usage");
+    // Used = input + cache read + cache write of the latest call, not the
+    // cumulative modelUsage total.
+    expect(usage).toMatchObject({
+      usage: {
+        inputTokens: 5000,
+        outputTokens: 50,
+        contextWindowUsedTokens: 5000,
+        contextWindowMaxTokens: 200000,
+      },
+    });
+  });
+
+  it("matches the ring window by longest prefix across several models", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-1", "quick", "claude-haiku-4-5-20250929", {
+        input_tokens: 900,
+        output_tokens: 20,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": {
+          inputTokens: 10,
+          outputTokens: 5,
+          costUSD: 0.01,
+          contextWindow: 200000,
+        },
+        "claude-haiku-4-5": {
+          inputTokens: 3,
+          outputTokens: 1,
+          costUSD: 0.001,
+          contextWindow: 100000,
+        },
+      });
+    });
+    await send(promptInput("Status"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const usage = events.find((event) => event.type === "session.usage");
+    expect(usage).toMatchObject({
+      usage: { contextWindowUsedTokens: 900, contextWindowMaxTokens: 100000 },
+    });
+  });
+
+  it("omits the ring window when no modelUsage entry matches the model", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-1", "quick", "claude-opus-4-6-20250101", {
+        input_tokens: 900,
+        output_tokens: 20,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": { inputTokens: 10, outputTokens: 5, costUSD: 0.01, contextWindow: 200000 },
+        "claude-haiku-4-5": { inputTokens: 3, outputTokens: 1, costUSD: 0.001, contextWindow: 100000 },
+      });
+    });
+    await send(promptInput("Status"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const usage = events.find((event) => event.type === "session.usage");
+    expect(usage).toMatchObject({ usage: { contextWindowUsedTokens: 900 } });
+    expect(usage).not.toHaveProperty("usage.contextWindowMaxTokens");
+  });
+
+  it("carries the ring across turns and overwrites it on the next call", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-1", "halfway", "claude-sonnet-4-5", {
+        input_tokens: 1000,
+        cache_read_input_tokens: 4000,
+        output_tokens: 10,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": { inputTokens: 5000, outputTokens: 10, costUSD: 0.01, contextWindow: 200000 },
+      });
+    });
+    await send(promptInput("First", "m-1"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-2", "grew", "claude-sonnet-4-5", {
+        input_tokens: 2000,
+        cache_read_input_tokens: 8000,
+        output_tokens: 10,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": { inputTokens: 10000, outputTokens: 10, costUSD: 0.02, contextWindow: 200000 },
+      });
+    });
+    await send(promptInput("Second", "m-2"));
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" &&
+        event.state === "completed" &&
+        events.filter((item) => item.type === "session.turn" && item.state === "completed").length >= 2,
+    );
+    const usageEvents = events.filter((event) => event.type === "session.usage");
+    expect(usageEvents).toHaveLength(2);
+    expect(usageEvents[0]).toMatchObject({ usage: { contextWindowUsedTokens: 5000 } });
+    expect(usageEvents[1]).toMatchObject({ usage: { contextWindowUsedTokens: 10000 } });
+  });
+
+  it("keeps the last ring measurement when a later frame carries zero usage", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-1", "halfway", "claude-sonnet-4-5", {
+        input_tokens: 1000,
+        cache_read_input_tokens: 4000,
+        output_tokens: 10,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": { inputTokens: 5000, outputTokens: 10, costUSD: 0.01, contextWindow: 200000 },
+      });
+    });
+    await send(promptInput("First", "m-1"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // A zeroed frame (e.g. a synthetic /context helper message) must not zero
+    // the ring; the previous measurement stays until a real call supersedes.
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-2", "helper", "claude-sonnet-4-5", {
+        input_tokens: 0,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        output_tokens: 5,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": { inputTokens: 0, outputTokens: 5, costUSD: 0, contextWindow: 200000 },
+      });
+    });
+    await send(promptInput("Second", "m-2"));
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" &&
+        event.state === "completed" &&
+        events.filter((item) => item.type === "session.turn" && item.state === "completed").length >= 2,
+    );
+    const usageEvents = events.filter((event) => event.type === "session.usage");
+    expect(usageEvents).toHaveLength(2);
+    expect(usageEvents[1]).toMatchObject({ usage: { contextWindowUsedTokens: 5000 } });
+  });
+
+  it("re-emits the retained ring on a later turn without assistant usage", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantTextWithUsage("u-1", "halfway", "claude-sonnet-4-5", {
+        input_tokens: 1000,
+        cache_read_input_tokens: 4000,
+        output_tokens: 10,
+      });
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": { inputTokens: 5000, outputTokens: 10, costUSD: 0.01, contextWindow: 200000 },
+      });
+    });
+    await send(promptInput("First", "m-1"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // An older CLI that omits per-call usage: the retained measurement is
+    // re-emitted verbatim rather than the ring disappearing; the window is
+    // still resolved from this turn's modelUsage.
+    fake.use(async function* () {
+      yield assistantText("u-2", "no usage frame");
+      yield resultWithModelUsage({
+        "claude-sonnet-4-5": { inputTokens: 0, outputTokens: 10, costUSD: 0.001, contextWindow: 200000 },
+      });
+    });
+    await send(promptInput("Second", "m-2"));
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" &&
+        event.state === "completed" &&
+        events.filter((item) => item.type === "session.turn" && item.state === "completed").length >= 2,
+    );
+    const usageEvents = events.filter((event) => event.type === "session.usage");
+    expect(usageEvents).toHaveLength(2);
+    expect(usageEvents[1]).toMatchObject({
+      usage: { contextWindowUsedTokens: 5000, contextWindowMaxTokens: 200000 },
+    });
   });
 
   it("materializes tool-result screenshots as file markdown without base64", async () => {
