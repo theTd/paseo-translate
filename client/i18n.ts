@@ -149,6 +149,9 @@ const en = {
   claudeExecutable: "Claude Code executable",
   claudeExecutableHint:
     "Optional full path for the direct Translate (Claude Code) provider; leave empty to resolve from PATH",
+  codexExecutable: "Codex executable",
+  codexExecutableHint:
+    "Optional full path for the direct Translate (Codex) provider; leave empty to resolve from PATH",
   translationTimeout: "Translation timeout (ms)",
   timeoutNotANumber: "Translation timeout must be a whole number of milliseconds.",
   translatePrompts: "Translate prompts",
@@ -225,6 +228,8 @@ const zhCN: PluginDictionary = {
   innerAgentCommandHint: "Translate (ACP) 提供方使用的 ACP 命令；通过上方选择器自动填入",
   claudeExecutable: "Claude Code 可执行文件",
   claudeExecutableHint: "直连 Translate (Claude Code) 提供方可填完整路径；留空则从 PATH 解析",
+  codexExecutable: "Codex 可执行文件",
+  codexExecutableHint: "直连 Translate (Codex) 提供方可填完整路径；留空则从 PATH 解析",
   translationTimeout: "翻译超时（毫秒）",
   timeoutNotANumber: "翻译超时必须是整数毫秒。",
   translatePrompts: "翻译提示词",
@@ -297,6 +302,8 @@ const ja: PluginDictionary = {
   innerAgentCommandHint: "Translate (ACP) プロバイダー用の ACP コマンド。上の選択から自動入力されます",
   claudeExecutable: "Claude Code 実行ファイル",
   claudeExecutableHint: "Translate (Claude Code) 用の任意のフルパス。空欄で PATH から解決します",
+  codexExecutable: "Codex 実行ファイル",
+  codexExecutableHint: "Translate (Codex) 用の任意のフルパス。空欄で PATH から解決します",
   translationTimeout: "翻訳タイムアウト (ms)",
   timeoutNotANumber: "翻訳タイムアウトはミリ秒の整数で入力してください。",
   translatePrompts: "プロンプトを翻訳",
@@ -368,6 +375,8 @@ const ko: PluginDictionary = {
   innerAgentCommandHint: "Translate (ACP) 프로바이더용 ACP 명령. 위 선택기에서 자동 입력됩니다",
   claudeExecutable: "Claude Code 실행 파일",
   claudeExecutableHint: "Translate (Claude Code)용 전체 경로(선택). 비워 두면 PATH에서 찾습니다",
+  codexExecutable: "Codex 실행 파일",
+  codexExecutableHint: "Translate (Codex)용 전체 경로(선택). 비워 두면 PATH에서 찾습니다",
   translationTimeout: "번역 제한 시간(ms)",
   timeoutNotANumber: "번역 제한 시간은 밀리초 단위 정수로 입력하세요.",
   translatePrompts: "프롬프트 번역",
@@ -444,6 +453,9 @@ const fr: PluginDictionary = {
   claudeExecutable: "Exécutable Claude Code",
   claudeExecutableHint:
     "Chemin complet facultatif pour Translate (Claude Code) ; vide = résolution via PATH",
+  codexExecutable: "Exécutable Codex",
+  codexExecutableHint:
+    "Chemin complet facultatif pour Translate (Codex) ; vide = résolution via PATH",
   translationTimeout: "Délai de traduction (ms)",
   timeoutNotANumber: "Le délai de traduction doit être un nombre entier de millisecondes.",
   translatePrompts: "Traduire les prompts",
@@ -519,6 +531,9 @@ const es: PluginDictionary = {
   claudeExecutable: "Ejecutable de Claude Code",
   claudeExecutableHint:
     "Ruta completa opcional para Translate (Claude Code); vacío = resolver desde PATH",
+  codexExecutable: "Ejecutable de Codex",
+  codexExecutableHint:
+    "Ruta completa opcional para Translate (Codex); vacío = resolver desde PATH",
   translationTimeout: "Tiempo límite (ms)",
   timeoutNotANumber: "El tiempo límite debe ser un número entero de milisegundos.",
   translatePrompts: "Traducir prompts",
@@ -592,6 +607,8 @@ const ru: PluginDictionary = {
   innerAgentCommandHint: "ACP-команда для провайдера Translate (ACP); подставляется выбором выше",
   claudeExecutable: "Исполняемый файл Claude Code",
   claudeExecutableHint: "Необязательный полный путь для Translate (Claude Code); пусто — поиск в PATH",
+  codexExecutable: "Исполняемый файл Codex",
+  codexExecutableHint: "Необязательный полный путь для Translate (Codex); пусто — поиск в PATH",
   translationTimeout: "Таймаут перевода (мс)",
   timeoutNotANumber: "Таймаут перевода должен быть целым числом миллисекунд.",
   translatePrompts: "Переводить запросы",
@@ -665,6 +682,9 @@ const ptBR: PluginDictionary = {
   claudeExecutable: "Executável do Claude Code",
   claudeExecutableHint:
     "Caminho completo opcional para o Translate (Claude Code); vazio = resolver via PATH",
+  codexExecutable: "Executável do Codex",
+  codexExecutableHint:
+    "Caminho completo opcional para o Translate (Codex); vazio = resolver via PATH",
   translationTimeout: "Tempo limite (ms)",
   timeoutNotANumber: "O tempo limite deve ser um número inteiro de milissegundos.",
   translatePrompts: "Traduzir prompts",
@@ -736,6 +756,8 @@ const ar: PluginDictionary = {
   innerAgentCommandHint: "أمر ACP لموفر Translate (ACP)؛ يُملأ تلقائيًا من المنتقي أعلاه",
   claudeExecutable: "ملف Claude Code التنفيذي",
   claudeExecutableHint: "مسار كامل اختياري لموفر Translate (Claude Code)؛ الفراغ يعني الحل عبر PATH",
+  codexExecutable: "ملف Codex التنفيذي",
+  codexExecutableHint: "مسار كامل اختياري لموفر Translate (Codex)؛ الفراغ يعني الحل عبر PATH",
   translationTimeout: "مهلة الترجمة (ms)",
   timeoutNotANumber: "يجب أن تكون مهلة الترجمة عددًا صحيحًا بالملي ثانية.",
   translatePrompts: "ترجمة المطالبات",

@@ -9,10 +9,15 @@ export const TRANSLATE_PROVIDER_LABEL = "Translate (ACP)";
 export const TRANSLATE_CLAUDE_PROVIDER_ID = "translate-claude";
 export const TRANSLATE_CLAUDE_PROVIDER_LABEL = "Translate (Claude Code)";
 
+/** Direct Codex provider (codex app-server JSON-RPC, no ACP layer). */
+export const TRANSLATE_CODEX_PROVIDER_ID = "translate-codex";
+export const TRANSLATE_CODEX_PROVIDER_LABEL = "Translate (Codex)";
+
 /** Provider ids owned by this plugin; the timeline renderer gates on these. */
 export const TRANSLATE_PROVIDER_IDS = [
   TRANSLATE_PROVIDER_ID,
   TRANSLATE_CLAUDE_PROVIDER_ID,
+  TRANSLATE_CODEX_PROVIDER_ID,
 ] as const;
 
 /** Timeline plugin item kind produced by the client transformer. */
@@ -77,6 +82,8 @@ export const translateSettings = defineSettings({
     innerAgentEnv: z.record(z.string(), z.string()).default({}),
     /** Optional Claude Code executable path for the direct provider (Windows .cmd escape hatch). */
     claudeExecutablePath: z.string().trim().default(""),
+    /** Optional Codex CLI executable path for the direct provider (Windows .cmd escape hatch). */
+    codexExecutablePath: z.string().trim().default(""),
     translatePrompts: z.boolean().default(true),
     translateResponses: z.boolean().default(true),
     translateAllTimelines: z.boolean().default(false),

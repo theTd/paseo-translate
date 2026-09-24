@@ -2,7 +2,7 @@
   "name": "paseo-translate-plugin",
   "private": true,
   "version": "0.1.0",
-  "description": "Paseo plugin: bilingual agent conversations via a translating ACP provider and timeline renderer",
+  "description": "Paseo plugin: bilingual agent conversations via translating ACP, Claude Code, and Codex providers plus a timeline renderer",
   "files": [
     "paseo-plugin.json",
     "index.client.tsx",

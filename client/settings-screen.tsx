@@ -36,6 +36,7 @@ interface Draft {
   agentLanguage: string;
   commandText: string;
   claudeExecutablePath: string;
+  codexExecutablePath: string;
   timeoutText: string;
   translatePrompts: boolean;
   translateResponses: boolean;
@@ -58,6 +59,7 @@ function draftFrom(settings: ReadySettings): Draft {
     agentLanguage: values.agentLanguage,
     commandText: values.innerAgentCommand.join(" "),
     claudeExecutablePath: values.claudeExecutablePath,
+    codexExecutablePath: values.codexExecutablePath,
     timeoutText: String(values.translationTimeoutMs),
     translatePrompts: values.translatePrompts,
     translateResponses: values.translateResponses,
@@ -172,6 +174,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     (claudeExecutablePath: string) => patch({ claudeExecutablePath }),
     [patch],
   );
+  const changeCodexPath = useCallback(
+    (codexExecutablePath: string) => patch({ codexExecutablePath }),
+    [patch],
+  );
   const changeTimeout = useCallback((timeoutText: string) => patch({ timeoutText }), [patch]);
   const togglePrompts = useCallback(
     (translatePrompts: boolean) => patch({ translatePrompts }),
@@ -237,6 +243,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         innerAgentCommand: command,
         innerAgentEnv: active.innerAgentEnv,
         claudeExecutablePath: active.claudeExecutablePath,
+        codexExecutablePath: active.codexExecutablePath,
         translatePrompts: active.translatePrompts,
         translateResponses: active.translateResponses,
         translateReasoning: active.translateReasoning,
@@ -396,6 +403,13 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           hint={t("claudeExecutableHint")}
           initialValue={active.claudeExecutablePath}
           onChangeText={changeClaudePath}
+          disabled={settings.saving}
+        />
+        <SettingsInput
+          label={t("codexExecutable")}
+          hint={t("codexExecutableHint")}
+          initialValue={active.codexExecutablePath}
+          onChangeText={changeCodexPath}
           disabled={settings.saving}
         />
         <SettingsInput

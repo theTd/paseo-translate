@@ -20,6 +20,7 @@ const values: TranslateSettingsValues = {
   innerAgentCommand: [],
   innerAgentEnv: {},
   claudeExecutablePath: "",
+  codexExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
   translateReasoning: false,

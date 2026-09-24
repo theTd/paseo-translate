@@ -37,11 +37,12 @@ Then open the plugin's **Translate** settings screen in the app and configure:
 - **Endpoint base URL / API key / model** — any OpenAI-compatible `/chat/completions` endpoint
 - **Reasoning effort** — thinking depth sent with each translation request as the standard `reasoning_effort` parameter (Default/minimal/low/medium/high; Default omits the parameter). Low or minimal keeps prompt translation fast since it sits on the fail-closed path of every turn
 - **Your language** and **Agent language** — e.g. `en` and `de`
-- **Inner agent command** — the ACP-speaking command to wrap. The settings screen lists the daemon's providers and fills the command automatically where an ACP mode is verified: custom `extends: "acp"` providers use the command configured on the daemon, and CLIs shipping an ACP subcommand (`copilot --acp`, `cursor-agent acp`, `omp acp`, `opencode acp`) use their configured override or the built-in default. Claude Code and Codex appear as adapter presets (`cmd /c npx …` on Windows). Providers marked unknown may still ship an ACP mode the picker cannot detect — if the CLI has one, enter it manually (arguments are split on spaces; on Windows avoid `.cmd` shims or prefix them with `cmd /c`).
+- **Inner agent command** — the ACP-speaking command to wrap for **Translate (ACP)**. The settings screen lists the daemon's providers and fills the command automatically where an ACP mode is verified: custom `extends: "acp"` providers use the command configured on the daemon, and CLIs shipping an ACP subcommand (`copilot --acp`, `cursor-agent acp`, `omp acp`, `opencode acp`) use their configured override or the built-in default. Claude Code and Codex still appear as ACP adapter presets (`cmd /c npx …` on Windows) for the ACP wrapper; prefer the direct **Translate (Claude Code)** / **Translate (Codex)** providers when you want native protocol support. Providers marked unknown may still ship an ACP mode the picker cannot detect — if the CLI has one, enter it manually (arguments are split on spaces; on Windows avoid `.cmd` shims or prefix them with `cmd /c`).
 - **Translation timeout** — per-request bound, prompts fail closed past it
 
-Create agents against the **Translate (ACP)** provider. Each session spawns the
-inner agent through the translating proxy.
+Create agents against **Translate (ACP)**, **Translate (Claude Code)**, or
+**Translate (Codex)**. ACP sessions spawn the inner agent through the
+translating proxy; the direct providers talk to Claude Code or Codex natively.
 
 ## Direct Claude Code provider
 
@@ -82,6 +83,36 @@ the app after each turn.
   stay capability-gated off — the daemon handles their absence gracefully.
   Model selection passes the daemon-configured model through; the default
   catalog entry uses the CLI's default model.
+
+## Direct Codex provider
+
+The plugin also registers **Translate (Codex)**: a direct provider that drives
+the official `codex app-server` JSON-RPC interface — the same protocol Paseo's
+native Codex adapter uses, with no ACP shim. Prompts and the per-agent system
+prompt are translated before Codex sees them (fail closed), replies stream back
+in Codex's language, and the shared timeline renderer translates them in the
+app after each turn.
+
+- Requires the `codex` CLI installed and logged in on the daemon machine
+  (`npm install -g @openai/codex`, then `codex login`).
+- **Executable resolution**: the provider drives the `codex` found on PATH
+  (native `codex.exe`/`codex` preferred over `.cmd` shims). The **Codex
+  executable** setting overrides everything with an explicit path. PATH
+  resolution is cached for the plugin process lifetime: after installing or
+  upgrading `codex` on PATH, run `paseo plugin reload translate` to pick it up.
+- Model switching and thinking effort are probed live from `model/list`.
+  Modes are Default Permissions / Auto-review / Full Access, matching the
+  native provider. Fast mode is offered for models that support it.
+- Session persistence uses Codex's thread id (resume survives daemon
+  restarts). Permissions pass through Allow/Deny for commands and file
+  changes; clarifying questions are translated for display and answers are
+  translated back (fail closed).
+- Interrupt maps to `turn/interrupt`. Active-turn steering maps to
+  `turn/steer`. Conversation rewind forks the Codex thread.
+- Slash commands listed from Codex skills keep the command word verbatim;
+  only free-text arguments are translated.
+- Sub-agent activity is flattened to tool-call cards (not provider
+  subsessions). Archive/unarchive and file rewind stay capability-gated off.
 
 ## Interface language
 
