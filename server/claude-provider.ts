@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
-import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  Options,
+  SDKMessage,
+  SDKResultMessage,
+  SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
@@ -15,8 +20,14 @@ import {
   type ProviderPermissionResponse,
   type ProviderRegistration,
   type ProviderSessionConfig,
+  type ProviderSessionSummary,
+  type ProviderSetting,
+  type ProviderUsage,
 } from "@getpaseo/plugin/server/provider";
 import { createTranslator, type TranslatorDeps } from "./translate";
+import { claudeModelSupportsFastMode, findClaudeModel } from "./claude-model-manifest";
+import { listClaudeTranscriptSummaries } from "./claude-sessions";
+import { forkSession as sdkForkSession } from "./claude-rewind";
 import {
   isSerializedAttachment,
   restorePromptFragment,
@@ -58,6 +69,10 @@ export interface ClaudeQueryHandle {
   setModel?(model?: string): Promise<void>;
   setPermissionMode?(mode: string): Promise<void>;
   applyFlagSettings?(settings: Record<string, unknown>): Promise<void>;
+  rewindFiles?(
+    userMessageId: string,
+    options?: { dryRun?: boolean },
+  ): Promise<{ canRewind: boolean; error?: string; filesChanged?: string[]; insertions?: number; deletions?: number }>;
 }
 
 /** Subset of the SDK's ModelInfo used for the dynamic catalog. */
@@ -78,6 +93,8 @@ export type ClaudeQueryFactory = (params: {
 export interface ClaudeProviderDeps extends TranslatorDeps {
   /** Test seam; defaults to the real claude-agent-sdk query. */
   queryFactory?: ClaudeQueryFactory;
+  /** Test seam; defaults to the real SDK forkSession (conversation rewind). */
+  forkSession?: (sessionId: string, options: { upToMessageId: string }) => Promise<{ sessionId: string }>;
 }
 
 const CAPABILITIES = [
@@ -86,9 +103,14 @@ const CAPABILITIES = [
   "prompt.image",
   "prompt.steer",
   "permission",
+  "permission.tool_policy",
   "session.persistence",
   "session.configure",
   "session.subsession",
+  "session.list",
+  "session.revert.files",
+  "session.revert.conversation",
+  "session.revert.both",
 ] as const;
 
 /** Mirrors the native Claude provider's modes (auto requires the API transport). */
@@ -146,6 +168,8 @@ type PermissionResultLike =
 
 interface PendingPermission {
   resolve: (response: PermissionResultLike | null) => void;
+  /** True for ExitPlanMode cards: the answer switches the permission mode. */
+  plan?: boolean;
   /**
    * Present for AskUserQuestion permissions: the normalized agent-language
    * input plus the translated questions actually emitted, so answers keyed
@@ -156,6 +180,11 @@ interface PendingPermission {
     translatedQuestions: unknown[];
   };
 }
+
+/** Shape of `ProviderPermissionRequest.actions` on the permission event. */
+type ProviderPermissionActions = NonNullable<
+  Extract<ProviderEvent, { type: "session.permission" }>["request"]["actions"]
+>;
 
 interface ClaudeSession {
   id: string;
@@ -173,6 +202,10 @@ interface ClaudeSession {
   active: { clientMessageId: string; turnId: string } | null;
   interrupted: boolean;
   closed: boolean;
+  /** Set while the live query is being swapped out (rewind); the pump then settles silently. */
+  detached: boolean;
+  /** Fast toggle availability: the desired model (or manifest default) allows it. */
+  fastModeSupported: boolean;
   toolNames: Map<string, string>;
   toolInputs: Map<string, unknown>;
   /**
@@ -182,7 +215,24 @@ interface ClaudeSession {
    * (input + cache read + cache write) is exactly the context that call
    * carried — unlike the cumulative `result.modelUsage` totals.
    */
-  contextUsage: { usedTokens: number; model: string | null } | null;
+  contextUsage: { usedTokens: number } | null;
+  /** Ring denominator: manifest value at open, updated from `modelUsage`. */
+  contextWindowMaxTokens: number | null;
+  /** Fast-mode toggle; only offered for models whose manifest row allows it. */
+  fastMode: boolean;
+  /** Deduplicates the loading compaction card the CLI repeats every 30s. */
+  compactionMarkerOpen: boolean;
+  /** Mode to return to after a plan is approved (mirrors the native provider). */
+  planResumeMode: string | null;
+  /** Claude-side user message ids already seen, in arrival order (rewind anchors). */
+  rewindUserMessageIds: string[];
+  /** Submitted prompts awaiting their Claude-side user message uuid (FIFO). */
+  pendingUserAnchors: Array<{ clientMessageId: string; text: string }>;
+  /** Latest stream-event request prompt size (mid-turn ring numerator). */
+  streamInputTokens: number | null;
+  streamOutputTokens: number | null;
+  /** Tail of the SDK's stderr, surfaced when the runtime dies. */
+  recentStderr: string;
   pendingPermissions: Map<string, PendingPermission>;
   /** Live Task-protocol children, surfaced as provider subsessions. */
   subagents: ClaudeSubagentTracker | null;
@@ -270,19 +320,22 @@ function createPromptSink(): PromptSink {
  * subsessions (track rows with read-only timelines, including nesting,
  * backgrounded children, and resume aliases), permission pass-through,
  * interrupt, slash-command listing, usage reporting, session persistence via
- * Claude's session id, and best-effort history replay from Claude's own
- * transcript files. Archive/unarchive/revert/session-listing stay
+ * Claude's session id, history replay from Claude's own transcript files,
+ * session listing, and conversation/file rewind. Archive/unarchive stay
  * capability-gated off: the daemon handles their absence gracefully.
  */
 export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): ProviderRegistration {
   const translator = createTranslator(deps);
   const queryFactory = deps.queryFactory ?? claudeQuery;
+  const forkClaudeSession = deps.forkSession ?? ((id: string, options: { upToMessageId: string }) =>
+    sdkForkSession.forkSession(id, options));
   const listeners = new Set<(event: ProviderEvent) => void>();
   const sessions = new Map<string, ClaudeSession>();
   const context: DispatchContext = {
     sessions,
     translator,
     queryFactory,
+    forkClaudeSession,
     loadValues: () => deps.loadConfig(),
     emit(event) {
       if (!connectionClosed) for (const listener of listeners) listener(event);
@@ -341,6 +394,10 @@ interface DispatchContext {
   sessions: Map<string, ClaudeSession>;
   translator: ReturnType<typeof createTranslator>;
   queryFactory: ClaudeQueryFactory;
+  forkClaudeSession: (
+    sessionId: string,
+    options: { upToMessageId: string },
+  ) => Promise<{ sessionId: string }>;
   loadValues(): Promise<TranslateSettingsValues>;
   emit(event: ProviderEvent): void;
 }
@@ -406,21 +463,162 @@ async function dispatch(
     }
     case "session.archive":
     case "session.unarchive":
-    case "session.revert":
       context.emit({
         type: "request.failed",
         requestId: input.requestId,
         error: { message: `${input.type} is not supported by the Translate Claude provider` },
       });
       return;
+    case "session.revert":
+      requireProviderCapabilities(capabilities, input);
+      await revertSession(input, context);
+      return;
     case "sessions":
       requireProviderCapabilities(capabilities, input);
-      context.emit({
-        type: "request.failed",
-        requestId: input.requestId,
-        error: { message: "Session listing is not supported by the Translate Claude provider" },
-      });
+      await listSessions(input, context);
       return;
+  }
+}
+
+/**
+ * Session listing (capability `session.list`): this provider's own Claude
+ * sessions for a working directory, from Claude's transcript files. Failures
+ * read as an empty list — listing is discoverability, never a blocker.
+ */
+async function listSessions(
+  input: Extract<ProviderInput, { type: "sessions" }>,
+  context: DispatchContext,
+): Promise<void> {
+  const sessions = await listClaudeTranscriptSummaries(
+    input.cwd ?? process.cwd(),
+    Math.max(1, Math.min(input.limit ?? 20, 100)),
+  );
+  context.emit({ type: "sessions", requestId: input.requestId, sessions });
+  context.emit({ type: "request.completed", requestId: input.requestId });
+}
+
+/**
+ * Rewind (capability `session.revert.*`). The daemon sends the revertToken
+ * carried on a user_message timeline item — the Claude-side user message
+ * uuid. File rewinds call the SDK's file checkpointing; conversation rewind
+ * forks the Claude session up to that message and rebinds persistence, so
+ * the next prompt resumes the fork.
+ */
+async function revertSession(
+  input: Extract<ProviderInput, { type: "session.revert" }>,
+  context: DispatchContext,
+): Promise<void> {
+  const session = context.sessions.get(input.sessionId);
+  if (session === undefined) {
+    context.emit({
+      type: "request.failed",
+      requestId: input.requestId,
+      error: { message: `Unknown session: ${input.sessionId}` },
+    });
+    return;
+  }
+  const messageId = typeof input.token === "string" ? input.token : "";
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(messageId)) {
+    context.emit({
+      type: "request.failed",
+      requestId: input.requestId,
+      error: { message: `Invalid rewind target: ${JSON.stringify(input.token)}` },
+    });
+    return;
+  }
+  try {
+    if (input.scope === "files" || input.scope === "both") {
+      await rewindFilesOnce(session, messageId, context);
+    }
+    if (input.scope === "conversation" || input.scope === "both") {
+      await rewindConversationOnce(session, messageId, context);
+    }
+    context.emit({
+      type: "timeline.item",
+      sessionId: session.id,
+      item: {
+        type: "notification",
+        id: `rewind-${randomUUID()}`,
+        level: "info",
+        message: `Rewound ${input.scope} to message ${messageId}.`,
+      },
+    });
+    context.emit({ type: "request.completed", requestId: input.requestId });
+  } catch (error) {
+    context.emit({
+      type: "request.failed",
+      requestId: input.requestId,
+      error: { message: `Rewind failed: ${describe(error)}` },
+    });
+  }
+}
+
+async function rewindFilesOnce(
+  session: ClaudeSession,
+  messageId: string,
+  context: DispatchContext,
+): Promise<void> {
+  // Native parity: checkpoints live on the running query. Conversation
+  // rewind tears that query down, so a later files-only rewind must
+  // rebuild it first (and a never-prompted session must start one).
+  await ensureQuery(session, context);
+  if (session.query?.rewindFiles === undefined) {
+    throw new Error("This Claude build does not expose file rewind");
+  }
+  const result = await session.query.rewindFiles(messageId, { dryRun: false });
+  if (!result.canRewind) {
+    throw new Error(result.error ?? `No file checkpoint found for message ${messageId}`);
+  }
+}
+
+/**
+ * Conversation rewind tears down the live query (it is bound to the old
+ * session) and rebinds persistence to the fork, so the next prompt rebuilds
+ * the query on the forked transcript.
+ */
+async function rewindConversationOnce(
+  session: ClaudeSession,
+  messageId: string,
+  context: DispatchContext,
+): Promise<void> {
+  if (session.claudeSessionId === null) {
+    throw new Error("Claude session is not ready for rewind");
+  }
+  const fork = await context.forkClaudeSession(session.claudeSessionId, { upToMessageId: messageId });
+  session.claudeSessionId = fork.sessionId;
+  await resetQuery(session, (event) => context.emit(event));
+  context.emit({
+    type: "session.persistence",
+    sessionId: session.id,
+    persistence: { version: 1, data: { claudeSessionId: fork.sessionId } },
+  });
+}
+
+/**
+ * Stops the live SDK query without closing the session: the pump settles
+ * silently (detached), pending permissions are denied, and the next prompt
+ * rebuilds the query from the latest Claude session id.
+ */
+async function resetQuery(
+  session: ClaudeSession,
+  emit: (event: ProviderEvent) => void,
+): Promise<void> {
+  session.detached = true;
+  session.abort.abort();
+  session.abort = new AbortController();
+  for (const pending of session.pendingPermissions.values()) {
+    pending.resolve({ behavior: "deny", message: "Superseded by a rewind" });
+  }
+  session.pendingPermissions.clear();
+  const pump = session.pump;
+  session.query = null;
+  session.pump = null;
+  const active = session.active;
+  session.active = null;
+  await pump?.catch(() => undefined);
+  session.detached = false;
+  if (active !== null) {
+    emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
   }
 }
 
@@ -469,9 +667,20 @@ async function openSession(
     active: null,
     interrupted: false,
     closed: false,
+    detached: false,
+    fastModeSupported: claudeModelSupportsFastMode(input.config.model),
     toolNames: new Map(),
     toolInputs: new Map(),
     contextUsage: null,
+    contextWindowMaxTokens: findClaudeModel(input.config.model)?.contextWindowMaxTokens ?? null,
+    fastMode: input.config.settings?.["fast_mode"] === true,
+    compactionMarkerOpen: false,
+    planResumeMode: readConfigured(input.config.mode),
+    rewindUserMessageIds: [],
+    pendingUserAnchors: [],
+    streamInputTokens: null,
+    streamOutputTokens: null,
+    recentStderr: "",
     pendingPermissions: new Map(),
     subagents: null,
     supportsSubsessions: capabilities.includes("session.subsession"),
@@ -503,6 +712,15 @@ async function openSession(
     sessionId: input.sessionId,
     config: configStateFor(session),
   });
+  // The ring denominator is known from the model manifest before any turn:
+  // emit it so the app can render a ratio as soon as used tokens arrive.
+  if (session.contextWindowMaxTokens !== null) {
+    context.emit({
+      type: "session.usage",
+      sessionId: input.sessionId,
+      usage: { contextWindowMaxTokens: session.contextWindowMaxTokens },
+    });
+  }
 }
 
 /** Normalizes a configured selection: empty/unknown/"default" means none. */
@@ -673,7 +891,7 @@ function configStateFor(session: ClaudeSession): {
   models: ProviderModel[];
   modes: ProviderMode[];
   thinkingOptions: [];
-  settings: [];
+  settings: ProviderSetting[];
 } {
   return {
     ...(session.desiredModel !== null ? { model: session.desiredModel } : {}),
@@ -682,7 +900,18 @@ function configStateFor(session: ClaudeSession): {
     models: catalogModelsCache ?? [],
     modes: STATIC_MODES,
     thinkingOptions: [],
-    settings: [],
+    // The Fast toggle is offered only for models whose manifest row allows it.
+    settings: session.fastModeSupported
+      ? [
+          {
+            type: "toggle",
+            id: "fast_mode",
+            label: "Fast",
+            description: "Lower latency Opus responses at higher token cost",
+            value: session.fastMode,
+          },
+        ]
+      : [],
   };
 }
 
@@ -696,6 +925,25 @@ function readStoredSessionId(persistence: { version: number; data: unknown } | u
   }
   const stored = (persistence.data as { claudeSessionId?: unknown }).claudeSessionId;
   return typeof stored === "string" && stored.length > 0 ? stored : null;
+}
+
+/** The pre-translation user text, for rewind anchor display. */
+function rawPromptText(
+  content: ReadonlyArray<{ type?: unknown; text?: unknown } | unknown>,
+): string {
+  const parts: string[] = [];
+  for (const block of content) {
+    if (
+      typeof block === "object" &&
+      block !== null &&
+      (block as { type?: unknown }).type === "text" &&
+      typeof (block as { text?: unknown }).text === "string"
+    ) {
+      parts.push((block as { text: string }).text);
+    }
+  }
+  const joined = parts.join("\n").trim();
+  return joined.length > 0 ? joined : "[attachment]";
 }
 
 async function promptSession(
@@ -749,6 +997,12 @@ async function promptSession(
     type: "user",
     message: { role: "user", content: blocks },
     parent_tool_use_id: null,
+  });
+  // Rewind anchor: the SDK echoes this prompt back with its Claude-side uuid,
+  // at which point a user_message item carrying the revertToken is emitted.
+  session.pendingUserAnchors.push({
+    clientMessageId: input.prompt.clientMessageId,
+    text: rawPromptText(input.prompt.input.content),
   });
   await publishCommands(session, context);
 }
@@ -808,6 +1062,10 @@ async function commandSession(
     message: { role: "user", content: [{ type: "text", text }] },
     parent_tool_use_id: null,
   });
+  session.pendingUserAnchors.push({
+    clientMessageId: input.prompt.clientMessageId,
+    text: `/${input.prompt.input.name}${args.trim().length > 0 ? ` ${args}` : ""}`,
+  });
   await publishCommands(session, context);
 }
 
@@ -861,6 +1119,10 @@ async function steerSession(
     parent_tool_use_id: null,
     priority: "next",
     uuid: randomUUID(),
+  });
+  session.pendingUserAnchors.push({
+    clientMessageId: input.prompt.clientMessageId,
+    text: rawPromptText(input.prompt.input.content),
   });
   context.emit({
     type: "session.prompt_result",
@@ -962,25 +1224,60 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
   const executable =
     values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const permissionMode = session.desiredMode ?? undefined;
+  const providerOptions = resolveProviderOptions(session);
+  const thinking = thinkingStartOptions(session.desiredThinking);
+  const effortLevel =
+    thinking.settings !== undefined &&
+    typeof thinking.settings === "object" &&
+    thinking.settings !== null &&
+    "effortLevel" in thinking.settings
+      ? (thinking.settings as { effortLevel?: unknown }).effortLevel
+      : undefined;
+  const settings: Record<string, unknown> = {
+    ...providerOptions.settings,
+    // Thinking effort wins over a leftover providerOptions.settings.effortLevel
+    // so a mode picker change is not silently ignored.
+    ...(effortLevel !== undefined ? { effortLevel } : {}),
+    ...(session.fastMode ? { fastMode: true } : {}),
+  };
   const options: Options = {
     cwd: session.config.cwd,
     env: { ...process.env, ...session.config.env },
     abortController: session.abort,
+    // Token-level stream events drive the mid-turn context ring (the timeline
+    // itself still renders complete messages).
+    includePartialMessages: true,
+    // Mirror the native provider: load the user's settings/CLAUDE.md layers.
+    settingSources: ["user", "project", "local"],
+    // Required for provider-level file rewind.
+    enableFileCheckpointing: true,
+    stderr: (data: string) => captureStderr(session, data),
     ...(session.claudeSessionId !== null ? { resume: session.claudeSessionId } : {}),
     ...(session.desiredModel !== null ? { model: session.desiredModel } : {}),
     ...(session.translatedSystemPrompt !== null
-      ? { systemPrompt: session.translatedSystemPrompt }
-      : {}),
-    ...(permissionMode !== undefined
       ? {
-          permissionMode: permissionMode as Options["permissionMode"],
-          ...(permissionMode === "bypassPermissions"
-            ? { allowDangerouslySkipPermissions: true }
-            : {}),
+          // Preset + append keeps Claude Code's built-in system prompt (only
+          // the agent-specific instructions are translated), matching the
+          // native provider.
+          systemPrompt: {
+            type: "preset" as const,
+            preset: "claude_code" as const,
+            append: session.translatedSystemPrompt,
+          },
         }
       : {}),
+    // Keep the bypass launch capability available so a later
+    // setPermissionMode("bypassPermissions") does not fail after a restart
+    // (native provider parity).
+    allowDangerouslySkipPermissions: true,
+    ...(permissionMode !== undefined
+      ? { permissionMode: permissionMode as Options["permissionMode"] }
+      : {}),
+    ...(session.config.persist ? { persistSession: true } : {}),
     ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
-    ...thinkingStartOptions(session.desiredThinking),
+    ...(thinking.thinking !== undefined ? { thinking: thinking.thinking } : {}),
+    ...(Object.keys(settings).length > 0 ? { settings } : {}),
+    ...providerOptions.spread,
     canUseTool: ((toolName: string, input: Record<string, unknown>, toolOptions: unknown) =>
       requestPermission(
         session,
@@ -990,9 +1287,116 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
         context,
       )) as unknown as NonNullable<Options["canUseTool"]>,
   };
+  const servers = normalizeMcpServers(session.config.mcpServers);
+  if (servers !== undefined) options.mcpServers = servers;
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
   session.pump = pumpQuery(session, query, context);
+}
+
+/**
+ * Passes daemon-configured MCP servers through to the SDK after normalizing
+ * the plugin's shape (stdio/http/sse) into the SDK's record shape. Unknown
+ * entries are skipped rather than failing the session.
+ */
+function normalizeMcpServers(
+  servers: ProviderSessionConfig["mcpServers"],
+): NonNullable<Options["mcpServers"]> {
+  const result: NonNullable<Options["mcpServers"]> = {};
+  for (const [name, server] of Object.entries(servers)) {
+    if (typeof name !== "string" || name.length === 0) continue;
+    if (server.type === "stdio") {
+      result[name] = {
+        type: "stdio",
+        command: server.command,
+        ...(server.args !== undefined ? { args: [...server.args] } : {}),
+        ...(server.env !== undefined ? { env: { ...server.env } } : {}),
+        ...(server.alwaysLoad === true ? { alwaysLoad: true } : {}),
+      };
+    } else if (server.type === "http" || server.type === "sse") {
+      result[name] = {
+        type: server.type,
+        url: server.url,
+        ...(server.headers !== undefined ? { headers: { ...server.headers } } : {}),
+        ...(server.alwaysLoad === true ? { alwaysLoad: true } : {}),
+      };
+    }
+  }
+  return result;
+}
+
+/** MCP tool grants from the daemon's tool policy become allowedTools entries. */
+function toolPolicyAllowedTools(toolPolicy: ProviderSessionConfig["toolPolicy"]): string[] {
+  if (toolPolicy === undefined || !Array.isArray(toolPolicy.preapproved)) return [];
+  const grants: string[] = [];
+  for (const grant of toolPolicy.preapproved) {
+    if (
+      typeof grant === "object" &&
+      grant !== null &&
+      (grant as { kind?: unknown }).kind === "mcp" &&
+      typeof (grant as { server?: unknown }).server === "string" &&
+      typeof (grant as { tool?: unknown }).tool === "string"
+    ) {
+      grants.push(`mcp__${(grant as { server: string }).server}__${(grant as { tool: string }).tool}`);
+    }
+  }
+  return grants;
+}
+
+/**
+ * Applies daemon provider options (allowedTools/disallowedTools/sandbox/
+ * settings) and the daemon tool policy (MCP preapprovals → allowedTools) to
+ * SDK option fragments. Fail-soft on every malformed field: a bad option
+ * degrades to "not applied" instead of breaking the session.
+ */
+function resolveProviderOptions(session: ClaudeSession): {
+  spread: Pick<Options, "allowedTools" | "disallowedTools" | "sandbox" | "additionalDirectories">;
+  settings: Record<string, unknown>;
+} {
+  const allowedTools = toolPolicyAllowedTools(session.config.toolPolicy);
+  const disallowedTools: string[] = [];
+  const additionalDirectories: string[] = [];
+  const settings: Record<string, unknown> = {};
+  let sandbox: unknown;
+  const raw = session.config.providerOptions;
+  if (typeof raw === "object" && raw !== null) {
+    for (const key of ["allowedTools", "disallowedTools", "additionalDirectories"] as const) {
+      const list = (raw as Record<string, unknown>)[key];
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (typeof entry !== "string" || entry.length === 0) continue;
+        if (key === "allowedTools") allowedTools.push(entry);
+        else if (key === "disallowedTools") disallowedTools.push(entry);
+        else additionalDirectories.push(entry);
+      }
+    }
+    const rawSettings = (raw as Record<string, unknown>)["settings"];
+    if (typeof rawSettings === "object" && rawSettings !== null) {
+      Object.assign(settings, rawSettings as Record<string, unknown>);
+    }
+    const rawSandbox = (raw as Record<string, unknown>)["sandbox"];
+    if (typeof rawSandbox === "object" && rawSandbox !== null) {
+      sandbox = rawSandbox;
+    }
+  }
+  return {
+    spread: {
+      ...(allowedTools.length > 0 ? { allowedTools: [...new Set(allowedTools)] } : {}),
+      ...(disallowedTools.length > 0 ? { disallowedTools: [...new Set(disallowedTools)] } : {}),
+      ...(additionalDirectories.length > 0
+        ? { additionalDirectories: [...new Set(additionalDirectories)] }
+        : {}),
+      ...(sandbox !== undefined ? { sandbox: sandbox as NonNullable<Options["sandbox"]> } : {}),
+    },
+    settings,
+  };
+}
+
+function captureStderr(session: ClaudeSession, data: string): void {
+  const line = data.trim();
+  if (line.length === 0) return;
+  console.error(`[translate-claude] ${line}`);
+  session.recentStderr = `${session.recentStderr}\n${line}`.slice(-4000);
 }
 
 /**
@@ -1051,24 +1455,50 @@ function thinkingStartOptions(thinking: string | null): Pick<Options, "thinking"
   return {};
 }
 
-/** Applies model/mode/thinking changes; live on the running query when possible. */
+/**
+ * Applies model/mode/thinking/settings changes; live on the running query
+ * when possible. Mode changes also maintain the plan resume anchor the plan
+ * permission actions use (mirrors the native provider).
+ */
 async function applyConfigChanges(
   session: ClaudeSession,
-  changes: { model?: string | null; mode?: string | null; thinkingOption?: string | null },
+  changes: {
+    model?: string | null;
+    mode?: string | null;
+    thinkingOption?: string | null;
+    settings?: Readonly<Record<string, unknown>>;
+  },
 ): Promise<void> {
   if (Object.hasOwn(changes, "model")) {
     const model = changes.model ?? null;
     session.desiredModel = model === null || model === "default" ? null : model;
+    session.fastModeSupported = claudeModelSupportsFastMode(session.desiredModel);
+    // The ring denominator follows the model: re-resolve it from the manifest.
+    session.contextWindowMaxTokens =
+      findClaudeModel(session.desiredModel)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
+    if (session.fastMode && !session.fastModeSupported) {
+      session.fastMode = false;
+      if (session.query?.applyFlagSettings !== undefined) {
+        await session.query.applyFlagSettings({ fastMode: false }).catch(() => undefined);
+      }
+    }
     if (session.query?.setModel !== undefined) {
       await session.query.setModel(session.desiredModel ?? undefined).catch(() => undefined);
     }
   }
   if (Object.hasOwn(changes, "mode")) {
     const mode = changes.mode ?? null;
+    const previousMode = session.desiredMode ?? "default";
     if (mode === null || mode === "default") {
       session.desiredMode = null;
     } else if (VALID_MODES.has(mode)) {
       session.desiredMode = mode;
+    }
+    // Track the mode a plan approval should return to (see respondToPermission).
+    if (session.desiredMode === "plan") {
+      if (previousMode !== "plan") session.planResumeMode = previousMode;
+    } else {
+      session.planResumeMode = session.desiredMode ?? "default";
     }
     if (session.query?.setPermissionMode !== undefined) {
       // Always apply live, including the return to "default": a stored-only
@@ -1087,6 +1517,18 @@ async function applyConfigChanges(
       await session.query
         .applyFlagSettings(thinkingFlagSettings(session.desiredThinking))
         .catch(() => undefined);
+    }
+  }
+  if (Object.hasOwn(changes, "settings")) {
+    const settings = changes.settings ?? {};
+    if (Object.hasOwn(settings, "fast_mode")) {
+      session.fastMode = settings["fast_mode"] === true;
+      if (session.fastMode && !session.fastModeSupported) {
+        session.fastMode = false;
+      }
+      if (session.query?.applyFlagSettings !== undefined) {
+        await session.query.applyFlagSettings({ fastMode: session.fastMode }).catch(() => undefined);
+      }
     }
   }
 }
@@ -1155,10 +1597,14 @@ function fallbackModels(): ProviderModel[] {
 
 function modelInfoToProviderModel(info: ModelInfoLike): ProviderModel {
   const thinkingOptions = thinkingOptionsForModel(info);
+  const manifest = findClaudeModel(info.value);
   return {
     id: info.value,
     label: info.displayName ?? info.value,
     ...(info.description !== undefined ? { description: info.description } : {}),
+    ...(manifest?.contextWindowMaxTokens !== undefined
+      ? { contextWindowMaxTokens: manifest.contextWindowMaxTokens }
+      : {}),
     thinkingOptions,
     defaultThinkingOptionId: thinkingOptions.find((option) => option.isDefault)?.id,
   };
@@ -1204,6 +1650,8 @@ interface CanUseToolOptions {
   title?: string;
   displayName?: string;
   description?: string;
+  /** SDK permission suggestions (e.g. always-allow rules) for the card. */
+  suggestions?: unknown;
   requestId: string;
 }
 
@@ -1227,9 +1675,14 @@ function waitForPermissionResponse(
   toolOptions: CanUseToolOptions,
   emit: (event: ProviderEvent) => void,
   question?: PendingPermission["question"],
+  plan = false,
 ): Promise<PermissionResultLike | null> {
   return new Promise((resolve) => {
-    session.pendingPermissions.set(permissionId, { resolve, ...(question !== undefined ? { question } : {}) });
+    session.pendingPermissions.set(permissionId, {
+      resolve,
+      ...(question !== undefined ? { question } : {}),
+      ...(plan ? { plan: true } : {}),
+    });
     toolOptions.signal.addEventListener("abort", () => {
       const pending = session.pendingPermissions.get(permissionId);
       if (pending === undefined) return;
@@ -1252,13 +1705,14 @@ function requestToolPermission(
 ): Promise<PermissionResultLike | null> {
   const emit = (event: ProviderEvent) => context.emit(event);
   const permissionId = toolOptions.requestId;
+  const kind = resolvePermissionKind(toolName, input);
   return waitForPermissionResponse(
     session,
     permissionId,
     {
       id: permissionId,
       name: toolName,
-      kind: "tool",
+      kind,
       ...(toolOptions.title !== undefined ? { title: toolOptions.title } : {}),
       ...(toolOptions.description !== undefined
         ? { description: toolOptions.description }
@@ -1268,14 +1722,63 @@ function requestToolPermission(
       // The SDK hands a plain JSON object; round-trip keeps the wire shape
       // the daemon's JsonValue contract expects.
       input: JSON.parse(JSON.stringify(input)),
-      actions: [
-        { id: "allow", label: "Allow", behavior: "allow" },
-        { id: "deny", label: "Deny", behavior: "deny" },
-      ],
+      // The SDK's permission suggestions (e.g. "always allow") ride along so
+      // the app can offer them with the card.
+      ...(toolOptions.suggestions !== undefined
+        ? { suggestions: JSON.parse(JSON.stringify(toolOptions.suggestions)) }
+        : {}),
+      ...(kind === "plan"
+        ? {
+            metadata: {
+              ...(typeof input.plan === "string" && input.plan.length > 0
+                ? { planText: input.plan }
+                : {}),
+            },
+            actions: buildPlanPermissionActions(session.planResumeMode),
+          }
+        : {}),
+      ...(kind === "tool"
+        ? {
+            actions: [
+              { id: "allow", label: "Allow", behavior: "allow" },
+              { id: "deny", label: "Deny", behavior: "deny" },
+            ],
+          }
+        : {}),
     },
     toolOptions,
     emit,
+    undefined,
+    kind === "plan",
   );
+}
+
+/** Mirrors the native provider's kind resolution: plan / question / tool. */
+function resolvePermissionKind(
+  toolName: string,
+  input: Record<string, unknown>,
+): "tool" | "plan" | "question" {
+  if (toolName === "ExitPlanMode") return "plan";
+  if (toolName === "AskUserQuestion" && Array.isArray(input.questions)) return "question";
+  return "tool";
+}
+
+/** Plan cards offer Reject / Implement (+ resume-bypass when applicable). */
+function buildPlanPermissionActions(resumeMode: string | null): ProviderPermissionActions {
+  const actions: ProviderPermissionActions = [
+    { id: "reject", label: "Reject", behavior: "deny", variant: "danger", intent: "dismiss" },
+    { id: "implement", label: "Implement", behavior: "allow", variant: "primary", intent: "implement" },
+  ];
+  if (resumeMode === "bypassPermissions") {
+    actions.push({
+      id: "implement_resume",
+      label: "Implement with Bypass",
+      behavior: "allow",
+      variant: "secondary",
+      intent: "implement_resume",
+    });
+  }
+  return actions;
 }
 
 /**
@@ -1348,6 +1851,24 @@ async function respondToPermission(
     if (pending.question !== undefined) {
       await resolveQuestionAllow(pending.question, response, pending.resolve, context);
     } else {
+      if (pending.plan === true) {
+        // A plan approval switches the mode the native provider would switch
+        // to, then lets the turn continue on the approved plan.
+        const shouldResumeBypass =
+          response.selectedActionId === "implement_resume" &&
+          session.planResumeMode === "bypassPermissions";
+        const targetMode = shouldResumeBypass ? "bypassPermissions" : "acceptEdits";
+        session.desiredMode = targetMode;
+        session.planResumeMode = targetMode;
+        if (session.query?.setPermissionMode !== undefined) {
+          await session.query.setPermissionMode(targetMode).catch(() => undefined);
+        }
+        emit({
+          type: "session.config",
+          sessionId: session.id,
+          config: configStateFor(session),
+        });
+      }
       pending.resolve({
         behavior: "allow",
         updatedInput: response.updatedInput,
@@ -1414,10 +1935,20 @@ async function pumpQuery(
       handleSdkMessage(session, message, context);
     }
   } catch (error) {
-    if (!session.closed) finishDeadQuery(session, describe(error), emit);
+    if (session.closed) return;
+    if (session.detached) {
+      session.detached = false;
+      return;
+    }
+    finishDeadQuery(session, describe(error), emit);
     return;
   }
-  if (!session.closed) finishDeadQuery(session, "Claude exited unexpectedly", emit);
+  if (session.closed) return;
+  if (session.detached) {
+    session.detached = false;
+    return;
+  }
+  finishDeadQuery(session, "Claude exited unexpectedly", emit);
 }
 
 /**
@@ -1463,7 +1994,10 @@ function finishDeadQuery(
     emit({
       type: "session.runtime_failed",
       sessionId: session.id,
-      error: { message },
+      error: {
+        message,
+        ...(session.recentStderr.length > 0 ? { diagnostic: session.recentStderr } : {}),
+      },
     });
   }
 }
@@ -1479,11 +2013,26 @@ function handleSdkMessage(
   if (session.subagents?.observeSystemMessage(message) === true) return;
   if (message.type === "system") {
     if (message.subtype === "init") void publishCommands(session, context);
+    if (message.subtype === "status") {
+      noteCompactionStatus(session, message, emit);
+      return;
+    }
+    if (message.subtype === "compact_boundary") {
+      noteCompactionBoundary(session, message, emit);
+      return;
+    }
     return;
   }
   const parentToolUseId = (message as { parent_tool_use_id?: unknown }).parent_tool_use_id;
   if (typeof parentToolUseId === "string" && parentToolUseId.length > 0) {
     session.subagents?.handleSidechainMessage(message, parentToolUseId);
+    return;
+  }
+  if (message.type === "stream_event") {
+    // Partial deltas power the mid-turn context ring; the timeline keeps
+    // rendering complete messages. Sidechain frames already returned above
+    // so they never move the parent ring.
+    noteStreamEventUsage(session, message, emit);
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
@@ -1558,6 +2107,7 @@ function handleSdkMessage(
     return;
   }
   if (message.type === "user" && message.parent_tool_use_id === null) {
+    noteRewindAnchor(session, message, emit);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
     for (const block of content) {
@@ -1612,23 +2162,75 @@ function handleSdkMessage(
     return;
   }
   if (message.type === "result") {
+    // Detect a missing resume against the id we asked the SDK to resume,
+    // BEFORE overwriting it with this result's session_id. Official result
+    // fixtures often omit session_id entirely; matching the stored id is
+    // the only reliable signal.
+    const missingConversation = readMissingConversationError(message, session.claudeSessionId);
+    if (missingConversation !== null) {
+      session.claudeSessionId = null;
+      emit({
+        type: "session.persistence",
+        sessionId: session.id,
+        persistence: { version: 1, data: {} },
+      });
+      emit({
+        type: "session.notice",
+        sessionId: session.id,
+        notice: {
+          id: "claude-resume-missing",
+          severity: "warning",
+          title: "Claude session not found",
+          description:
+            "The stored Claude transcript is gone; the next prompt starts a fresh session. " +
+            missingConversation,
+        },
+      });
+      const active = session.active;
+      session.active = null;
+      if (active !== null) {
+        emit({
+          type: "session.turn",
+          sessionId: session.id,
+          turnId: active.turnId,
+          state: "failed",
+          error: { message: missingConversation },
+        });
+      }
+      // Detach so the iterator ending does not emit runtime_failed and
+      // kill the daemon session. The next prompt rebuilds without resume.
+      session.detached = true;
+      session.abort.abort();
+      session.abort = new AbortController();
+      for (const pending of session.pendingPermissions.values()) {
+        pending.resolve({ behavior: "deny", message: "Claude session ended" });
+      }
+      session.pendingPermissions.clear();
+      session.query = null;
+      session.pump = null;
+      return;
+    }
     session.claudeSessionId = message.session_id;
     emit({
       type: "session.persistence",
       sessionId: session.id,
       persistence: { version: 1, data: { claudeSessionId: message.session_id } },
     });
+    // The per-model context windows recorded on every result keep the ring
+    // denominator fresh even when the model changes mid-session.
+    recordModelContextWindow(session, (message as { modelUsage?: unknown }).modelUsage);
+    // The turn is over: streaming counters are stale for the next turn.
+    session.streamInputTokens = null;
+    session.streamOutputTokens = null;
     const active = session.active;
     if (active === null) return;
-    const modelUsage = (message as { modelUsage?: unknown }).modelUsage;
-    const usage = summarizeModelUsage(modelUsage);
-    const context = contextWindowUsage(session, modelUsage);
-    if (usage !== undefined || context !== undefined) {
+    const usage = buildResultUsage(session, message);
+    if (usage !== undefined) {
       emit({
         type: "session.usage",
         sessionId: session.id,
         turnId: active.turnId,
-        usage: { ...usage, ...context },
+        usage,
       });
     }
     session.active = null;
@@ -1657,6 +2259,22 @@ function handleSdkMessage(
 interface ToolResultOutput {
   text: string | null;
   images: Array<{ mimeType: string; data: string }>;
+}
+
+/** Mirrors the native provider's stale-resume detection. */
+function readMissingConversationError(
+  message: SDKResultMessage,
+  claudeSessionId: string | null,
+): string | null {
+  if (claudeSessionId === null) return null;
+  if (message.type !== "result" || message.subtype !== "error_during_execution") return null;
+  const errors = Array.isArray(message.errors) ? message.errors : [];
+  for (const entry of errors) {
+    if (typeof entry !== "string") continue;
+    const match = /^No conversation found with session ID:\s*(.+)$/.exec(entry.trim());
+    if (match !== null && match[1]?.trim() === claudeSessionId) return entry.trim();
+  }
+  return null;
 }
 
 function flattenToolResult(content: unknown): ToolResultOutput {
@@ -1691,46 +2309,64 @@ function flattenToolResult(content: unknown): ToolResultOutput {
 }
 
 /**
- * Per-model totals (`modelUsage`) are cumulative across turns in a
- * streaming-input session and cover the main loop plus Task subagents, so
- * the latest result is the correct accounting signal — never a sum across
- * results.
+ * Per-turn main-loop usage from the result message, mirroring the native
+ * provider: `inputTokens`/`outputTokens` are per-turn (the `result.usage`
+ * shape), `cachedInputTokens` the cache reads, `totalCostUsd` the running
+ * cumulative cost. The ring numerator comes from the latest per-call
+ * measurement; the denominator from the largest `contextWindow` seen in
+ * `modelUsage` (matching the native provider's resolution).
  */
-function summarizeModelUsage(modelUsage: unknown):
-  | { inputTokens?: number; outputTokens?: number; totalCostUsd?: number }
-  | undefined {
-  if (typeof modelUsage !== "object" || modelUsage === null) return undefined;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let totalCostUsd = 0;
-  for (const entry of Object.values(modelUsage)) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const record = entry as { inputTokens?: unknown; outputTokens?: unknown; costUSD?: unknown };
-    if (typeof record.inputTokens === "number") inputTokens += record.inputTokens;
-    if (typeof record.outputTokens === "number") outputTokens += record.outputTokens;
-    if (typeof record.costUSD === "number") totalCostUsd += record.costUSD;
+function buildResultUsage(session: ClaudeSession, message: SDKResultMessage): ProviderUsage | undefined {
+  const usage = message.usage;
+  const usageRecord =
+    typeof usage === "object" && usage !== null
+      ? (usage as {
+          input_tokens?: unknown;
+          cache_read_input_tokens?: unknown;
+          output_tokens?: unknown;
+          iterations?: unknown;
+        })
+      : undefined;
+  const totalCostUsd =
+    typeof message.total_cost_usd === "number" && Number.isFinite(message.total_cost_usd)
+      ? message.total_cost_usd
+      : undefined;
+  const inputTokens = readFiniteToken(usageRecord?.input_tokens);
+  const cachedInputTokens = readFiniteToken(usageRecord?.cache_read_input_tokens);
+  const outputTokens = readFiniteToken(usageRecord?.output_tokens);
+  if (inputTokens === undefined && outputTokens === undefined && totalCostUsd === undefined) {
+    // No per-turn signal at all; the ring fields below may still be emitted.
+    const ring = ringUsage(session);
+    return ring === undefined ? undefined : { ...ring };
   }
-  if (inputTokens === 0 && outputTokens === 0 && totalCostUsd === 0) return undefined;
-  return {
-    ...(inputTokens > 0 ? { inputTokens: Math.round(inputTokens) } : {}),
-    ...(outputTokens > 0 ? { outputTokens: Math.round(outputTokens) } : {}),
-    ...(totalCostUsd > 0 ? { totalCostUsd } : {}),
+  const result: ProviderUsage = {
+    ...(inputTokens !== undefined ? { inputTokens } : {}),
+    ...(cachedInputTokens !== undefined && cachedInputTokens > 0 ? { cachedInputTokens } : {}),
+    ...(outputTokens !== undefined ? { outputTokens } : {}),
+    ...(totalCostUsd !== undefined ? { totalCostUsd } : {}),
   };
+  const ring = ringUsage(session);
+  return { ...result, ...ring };
+}
+
+function readFiniteToken(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : undefined;
 }
 
 /**
  * Records the prompt size of the latest main-loop API call from each
  * assistant message's per-call usage: `input_tokens` plus cache reads and
- * cache writes is exactly the context that request carried. The turn's
- * `result` totals cannot serve as the ring numerator — `modelUsage` tokens
- * are cumulative across the whole query, and the result's `usage` aggregates
- * every call in the turn — so the last per-call measurement is the correct,
- * persistent signal (context only grows between calls, and a later assistant
- * message always supersedes an older one).
+ * cache writes (and that call's output, matching the native provider's
+ * accounting) is the context that request carried. The turn's cumulative
+ * `modelUsage` totals cannot serve as the ring numerator, so the last
+ * per-call measurement is the persistent signal (context only grows between
+ * calls, and a later assistant message always supersedes an older one).
  */
 function noteAssistantContextUsage(
   session: ClaudeSession,
-  message: { model?: unknown; usage?: unknown },
+  message: { usage?: unknown },
 ): void {
   const usage = message.usage;
   if (typeof usage !== "object" || usage === null) return;
@@ -1738,9 +2374,10 @@ function noteAssistantContextUsage(
     input_tokens?: unknown;
     cache_read_input_tokens?: unknown;
     cache_creation_input_tokens?: unknown;
+    output_tokens?: unknown;
   };
   if (typeof record.input_tokens !== "number" || record.input_tokens < 0) return;
-  const used =
+  const promptUsed =
     record.input_tokens +
     (typeof record.cache_read_input_tokens === "number" && record.cache_read_input_tokens > 0
       ? record.cache_read_input_tokens
@@ -1749,29 +2386,46 @@ function noteAssistantContextUsage(
       ? record.cache_creation_input_tokens
       : 0);
   // A frame with no measurable prompt (e.g. a zeroed synthetic /context
-  // helper message) must never zero the ring: keep the previous measurement.
+  // helper message) must never move the ring: keep the previous measurement.
   // Note this intentionally keeps fully-cached calls (input_tokens 0 with a
-  // large cache read) — they are real prompt measurements.
-  if (used <= 0) return;
-  session.contextUsage = {
-    usedTokens: used,
-    model: typeof message.model === "string" ? message.model : (session.contextUsage?.model ?? null),
-  };
+  // large cache read) — they are real prompt measurements. The call's own
+  // output is added on top (the native provider counts it too).
+  if (promptUsed <= 0) return;
+  const output =
+    typeof record.output_tokens === "number" && record.output_tokens > 0
+      ? record.output_tokens
+      : 0;
+  session.contextUsage = { usedTokens: promptUsed + output };
 }
 
 /**
- * Ring fields for the app's context-usage display. Used comes from the
- * latest assistant prompt measurement; the window comes from the matched
- * model's `contextWindow` in `modelUsage`. Fail-soft on every miss: a turn
- * without either signal emits no ring fields at all.
+ * Records the ring denominator: the largest finite `contextWindow` across
+ * `modelUsage` entries (the native provider resolves it the same way, since
+ * entries for auxiliary models must never shrink the main model's window).
  */
-function contextWindowUsage(
+function recordModelContextWindow(session: ClaudeSession, modelUsage: unknown): void {
+  if (typeof modelUsage !== "object" || modelUsage === null) return;
+  let max: number | undefined;
+  for (const value of Object.values(modelUsage as Record<string, unknown>)) {
+    if (typeof value !== "object" || value === null) continue;
+    const window = (value as { contextWindow?: unknown }).contextWindow;
+    if (typeof window !== "number" || !Number.isFinite(window) || window <= 0) continue;
+    max = Math.max(max ?? 0, window);
+  }
+  if (max !== undefined) session.contextWindowMaxTokens = max;
+}
+
+/**
+ * Ring fields for the app's context-usage display: used comes from the
+ * latest per-call measurement (or the post-compaction value), the window
+ * from the recorded denominator. Fail-soft on every miss: a turn without
+ * either signal emits no ring fields at all.
+ */
+function ringUsage(
   session: ClaudeSession,
-  modelUsage: unknown,
 ): { contextWindowUsedTokens?: number; contextWindowMaxTokens?: number } | undefined {
-  const context = session.contextUsage;
-  const used = context?.usedTokens;
-  const max = context === null ? undefined : contextWindowForModel(modelUsage, context.model);
+  const used = session.contextUsage?.usedTokens;
+  const max = session.contextWindowMaxTokens ?? undefined;
   if (used === undefined && max === undefined) return undefined;
   return {
     ...(used !== undefined ? { contextWindowUsedTokens: used } : {}),
@@ -1780,41 +2434,226 @@ function contextWindowUsage(
 }
 
 /**
- * Resolves the context window for the model that served the latest prompt.
- * `modelUsage` keys use aliases or provider ids that rarely equal the
- * assistant's full wire model id (e.g. `claude-sonnet-4-5` vs
- * `claude-sonnet-4-5-20250929`), so matching falls back to the key (or its
- * canonical model) being a prefix of the wire id; the longest match wins when
- * a prefix is ambiguous. With no match, a single candidate is still taken —
- * the choice is then unambiguous — otherwise the window is unknown.
+ * Mid-turn ring updates from SDK stream events: `message_start` carries the
+ * request's prompt size (input + cache reads/writes), `message_delta` the
+ * growing output — exactly how the native provider refreshes the ring while
+ * Claude is still streaming.
  */
-function contextWindowForModel(modelUsage: unknown, model: string | null): number | undefined {
-  if (typeof modelUsage !== "object" || modelUsage === null) return undefined;
-  const candidates: Array<{ key: string; canonical: string | undefined; contextWindow: number }> = [];
-  for (const [key, entry] of Object.entries(modelUsage as Record<string, unknown>)) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const record = entry as { contextWindow?: unknown; canonicalModel?: unknown };
-    if (typeof record.contextWindow !== "number" || record.contextWindow <= 0) continue;
-    candidates.push({
-      key,
-      canonical: typeof record.canonicalModel === "string" ? record.canonicalModel : undefined,
-      contextWindow: record.contextWindow,
+function noteStreamEventUsage(
+  session: ClaudeSession,
+  message: SDKMessage,
+  emit: (event: ProviderEvent) => void,
+): void {
+  const event = (message as { event?: unknown }).event;
+  if (typeof event !== "object" || event === null) return;
+  const record = event as { type?: unknown };
+  let used: number | undefined;
+  if (record.type === "message_start") {
+    const request = readStreamRequestInputTokens(
+      (event as { message?: unknown }).message,
+    );
+    if (request === undefined) return;
+    session.streamInputTokens = request;
+    session.streamOutputTokens = 0;
+  } else if (record.type === "message_delta") {
+    const output = readStreamRequestOutputTokens(event);
+    if (output === undefined) return;
+    session.streamOutputTokens = output;
+  } else {
+    return;
+  }
+  if (
+    typeof session.streamInputTokens !== "number" ||
+    typeof session.streamOutputTokens !== "number"
+  ) {
+    return;
+  }
+  used = session.streamInputTokens + session.streamOutputTokens;
+  if (used <= 0) return;
+  session.contextUsage = { usedTokens: used };
+  emit({
+    type: "session.usage",
+    sessionId: session.id,
+    ...(session.active !== null ? { turnId: session.active.turnId } : {}),
+    usage: {
+      contextWindowUsedTokens: used,
+      ...(session.contextWindowMaxTokens !== null
+        ? { contextWindowMaxTokens: session.contextWindowMaxTokens }
+        : {}),
+    },
+  });
+}
+
+function readStreamRequestInputTokens(message: unknown): number | undefined {
+  const usage =
+    typeof message === "object" && message !== null
+      ? (message as { usage?: unknown }).usage
+      : undefined;
+  if (typeof usage !== "object" || usage === null) return undefined;
+  const record = usage as {
+    input_tokens?: unknown;
+    cache_read_input_tokens?: unknown;
+    cache_creation_input_tokens?: unknown;
+  };
+  const inputTokens =
+    typeof record.input_tokens === "number" && Number.isFinite(record.input_tokens)
+      ? record.input_tokens
+      : undefined;
+  if (inputTokens === undefined || inputTokens < 0) return undefined;
+  const cacheCreation =
+    typeof record.cache_creation_input_tokens === "number" &&
+    Number.isFinite(record.cache_creation_input_tokens) &&
+    record.cache_creation_input_tokens > 0
+      ? record.cache_creation_input_tokens
+      : 0;
+  const cacheRead =
+    typeof record.cache_read_input_tokens === "number" &&
+    Number.isFinite(record.cache_read_input_tokens) &&
+    record.cache_read_input_tokens > 0
+      ? record.cache_read_input_tokens
+      : 0;
+  return inputTokens + cacheCreation + cacheRead;
+}
+
+function readStreamRequestOutputTokens(event: unknown): number | undefined {
+  const output =
+    typeof event === "object" && event !== null
+      ? (event as { usage?: unknown }).usage
+      : undefined;
+  const outputTokens =
+    typeof output === "object" && output !== null
+      ? (output as { output_tokens?: unknown }).output_tokens
+      : undefined;
+  return typeof outputTokens === "number" && Number.isFinite(outputTokens) && outputTokens >= 0
+    ? outputTokens
+    : undefined;
+}
+
+/**
+ * Compaction progress: the CLI repeats a `compacting` status every 30s until
+ * the boundary arrives, so the loading card is deduplicated.
+ */
+function noteCompactionStatus(
+  session: ClaudeSession,
+  message: SDKMessage,
+  emit: (event: ProviderEvent) => void,
+): void {
+  const status = (message as { status?: unknown }).status;
+  if (status !== "compacting") return;
+  if (session.compactionMarkerOpen) return;
+  session.compactionMarkerOpen = true;
+  emit({
+    type: "timeline.item",
+    sessionId: session.id,
+    item: { type: "compaction", id: "compaction", status: "loading" },
+  });
+}
+
+/**
+ * Auto-compaction completed: emit the terminal card and rebase the ring on
+ * the post-compaction token count, exactly like the native provider.
+ */
+function noteCompactionBoundary(
+  session: ClaudeSession,
+  message: SDKMessage,
+  emit: (event: ProviderEvent) => void,
+): void {
+  session.compactionMarkerOpen = false;
+  const metadata = readCompactionMetadata(message);
+  emit({
+    type: "timeline.item",
+    sessionId: session.id,
+    item: {
+      type: "compaction",
+      id: "compaction",
+      status: "completed",
+      // An absent trigger is an automatic compaction (native parity).
+      trigger: metadata?.trigger === "manual" ? "manual" : "auto",
+      ...(metadata?.preTokens !== undefined ? { preTokens: metadata.preTokens } : {}),
+    },
+  });
+  // Native parity: a compaction invalidates in-flight stream counters so a
+  // later message_delta cannot rebuild the ring from the pre-compact prompt.
+  session.streamInputTokens = null;
+  session.streamOutputTokens = null;
+  if (metadata?.postTokens !== undefined) {
+    session.contextUsage = { usedTokens: metadata.postTokens };
+    emit({
+      type: "session.usage",
+      sessionId: session.id,
+      ...(session.active !== null ? { turnId: session.active.turnId } : {}),
+      usage: {
+        contextWindowUsedTokens: metadata.postTokens,
+        ...(session.contextWindowMaxTokens !== null
+          ? { contextWindowMaxTokens: session.contextWindowMaxTokens }
+          : {}),
+      },
     });
   }
-  if (candidates.length === 0) return undefined;
-  if (model !== null) {
-    const matched = candidates
-      .filter(
-        (candidate) =>
-          candidate.key === model ||
-          candidate.canonical === model ||
-          model.startsWith(candidate.key) ||
-          (candidate.canonical !== undefined && model.startsWith(candidate.canonical)),
-      )
-      .sort((left, right) => right.key.length - left.key.length);
-    if (matched.length > 0) return matched[0]?.contextWindow;
+}
+
+function readCompactionMetadata(
+  message: SDKMessage,
+): { trigger?: string; preTokens?: number; postTokens?: number } | undefined {
+  const record = message as Record<string, unknown>;
+  const metadata =
+    typeof record.compaction === "object" && record.compaction !== null
+      ? record.compaction
+      : typeof record.metadata === "object" && record.metadata !== null
+        ? record.metadata
+        : undefined;
+  if (metadata === undefined) return undefined;
+  const source = metadata as { trigger?: unknown; preTokens?: unknown; postTokens?: unknown };
+  return {
+    ...(typeof source.trigger === "string" ? { trigger: source.trigger } : {}),
+    ...(typeof source.preTokens === "number" && Number.isFinite(source.preTokens)
+      ? { preTokens: source.preTokens }
+      : {}),
+    ...(typeof source.postTokens === "number" && Number.isFinite(source.postTokens)
+      ? { postTokens: source.postTokens }
+      : {}),
+  };
+}
+
+/**
+ * Rewind anchors: the SDK echoes each submitted user message back with its
+ * Claude-side uuid. Each anchor becomes a user_message timeline item carrying
+ * the uuid as its revertToken — the target the app's rewind menu sends back
+ * in `session.revert`.
+ */
+function noteRewindAnchor(
+  session: ClaudeSession,
+  message: SDKMessage,
+  emit: (event: ProviderEvent) => void,
+): void {
+  const uuid = (message as { uuid?: unknown }).uuid;
+  if (typeof uuid !== "string" || uuid.length === 0) return;
+  // Tool-result frames are user-shaped too; only real user messages anchor.
+  const content = (message as SDKUserMessage).message?.content;
+  if (Array.isArray(content) && content.some(
+    (block) =>
+      typeof block === "object" &&
+      block !== null &&
+      (block as { type?: unknown }).type === "tool_result",
+  )) {
+    return;
   }
-  return candidates.length === 1 ? candidates[0]?.contextWindow : undefined;
+  if (session.rewindUserMessageIds.includes(uuid)) return;
+  session.rewindUserMessageIds.push(uuid);
+  const anchor = session.pendingUserAnchors.shift();
+  if (anchor === undefined) return;
+  emit({
+    type: "timeline.item",
+    sessionId: session.id,
+    item: {
+      type: "user_message",
+      id: `um-${uuid}`,
+      text: anchor.text,
+      messageId: uuid,
+      clientMessageId: anchor.clientMessageId,
+      revertToken: uuid,
+    },
+  });
 }
 
 async function teardownSession(session: ClaudeSession): Promise<void> {

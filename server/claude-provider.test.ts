@@ -70,6 +70,10 @@ function createFakeFactory() {
           supportsAdaptiveThinking?: boolean;
         }>
       | null,
+    rewindFilesCalls: [] as Array<{ userMessageId: string; dryRun?: boolean }>,
+    rewindFilesResult: { canRewind: true, filesChanged: ["a.txt"], insertions: 2, deletions: 1 } as
+      | { canRewind: boolean; error?: string; filesChanged?: string[]; insertions?: number; deletions?: number }
+      | null,
   };
   let script: PromptScript = async function* () {};
   const factory = (params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => {
@@ -126,6 +130,10 @@ function createFakeFactory() {
       },
       async applyFlagSettings(settings: Record<string, unknown>) {
         state.applyFlagSettingsCalls.push(settings);
+      },
+      async rewindFiles(userMessageId: string, options?: { dryRun?: boolean }) {
+        state.rewindFilesCalls.push({ userMessageId, ...options });
+        return state.rewindFilesResult ?? { canRewind: false, error: "no checkpoint" };
       },
       [Symbol.asyncIterator]: () => iterator,
     };
@@ -286,7 +294,13 @@ describe("translate claude provider", () => {
     await send(promptInput("Hi"));
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
     expect(fake.state.options?.resume).toBe("cs-old");
-    expect(fake.state.options?.systemPrompt).toBe("DE(Be terse.)");
+    // Preset + append keeps Claude Code's built-in system prompt; only the
+    // agent-specific instructions are translated.
+    expect(fake.state.options?.systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: "DE(Be terse.)",
+    });
     expect(fake.state.options?.model).toBe("claude-sonnet-4-5");
     const opened = events.find((event) => event.type === "session.opened");
     expect(opened).toMatchObject({ persistence: { data: { claudeSessionId: "cs-old" } } });
@@ -1279,9 +1293,8 @@ describe("translate claude provider extended protocol", () => {
         result: "done",
         errors: [],
         session_id: "cs-1",
-        modelUsage: {
-          "claude-sonnet-4-5": { inputTokens: 100, outputTokens: 50, costUSD: 0.01 },
-        },
+        total_cost_usd: 0.01,
+        usage: { input_tokens: 100, cache_read_input_tokens: 75, output_tokens: 50 },
       } as unknown as SDKMessage;
     });
     await send(promptInput("Run tests"));
@@ -1295,97 +1308,607 @@ describe("translate claude provider extended protocol", () => {
     expect(running).toMatchObject({
       item: { name: "Bash", status: "running", detail: { type: "shell", command: "pnpm test" } },
     });
+    // Per-turn usage from result.usage (native parity); no ring signal yet.
     const usage = events.find((event) => event.type === "session.usage");
-    expect(usage).toMatchObject({ usage: { inputTokens: 100, outputTokens: 50 } });
-    // No assistant usage and no contextWindow in modelUsage: the turn must
-    // not invent ring fields.
+    expect(usage).toMatchObject({
+      usage: {
+        inputTokens: 100,
+        cachedInputTokens: 75,
+        outputTokens: 50,
+        totalCostUsd: 0.01,
+      },
+    });
     expect(usage).not.toHaveProperty("usage.contextWindowUsedTokens");
     expect(usage).not.toHaveProperty("usage.contextWindowMaxTokens");
   });
 
-  it("reports the context ring from the last assistant call and the model window", async () => {
+  it("reports per-turn usage and the context ring at the turn's end", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
     fake.use(async function* () {
-      yield assistantTextWithUsage("u-1", "halfway", "claude-sonnet-4-5-20250929", {
+      yield assistantTextWithUsage("u-1", "halfway", "claude-opus-4-7-20250101", {
         input_tokens: 1200,
         cache_read_input_tokens: 3000,
         cache_creation_input_tokens: 800,
         output_tokens: 100,
       });
-      yield resultWithModelUsage({
-        "claude-sonnet-4-5": {
-          inputTokens: 5000,
-          outputTokens: 50,
-          costUSD: 0.01,
-          contextWindow: 200000,
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        errors: [],
+        session_id: "cs-1",
+        total_cost_usd: 0.05,
+        usage: {
+          input_tokens: 1200,
+          cache_read_input_tokens: 3000,
+          output_tokens: 100,
         },
-      });
+        modelUsage: {
+          "claude-opus-4-7": {
+            inputTokens: 5000,
+            outputTokens: 50,
+            costUSD: 0.01,
+            contextWindow: 200000,
+          },
+        },
+      } as unknown as SDKMessage;
     });
     await send(promptInput("Status"));
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
     const usage = events.find((event) => event.type === "session.usage");
-    // Used = input + cache read + cache write of the latest call, not the
-    // cumulative modelUsage total.
+    // Per-turn usage from result.usage (matching the native provider), the
+    // ring used from the latest per-call measurement (prompt + its output),
+    // and the denominator from the largest modelUsage contextWindow.
     expect(usage).toMatchObject({
       usage: {
-        inputTokens: 5000,
-        outputTokens: 50,
-        contextWindowUsedTokens: 5000,
+        inputTokens: 1200,
+        cachedInputTokens: 3000,
+        outputTokens: 100,
+        totalCostUsd: 0.05,
+        contextWindowUsedTokens: 5100,
         contextWindowMaxTokens: 200000,
       },
     });
   });
 
-  it("matches the ring window by longest prefix across several models", async () => {
+  it("records the largest modelUsage contextWindow as the ring denominator", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
     fake.use(async function* () {
-      yield assistantTextWithUsage("u-1", "quick", "claude-haiku-4-5-20250929", {
+      yield assistantTextWithUsage("u-1", "quick", "claude-opus-4-7-20250101", {
         input_tokens: 900,
         output_tokens: 20,
       });
       yield resultWithModelUsage({
-        "claude-sonnet-4-5": {
-          inputTokens: 10,
-          outputTokens: 5,
-          costUSD: 0.01,
-          contextWindow: 200000,
-        },
-        "claude-haiku-4-5": {
-          inputTokens: 3,
-          outputTokens: 1,
-          costUSD: 0.001,
-          contextWindow: 100000,
-        },
-      });
-    });
-    await send(promptInput("Status"));
-    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
-    const usage = events.find((event) => event.type === "session.usage");
-    expect(usage).toMatchObject({
-      usage: { contextWindowUsedTokens: 900, contextWindowMaxTokens: 100000 },
-    });
-  });
-
-  it("omits the ring window when no modelUsage entry matches the model", async () => {
-    const { fake, events, send } = await createHarness();
-    await send(openInput);
-    fake.use(async function* () {
-      yield assistantTextWithUsage("u-1", "quick", "claude-opus-4-6-20250101", {
-        input_tokens: 900,
-        output_tokens: 20,
-      });
-      yield resultWithModelUsage({
-        "claude-sonnet-4-5": { inputTokens: 10, outputTokens: 5, costUSD: 0.01, contextWindow: 200000 },
+        "claude-opus-4-7": { inputTokens: 10, outputTokens: 5, costUSD: 0.01, contextWindow: 200000 },
         "claude-haiku-4-5": { inputTokens: 3, outputTokens: 1, costUSD: 0.001, contextWindow: 100000 },
       });
     });
     await send(promptInput("Status"));
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
     const usage = events.find((event) => event.type === "session.usage");
-    expect(usage).toMatchObject({ usage: { contextWindowUsedTokens: 900 } });
-    expect(usage).not.toHaveProperty("usage.contextWindowMaxTokens");
+    // Auxiliary models must never shrink the main model's window.
+    expect(usage).toMatchObject({
+      usage: { contextWindowUsedTokens: 920, contextWindowMaxTokens: 200000 },
+    });
+  });
+
+  it("omits ring fields when the turn carries no usage signal", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield assistantText("u-1", "no usage");
+      yield {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "done",
+        errors: [],
+        session_id: "cs-1",
+      } as unknown as SDKMessage;
+    });
+    await send(promptInput("Status"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(events.find((event) => event.type === "session.usage")).toBeUndefined();
+  });
+
+  it("emits the ring denominator from the model manifest at session open", async () => {
+    const { events, send } = await createHarness();
+    await send({
+      ...openInput,
+      config: { ...openInput.config, model: "claude-opus-4-7" },
+    });
+    const usage = events.find((event) => event.type === "session.usage");
+    expect(usage).toMatchObject({
+      usage: { contextWindowMaxTokens: 200000 },
+    });
+  });
+
+  it("streams the mid-turn ring from stream events", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield {
+        type: "stream_event",
+        event: {
+          type: "message_start",
+          message: {
+            usage: { input_tokens: 1000, cache_read_input_tokens: 500, output_tokens: 0 },
+          },
+        },
+        parent_tool_use_id: null,
+      } as unknown as SDKMessage;
+      yield {
+        type: "stream_event",
+        event: { type: "message_delta", usage: { output_tokens: 200 } },
+        parent_tool_use_id: null,
+      } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Status"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const usageEvents = events.filter((event) => event.type === "session.usage");
+    expect(usageEvents.length).toBeGreaterThanOrEqual(2);
+    // message_start: prompt side (input + cache read); message_delta adds the
+    // growing output.
+    expect(usageEvents[0]).toMatchObject({ usage: { contextWindowUsedTokens: 1500 } });
+    expect(usageEvents[1]).toMatchObject({ usage: { contextWindowUsedTokens: 1700 } });
+  });
+
+  it("marks compaction and rebases the ring on the post-compaction count", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield {
+        type: "system",
+        subtype: "status",
+        status: "compacting",
+      } as unknown as SDKMessage;
+      yield {
+        type: "system",
+        subtype: "compact_boundary",
+        compaction: { trigger: "auto", preTokens: 90000, postTokens: 12000 },
+      } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Status"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const compaction = events.filter(
+      (event) => event.type === "timeline.item" && event.item.type === "compaction",
+    );
+    expect(compaction).toHaveLength(2);
+    expect(compaction[0]).toMatchObject({ item: { type: "compaction", status: "loading" } });
+    expect(compaction[1]).toMatchObject({
+      item: { type: "compaction", status: "completed", trigger: "auto", preTokens: 90000 },
+    });
+    const usageEvents = events.filter((event) => event.type === "session.usage");
+    // The ring drops to the post-compaction count instead of the stale value.
+    expect(usageEvents.length).toBeGreaterThanOrEqual(1);
+    expect(usageEvents[0]).toMatchObject({ usage: { contextWindowUsedTokens: 12000 } });
+  });
+
+  it("surfaces plan approval as a plan card and switches to accept edits", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let decision: unknown;
+    fake.use(async function* (_pushed) {
+      decision = await fake.state.options?.canUseTool?.(
+        "ExitPlanMode",
+        { plan: "Step 1\nStep 2" },
+        { signal: new AbortController().signal, requestId: "perm-plan", toolUseID: "tu-plan" },
+      );
+      yield assistantText("a-1", "planned");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Plan something"));
+    await waitFor(events, (event) => event.type === "session.permission" && event.request.kind === "plan");
+    const card = events.find(
+      (event) => event.type === "session.permission" && event.request.kind === "plan",
+    );
+    expect(card).toMatchObject({
+      request: {
+        name: "ExitPlanMode",
+        kind: "plan",
+        metadata: { planText: "Step 1\nStep 2" },
+        actions: [
+          expect.objectContaining({ id: "reject", behavior: "deny" }),
+          expect.objectContaining({ id: "implement", behavior: "allow", intent: "implement" }),
+        ],
+      },
+    });
+    await send({
+      type: "session.permission",
+      sessionId: "s",
+      permissionId: "perm-plan",
+      response: { behavior: "allow", selectedActionId: "implement" },
+    });
+    await waitFor(events, (event) => event.type === "session.permission_resolved");
+    expect(decision).toMatchObject({ behavior: "allow" });
+    expect(fake.state.setPermissionModeCalls).toContain("acceptEdits");
+    const config = events.filter((event) => event.type === "session.config").pop();
+    expect(config).toMatchObject({ config: { mode: "acceptEdits" } });
+  });
+
+  it("applies the fast mode toggle live and reports it in the config state", async () => {
+    const { fake, events, send } = await createHarness();
+    await send({
+      ...openInput,
+      config: { ...openInput.config, model: "claude-opus-4-7" },
+    });
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hi"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const config = events.filter((event) => event.type === "session.config").pop();
+    expect(config).toMatchObject({
+      config: { settings: [{ type: "toggle", id: "fast_mode", value: false }] },
+    });
+    await send({
+      type: "session.configure",
+      requestId: "r-fast",
+      sessionId: "s",
+      changes: { settings: { fast_mode: true } },
+    });
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.config" &&
+        event.config.settings[0]?.id === "fast_mode" &&
+        event.config.settings[0]?.value === true,
+    );
+    expect(fake.state.applyFlagSettingsCalls).toContainEqual({ fastMode: true });
+  });
+
+  it("starts rebuilt queries with fast mode when the toggle was on", async () => {
+    const { fake, events, send } = await createHarness();
+    await send({
+      ...openInput,
+      config: { ...openInput.config, model: "claude-opus-4-7", settings: { fast_mode: true } },
+    });
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hi"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(fake.state.options?.settings).toMatchObject({ fastMode: true });
+  });
+
+  it("passes mcp servers, provider options and tool policy to the SDK", async () => {
+    const { fake, events, send } = await createHarness();
+    await send({
+      ...openInput,
+      config: {
+        ...openInput.config,
+        mcpServers: {
+          linear: { type: "stdio", command: "npx", args: ["-y", "linear-mcp"], env: { K: "V" } },
+        },
+        toolPolicy: { preapproved: [{ kind: "mcp", server: "linear", tool: "list_issues" }] },
+        providerOptions: {
+          disallowedTools: ["WebSearch"],
+          additionalDirectories: ["E:\\extra"],
+          sandbox: { enabled: true },
+          settings: { permissions: { allow: ["Bash(npm:*)"] } },
+        },
+      },
+    });
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hi"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(fake.state.options?.mcpServers).toMatchObject({
+      linear: { type: "stdio", command: "npx", args: ["-y", "linear-mcp"], env: { K: "V" } },
+    });
+    expect(fake.state.options?.allowedTools).toEqual(["mcp__linear__list_issues"]);
+    expect(fake.state.options?.disallowedTools).toEqual(["WebSearch"]);
+    expect(fake.state.options?.additionalDirectories).toEqual(["E:\\extra"]);
+    expect(fake.state.options?.sandbox).toEqual({ enabled: true });
+    expect(fake.state.options?.settings).toEqual({
+      permissions: { allow: ["Bash(npm:*)"] },
+    });
+  });
+
+  it("rewinds files and forks the conversation to the anchor message", async () => {
+    const { fake } = await createHarness();
+    const events: ProviderEvent[] = [];
+    const provider = createTranslateClaudeProvider({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch(),
+      queryFactory: fake.factory,
+      forkSession: async (_sessionId, options) => {
+        return { sessionId: `${_sessionId}-fork-${options.upToMessageId.slice(0, 4)}` };
+      },
+    });
+    const registration = await provider.connect({
+      versions: [1],
+      capabilities: [...PROVIDER_CAPABILITIES],
+    });
+    const sendVia = (input: ProviderInput) => registration.send(input);
+    registration.onEvent((event) => events.push(event));
+    await sendVia(openInput);
+    fake.use(async function* () {
+      // The SDK echoes the submitted prompt back with its Claude-side uuid.
+      yield {
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "DE(Hi)" }] },
+        parent_tool_use_id: null,
+        uuid: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+        session_id: "cs-1",
+      } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "ok");
+    });
+    await sendVia(promptInput("Hello"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // The echoed prompt registered a rewind target.
+    const anchor = events.find(
+      (event) => event.type === "timeline.item" && event.item.type === "user_message",
+    );
+    expect(anchor).toMatchObject({
+      item: { revertToken: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f" },
+    });
+    await sendVia({
+      type: "session.revert",
+      requestId: "r-rewind",
+      sessionId: "s",
+      token: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+      scope: "both",
+    });
+    await waitFor(
+      events,
+      (event) => event.type === "request.completed" && event.requestId === "r-rewind",
+    );
+    // Files rewind ran through the query; the conversation forked and persistence rebinds.
+    expect(fake.state.rewindFilesCalls).toEqual([
+      { userMessageId: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f", dryRun: false },
+    ]);
+    const persistence = events.filter((event) => event.type === "session.persistence").pop();
+    expect(persistence).toMatchObject({
+      persistence: { data: { claudeSessionId: "cs-1-fork-0f0f" } },
+    });
+    // The next prompt resumes the forked Claude session.
+    fake.use(async function* () {
+      yield resultSuccess("cs-1-fork", "ok");
+    });
+    await sendVia(promptInput("Again", "m-2"));
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" && event.state === "completed" &&
+        events.filter((item) => item.type === "session.turn" && item.state === "completed").length >= 2,
+    );
+    expect(fake.state.options?.resume).toBe("cs-1-fork-0f0f");
+  });
+
+  it("lists sessions from Claude's transcript directory", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-list-"));
+    const projectDir = path.join(configDir, "projects", "E--repo");
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f.jsonl"),
+      `${JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "Fix the bug" }] },
+        timestamp: "2025-01-01T00:00:00Z",
+      })}\n`,
+    );
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    try {
+      const { events, send } = await createHarness();
+      await send(openInput);
+      await send({ type: "sessions", requestId: "r-list", cwd: "E:\\repo", limit: 10 });
+      await waitFor(events, (event) => event.type === "sessions");
+      const listing = events.find((event) => event.type === "sessions");
+      expect(listing).toMatchObject({
+        sessions: [
+          {
+            persistence: { version: 1, data: { claudeSessionId: "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f" } },
+            cwd: "E:\\repo",
+            title: "Fix the bug",
+          },
+        ],
+      });
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists the newest sessions first and follows trailing-slash cwd", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { claudeProjectDir } = await import("./claude-project-dir");
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-list-"));
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    try {
+      const cwd = "E:\\repo";
+      const projectDir = claudeProjectDir(cwd);
+      fs.mkdirSync(projectDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(projectDir, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Older" }] },
+          timestamp: "2025-01-01T00:00:00Z",
+        })}\n`,
+      );
+      fs.writeFileSync(
+        path.join(projectDir, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Newer" }] },
+          timestamp: "2025-06-01T00:00:00Z",
+        })}\n`,
+      );
+      const { events, send } = await createHarness();
+      await send(openInput);
+      await send({ type: "sessions", requestId: "r-list", cwd: `${cwd}\\`, limit: 1 });
+      await waitFor(events, (event) => event.type === "sessions");
+      const listing = events.find((event) => event.type === "sessions");
+      expect(listing).toMatchObject({
+        sessions: [{ title: "Newer" }],
+      });
+      expect((listing as { sessions: unknown[] }).sessions).toHaveLength(1);
+    } finally {
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rewinds files on a session that has never prompted", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    await send({
+      type: "session.revert",
+      requestId: "r-files",
+      sessionId: "s",
+      token: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+      scope: "files",
+    });
+    await waitFor(
+      events,
+      (event) => event.type === "request.completed" && event.requestId === "r-files",
+    );
+    expect(fake.state.rewindFilesCalls).toEqual([
+      { userMessageId: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f", dryRun: false },
+    ]);
+    expect(fake.state.spawnCount).toBe(1);
+  });
+
+  it("does not move the parent ring from a sidechain stream_event", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield {
+        type: "stream_event",
+        event: {
+          type: "message_start",
+          message: { usage: { input_tokens: 9, output_tokens: 0 } },
+        },
+        parent_tool_use_id: null,
+      } as unknown as SDKMessage;
+      yield {
+        type: "stream_event",
+        event: {
+          type: "message_start",
+          message: { usage: { input_tokens: 88000, output_tokens: 0 } },
+        },
+        parent_tool_use_id: "tu-child",
+      } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Status"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const usageEvents = events.filter((event) => event.type === "session.usage");
+    expect(usageEvents.some((event) => event.type === "session.usage" && event.usage.contextWindowUsedTokens === 88000)).toBe(false);
+    expect(usageEvents.some((event) => event.type === "session.usage" && event.usage.contextWindowUsedTokens === 9)).toBe(true);
+  });
+
+  it("resumes bypass permissions when the plan card's resume action is chosen", async () => {
+    const { fake, events, send } = await createHarness();
+    await send({
+      ...openInput,
+      config: { ...openInput.config, mode: "bypassPermissions" },
+    });
+    await send({
+      type: "session.configure",
+      requestId: "r-plan",
+      sessionId: "s",
+      changes: { mode: "plan" },
+    });
+    fake.use(async function* (_pushed) {
+      const decision = await fake.state.options?.canUseTool?.(
+        "ExitPlanMode",
+        { plan: "Ship it" },
+        { signal: new AbortController().signal, requestId: "perm-plan-2", toolUseID: "tu-plan-2" },
+      );
+      expect(decision).toMatchObject({ behavior: "allow" });
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Plan"));
+    await waitFor(events, (event) => event.type === "session.permission" && event.request.kind === "plan");
+    const card = events.find(
+      (event) => event.type === "session.permission" && event.request.kind === "plan",
+    );
+    expect(card).toMatchObject({
+      request: {
+        actions: expect.arrayContaining([
+          expect.objectContaining({ id: "implement_resume", intent: "implement_resume" }),
+        ]),
+      },
+    });
+    await send({
+      type: "session.permission",
+      sessionId: "s",
+      permissionId: "perm-plan-2",
+      response: { behavior: "allow", selectedActionId: "implement_resume" },
+    });
+    await waitFor(events, (event) => event.type === "session.permission_resolved");
+    expect(fake.state.setPermissionModeCalls).toContain("bypassPermissions");
+  });
+
+  it("keeps thinking effort when fast mode and providerOptions.settings coexist", async () => {
+    const { fake, events, send } = await createHarness();
+    await send({
+      ...openInput,
+      config: {
+        ...openInput.config,
+        model: "claude-opus-4-7",
+        thinkingOption: "high",
+        settings: { fast_mode: true },
+        providerOptions: { settings: { effortLevel: "low" } },
+      },
+    });
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hi"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(fake.state.options?.settings).toMatchObject({ effortLevel: "high", fastMode: true });
+  });
+
+  it("clears a stale resume id when the stored conversation is missing", async () => {
+    const { fake, events, send } = await createHarness();
+    await send({
+      ...openInput,
+      persistence: { version: 1, data: { claudeSessionId: "cs-old" } },
+    });
+    fake.use(async function* () {
+      // Official-shaped: no session_id on the error result. Detection must
+      // use the stored resume id, not this frame's session_id.
+      yield {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        errors: ["No conversation found with session ID: cs-old"],
+      } as unknown as SDKMessage;
+      return END_ITERATOR;
+    });
+    await send(promptInput("Hi"));
+    await waitFor(events, (event) => event.type === "session.notice");
+    expect(events.find((event) => event.type === "session.notice")).toMatchObject({
+      notice: { id: "claude-resume-missing", severity: "warning" },
+    });
+    expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+    const persistence = events.filter((event) => event.type === "session.persistence").pop();
+    expect(persistence).toMatchObject({ persistence: { data: {} } });
+    fake.use(async function* () {
+      yield resultSuccess("cs-2", "ok");
+    });
+    await send(promptInput("Again", "m-2"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(fake.state.spawnCount).toBe(2);
+    expect(fake.state.options?.resume).toBeUndefined();
   });
 
   it("carries the ring across turns and overwrites it on the next call", async () => {
@@ -1423,8 +1946,8 @@ describe("translate claude provider extended protocol", () => {
     );
     const usageEvents = events.filter((event) => event.type === "session.usage");
     expect(usageEvents).toHaveLength(2);
-    expect(usageEvents[0]).toMatchObject({ usage: { contextWindowUsedTokens: 5000 } });
-    expect(usageEvents[1]).toMatchObject({ usage: { contextWindowUsedTokens: 10000 } });
+    expect(usageEvents[0]).toMatchObject({ usage: { contextWindowUsedTokens: 5010 } });
+    expect(usageEvents[1]).toMatchObject({ usage: { contextWindowUsedTokens: 10010 } });
   });
 
   it("keeps the last ring measurement when a later frame carries zero usage", async () => {
@@ -1465,7 +1988,7 @@ describe("translate claude provider extended protocol", () => {
     );
     const usageEvents = events.filter((event) => event.type === "session.usage");
     expect(usageEvents).toHaveLength(2);
-    expect(usageEvents[1]).toMatchObject({ usage: { contextWindowUsedTokens: 5000 } });
+    expect(usageEvents[1]).toMatchObject({ usage: { contextWindowUsedTokens: 5010 } });
   });
 
   it("re-emits the retained ring on a later turn without assistant usage", async () => {
@@ -1503,7 +2026,7 @@ describe("translate claude provider extended protocol", () => {
     const usageEvents = events.filter((event) => event.type === "session.usage");
     expect(usageEvents).toHaveLength(2);
     expect(usageEvents[1]).toMatchObject({
-      usage: { contextWindowUsedTokens: 5000, contextWindowMaxTokens: 200000 },
+      usage: { contextWindowUsedTokens: 5010, contextWindowMaxTokens: 200000 },
     });
   });
 
@@ -1633,6 +2156,63 @@ describe("translate claude provider extended protocol", () => {
       sessionId: "s",
       commands: [{ name: "review", description: "Review code" }],
     });
+  });
+
+  it("rewinds files from a replayed user message revertToken", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const { claudeProjectDir } = await import("./claude-project-dir");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    process.env["CLAUDE_CONFIG_DIR"] = configDir;
+    try {
+      const projectDir = claudeProjectDir(cwd);
+      await fs.mkdir(projectDir, { recursive: true });
+      await fs.writeFile(
+        pathModule.join(projectDir, "cs-replay.jsonl"),
+        JSON.stringify({
+          type: "user",
+          uuid: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+          message: { content: [{ type: "text", text: "Hello" }] },
+          parent_tool_use_id: null,
+        }),
+      );
+      const { fake, events, send } = await createHarness({ translatePrompts: false });
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-replay" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      const replayed = events.find(
+        (event) => event.type === "timeline.item" && event.item.type === "user_message",
+      );
+      expect(replayed).toMatchObject({
+        item: { revertToken: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f" },
+      });
+      await send({
+        type: "session.revert",
+        requestId: "r-replay-rewind",
+        sessionId: "s",
+        token: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+        scope: "files",
+      });
+      await waitFor(
+        events,
+        (event) => event.type === "request.completed" && event.requestId === "r-replay-rewind",
+      );
+      expect(fake.state.rewindFilesCalls).toEqual([
+        { userMessageId: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f", dryRun: false },
+      ]);
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
   });
 
   it("replays persisted transcripts including subagent sidecars", async () => {

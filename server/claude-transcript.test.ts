@@ -29,9 +29,10 @@ function assistantText(text: string): string {
   });
 }
 
-function userText(text: string): string {
+function userText(text: string, uuid?: string): string {
   return JSON.stringify({
     type: "user",
+    uuid,
     message: { content: [{ type: "text", text }] },
   });
 }
@@ -351,5 +352,19 @@ describe("user text restoration", () => {
     // One bad block degrades to its translated text; the good block and the
     // replay as a whole survive.
     expect(textsOf(result.rootItems)).toEqual(["R:good\nbad"]);
+  });
+
+  it("stamps replayed user messages with the Claude uuid as revertToken", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [
+      userText("Hello", "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"),
+    ]);
+    const result = await replay(fixture);
+    expect(result.rootItems[0]).toMatchObject({
+      type: "user_message",
+      text: "Hello",
+      messageId: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+      revertToken: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
+    });
   });
 });

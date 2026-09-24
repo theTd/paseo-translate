@@ -1,9 +1,8 @@
-import { realpathSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
+import { claudeProjectDir } from "./claude-project-dir";
 
 /**
  * Best-effort history replay for the Translate (Claude Code) provider.
@@ -29,7 +28,6 @@ import { describeFinishedTool, describeRunningTool } from "./claude-tool-details
  * spend).
  */
 
-const PROJECT_DIR_LENGTH_CAP = 200;
 /**
  * Replay windows, all tail-kept: a long session replays its MOST RECENT
  * lines/items, never its oldest. The daemon renders the bottom of the
@@ -106,30 +104,6 @@ export interface ReplayResult {
 export interface ReplayUserTextRestore {
   restoreRootBlock: (translatedBlock: string) => Promise<string> | string;
   restoreChildBlock: (translatedBlock: string) => Promise<string> | string;
-}
-
-function resolveConfigDir(): string {
-  const override = process.env["CLAUDE_CONFIG_DIR"];
-  if (typeof override === "string" && override.length > 0) return override;
-  return join(homedir(), ".claude");
-}
-
-function encodeProjectDir(input: string): string {
-  const replaced = input.replace(/[^a-zA-Z0-9]/g, "-");
-  if (replaced.length <= PROJECT_DIR_LENGTH_CAP) return replaced;
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    hash = ((hash << 5) - hash + input.charCodeAt(i)) | 0;
-  }
-  return `${replaced.slice(0, PROJECT_DIR_LENGTH_CAP)}-${Math.abs(hash).toString(36)}`;
-}
-
-function canonicalize(input: string): string {
-  try {
-    return realpathSync.native(input);
-  } catch {
-    return input;
-  }
 }
 
 function readString(value: unknown): string | undefined {
@@ -332,6 +306,7 @@ async function collectEntry(
             type: "user_message",
             id: `${idSeed}`,
             text: await restoreBlock(text),
+            ...rewindIdentity(entry),
           } satisfies ProviderTimelineItem),
         );
       }
@@ -375,10 +350,25 @@ async function collectEntry(
           type: "user_message",
           id: `${idSeed}`,
           text: texts.join("\n"),
+            ...rewindIdentity(entry),
         } satisfies ProviderTimelineItem),
       );
     }
   }
+}
+
+/** Live rewind anchors use the Claude-side user uuid as revertToken. */
+function rewindIdentity(
+  entry: ReplayEntry,
+): { messageId: string; revertToken: string } | Record<string, never> {
+  const uuid = typeof entry.uuid === "string" ? entry.uuid : undefined;
+  if (uuid === undefined || uuid.length === 0) return {};
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid)
+  ) {
+    return {};
+  }
+  return { messageId: uuid, revertToken: uuid };
 }
 
 function flattenReplayContent(content: unknown): string | null {
@@ -432,7 +422,7 @@ async function readReplayInner(
   claudeSessionId: string,
   restore?: ReplayUserTextRestore,
 ): Promise<ReplayResult> {
-  const projectDir = join(resolveConfigDir(), "projects", encodeProjectDir(canonicalize(cwd)));
+  const projectDir = claudeProjectDir(cwd);
   const entries = await readJsonLines(join(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
 

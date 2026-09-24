@@ -36,7 +36,7 @@ __export(claude_provider_exports, {
 module.exports = __toCommonJS(claude_provider_exports);
 var import_node_crypto5 = require("node:crypto");
 var import_node_fs3 = require("node:fs");
-var import_node_path4 = __toESM(require("node:path"));
+var import_node_path6 = __toESM(require("node:path"));
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_node_module = require("node:module");
@@ -121,25 +121,36 @@ var import_path9 = require("path");
 var import_fs9 = require("fs");
 var import_events3 = require("events");
 var import_fs10 = require("fs");
+var import_promises9 = require("fs/promises");
+var import_path10 = require("path");
 var import_child_process3 = require("child_process");
 var import_util3 = require("util");
-var import_promises9 = require("fs/promises");
-var import_os6 = require("os");
-var import_path10 = require("path");
-var import_crypto7 = require("crypto");
-var import_os7 = require("os");
-var import_path11 = require("path");
-var import_path12 = require("path");
-var import_path13 = require("path");
-var import_path14 = require("path");
-var import_crypto8 = require("crypto");
-var import_path15 = require("path");
-var import_path16 = require("path");
-var import_path17 = require("path");
-var import_net = require("net");
-var import_os8 = require("os");
 var import_child_process4 = require("child_process");
 var import_fs11 = require("fs");
+var import_path11 = require("path");
+var import_path12 = require("path");
+var import_promises10 = require("fs/promises");
+var import_path13 = require("path");
+var import_path14 = require("path");
+var import_crypto7 = require("crypto");
+var import_path15 = require("path");
+var import_promises11 = require("fs/promises");
+var import_os6 = require("os");
+var import_path16 = require("path");
+var import_crypto8 = require("crypto");
+var import_os7 = require("os");
+var import_path17 = require("path");
+var import_path18 = require("path");
+var import_path19 = require("path");
+var import_path20 = require("path");
+var import_crypto9 = require("crypto");
+var import_path21 = require("path");
+var import_path22 = require("path");
+var import_path23 = require("path");
+var import_net = require("net");
+var import_os8 = require("os");
+var import_child_process5 = require("child_process");
+var import_fs12 = require("fs");
 var import_meta = { url: (typeof require === "function" && typeof process !== "undefined" && process.argv && process.argv[1] ? require("url").pathToFileURL(process.argv[1]) : { href: "file:///" }) };
 var PQ = Object.create;
 var { getPrototypeOf: IQ, defineProperty: QS, getOwnPropertyNames: DQ } = Object;
@@ -16051,6 +16062,37 @@ function MD(e, t, n = 0) {
   while (o !== -1) r++, o = e.indexOf(t, o + 1);
   return r;
 }
+var aee = /^(?:\s*<[a-z][\w-]*[\s>]|\[Request interrupted by user[^\]]*\])/;
+var cee = /<command-name>(.*?)<\/command-name>/;
+function yd(e, t) {
+  if (e.type !== "user") return;
+  if (e.isMeta === true || e.isCompactSummary === true) return;
+  let n = e.message;
+  if (!n) return;
+  let r = n.content, o = [];
+  if (typeof r === "string") o.push(r);
+  else if (Array.isArray(r)) for (let s of r) {
+    if (!s || typeof s !== "object") continue;
+    if (s.type === "tool_result") return;
+    if (s.type === "text" && typeof s.text === "string") o.push(s.text);
+  }
+  for (let s of o) {
+    let i = s.replaceAll(`
+`, " ").trim();
+    if (!i) continue;
+    let a = cee.exec(i);
+    if (a) {
+      if (!t.commandFallback) t.commandFallback = a[1];
+      continue;
+    }
+    let c = /<bash-input>([\s\S]*?)<\/bash-input>/.exec(i);
+    if (c) return `! ${c[1].trim()}`;
+    if (aee.test(i)) continue;
+    if (i.length > 200) i = _d(i, 200).trim() + "\u2026";
+    return i;
+  }
+  return;
+}
 function cs(e) {
   return !Array.isArray ? KD(e) === "[object Array]" : Array.isArray(e);
 }
@@ -22433,6 +22475,9 @@ function CF() {
   if (n) e = { ...e, CLIENT_ID: n };
   return e;
 }
+function J(e, t) {
+  return { code: "InvalidArgument", argument: e, ...t !== void 0 && { reason: t } };
+}
 var kF = { home: (e) => ({ space: "home", path: e }), workspace: (e) => ({ space: "workspace", path: e }), system: (e) => ({ space: "system", path: e }), userNamed: (e) => ({ space: "userNamed", path: e }) };
 var zw = globalThis.process?.getBuiltinModule?.("async_hooks");
 var RF = zw !== void 0;
@@ -26074,6 +26119,23 @@ function gy(e) {
 function _u(e) {
   return e.startsWith("\uFEFF") ? e.slice(1) : e;
 }
+async function So(e, t, n) {
+  let r = Math.max(1, Math.floor(n?.maxPages ?? 1e4)), o;
+  for (let s = 0; s < r; s++) {
+    if (n?.budget !== void 0) {
+      if (n.budget.pagesLeft < 1) return { status: "capped" };
+      n.budget.pagesLeft--;
+    }
+    let i = await e(o);
+    if (!i.ok) return { status: "error", error: i.error };
+    if (await t(i.value.items), n?.until?.()) return { status: "done" };
+    if (o = i.value.cursor, !o) return { status: "done" };
+  }
+  return { status: "capped" };
+}
+function MUe() {
+  return process.platform === "win32";
+}
 var yW = class {
   resolved = /* @__PURE__ */ new Map();
   lookup(e) {
@@ -26087,11 +26149,140 @@ var yW = class {
   }
 };
 var NUe = new tt(() => new yW());
+var UUe = 5e3;
+function _W(e) {
+  try {
+    return (0, import_fs11.lstatSync)(e, { throwIfNoEntry: false }) === void 0;
+  } catch {
+    return false;
+  }
+}
+var FUe = /* @__PURE__ */ new Set([".com", ".exe", ".bat", ".cmd"]);
+function jUe(e) {
+  let t = e.toLowerCase().replace(/.*[\\/]/, "").replace(/[. ]+$/, ""), n = t.lastIndexOf(".");
+  return n > 0 && FUe.has(t.slice(n));
+}
+function $Ue(e, t = false) {
+  let n = NUe.of(Tt().host), r = n.lookup(e);
+  if (r !== void 0) if (r !== null) {
+    if (!_W(r)) return r;
+    n.forget(e);
+  } else {
+    if (!t) return r;
+    n.forget(e);
+  }
+  let o = Mn.SYSTEMROOT || "C:\\Windows", s = (0, import_path11.join)(o, "System32", "where.exe");
+  try {
+    let a = (0, import_child_process4.execFileSync)(s, [e], { stdio: "pipe", encoding: "utf8", timeout: UUe, windowsHide: true, env: process.env }).trim().split(/\r?\n/).filter(Boolean), c = process.cwd(), l = false;
+    for (let u of a) {
+      if (_W(u)) continue;
+      if (gh(u, c)) {
+        l = true;
+        continue;
+      }
+      if (!jUe(u)) continue;
+      return n.remember(e, u), u;
+    }
+    if (a.length > 0 && !l) n.remember(e, null);
+    return null;
+  } catch (i) {
+    if (zUe(i)) n.remember(e, null);
+    return null;
+  }
+}
+function zUe(e) {
+  if (e === null || typeof e !== "object") return false;
+  let t = "status" in e ? e.status : void 0, n = "signal" in e ? e.signal : void 0, r = "code" in e ? e.code : void 0;
+  return t === 1 && !n && !r;
+}
+function bW(e, t = false) {
+  if (!MUe()) return e;
+  if (e.includes("/") || e.includes("\\")) return e;
+  return $Ue(e, t);
+}
 var KUe = (0, import_util3.promisify)(import_child_process3.execFile);
+async function Ts(e) {
+  let t = bW("git");
+  if (t === null) return [];
+  try {
+    let { stdout: n } = await KUe(t, ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=", "worktree", "list", "--porcelain"], { cwd: e, timeout: 5e3, windowsHide: true });
+    if (!n) return [];
+    return n.split(`
+`).filter((r) => r.startsWith("worktree ")).map((r) => ct(r.slice(9)));
+  } catch {
+    return [];
+  }
+}
+var Cr = 65536;
 var YUe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 function rt(e) {
   if (typeof e !== "string") return null;
   return YUe.test(e) ? e : null;
+}
+function PW(e) {
+  if (!e.includes("\\")) return e;
+  try {
+    return JSON.parse(`"${e}"`);
+  } catch {
+    return e;
+  }
+}
+function un(e, t) {
+  let n = [`"${t}":"`, `"${t}": "`], r, o = -1;
+  for (let s of n) {
+    let i = 0;
+    while (true) {
+      let a = e.indexOf(s, i);
+      if (a < 0) break;
+      let c = a + s.length, l = c;
+      while (l < e.length) {
+        if (e[l] === "\\") {
+          l += 2;
+          continue;
+        }
+        if (e[l] === '"') {
+          if (a > o) r = PW(e.slice(c, l)), o = a;
+          break;
+        }
+        l++;
+      }
+      i = l + 1;
+    }
+  }
+  return r;
+}
+function Sy(e, t, n) {
+  let r = `"type":"${t}"`, o = `"${n}":`, s = e.length;
+  while (s > 0) {
+    let i = e.lastIndexOf(`
+`, s - 1), a = e.slice(i + 1, s);
+    if (s = i, a.includes(r) && a.includes(o)) try {
+      let c = JSON.parse(a);
+      if (typeof c === "object" && c !== null && c.type === t) {
+        let l = c[n];
+        if (typeof l === "string") return l;
+      }
+    } catch {
+    }
+    if (i < 0) break;
+  }
+  return;
+}
+function GC(e, t) {
+  let n = `"${t}":`, r = 0;
+  while (r < e.length) {
+    let o = e.indexOf(`
+`, r), s = o < 0 ? e.slice(r) : e.slice(r, o);
+    if (r = o < 0 ? e.length : o + 1, s.includes(n)) try {
+      let i = JSON.parse(s);
+      if (typeof i === "object" && i !== null) {
+        let a = i[t];
+        if (typeof a === "string") return a;
+      }
+    } catch {
+    }
+  }
+  return;
 }
 async function Kf(e, t, n) {
   return JUe(e, t, "w", n);
@@ -26118,8 +26309,83 @@ async function XUe(e, t, n) {
   let i = await r.append(o, s);
   if (!i.ok) throw Error("transcript stream append failed", { cause: i.error });
 }
+function Ey(e) {
+  let t = 0, n = { commandFallback: "" };
+  while (t < e.length) {
+    let r = e.indexOf(`
+`, t), o = r >= 0 ? e.slice(t, r) : e.slice(t);
+    if (t = r >= 0 ? r + 1 : e.length, !o.includes('"type":"user"') && !o.includes('"type": "user"')) continue;
+    if (o.includes('"tool_result"')) continue;
+    if (o.includes('"isMeta":true') || o.includes('"isMeta": true')) continue;
+    if (o.includes('"isCompactSummary":true') || o.includes('"isCompactSummary": true')) continue;
+    try {
+      let s = JSON.parse(o), i = yd(s, n);
+      if (i !== void 0) return i;
+    } catch {
+      continue;
+    }
+  }
+  return n.commandFallback;
+}
+function IW(e) {
+  let t = { commandFallback: "" };
+  for (let n of e) {
+    if (typeof n !== "object" || n === null) continue;
+    let r = yd(n, t);
+    if (r !== void 0) return r;
+  }
+  return t.commandFallback;
+}
+async function QUe(e) {
+  let { backend: t, key: n } = e;
+  try {
+    let r = await t.read([{ key: n, offset: 0, length: Cr }, { key: n, tail: Cr }]);
+    if (!r.ok) return null;
+    let [o, s] = r.value.items;
+    if (!o.found || o.value.length === 0) return null;
+    let i = EW(o.value), a = s.found && s.value.length > 0 ? EW(s.value) : i;
+    return { head: i, tail: a, mtimeMs: o.mtimeMs, totalBytes: o.totalBytes };
+  } catch {
+    return null;
+  }
+}
+function EW(e) {
+  return Buffer.from(e.buffer, e.byteOffset, e.byteLength).toString("utf8");
+}
 var rkt = Buffer.from('"type":"user"');
 var okt = Buffer.from('"type":"assistant"');
+function xy(e, t) {
+  if (e.kind !== "scope" || e.scope.namespace !== "transcript" || e.scope.projectKey === void 0 || e.scope.sessionId !== void 0 || !t(e.scope.projectKey)) return;
+  return e.scope.projectKey;
+}
+function DW(e) {
+  return { skipScopeStats: true, skipKeyStats: true, ...e !== void 0 && { cursor: e } };
+}
+async function Gf(e, t) {
+  if (t !== void 0 && t.hoverRestOn) return LW(t.source);
+  try {
+    let n = await (0, import_promises9.open)(e, "r");
+    try {
+      let r = await n.stat(), o = Buffer.allocUnsafe(Cr), s = await n.read(o, 0, Cr, 0);
+      if (s.bytesRead === 0) return null;
+      let i = o.toString("utf8", 0, s.bytesRead), a = Math.max(0, r.size - Cr), c = i;
+      if (a > 0) {
+        let l = await n.read(o, 0, Cr, a);
+        c = o.toString("utf8", 0, l.bytesRead);
+      }
+      return { mtime: r.mtime.getTime(), size: r.size, head: i, tail: c };
+    } finally {
+      await n.close();
+    }
+  } catch {
+    return null;
+  }
+}
+async function LW(e) {
+  let t = await QUe(e);
+  if (t === null) return null;
+  return { mtime: Math.trunc(t.mtimeMs), size: t.totalBytes, head: t.head, tail: t.tail };
+}
 var Cs = 200;
 function tFe(e) {
   return Math.abs(rA(e)).toString(36);
@@ -26132,15 +26398,191 @@ function Wf(e) {
   if (t.length <= Cs) return t;
   return `${t.slice(0, Cs)}-${tFe(e)}`;
 }
+function bt() {
+  return (0, import_path10.join)(Gt(), "projects");
+}
 function ks(e) {
   return BL() ?? Wf(e);
+}
+function qC(e) {
+  let t = Wf(e);
+  return t === ks(e) ? void 0 : t;
+}
+function Su(e) {
+  return (0, import_path10.join)(bt(), ks(e));
+}
+function Ba(e, t) {
+  let n = (0, import_path10.basename)(e);
+  return (0, import_path10.dirname)(e) === bt() && t(n) ? n : void 0;
+}
+async function Rs(e) {
+  try {
+    return ct(await (0, import_promises9.realpath)(e));
+  } catch {
+    return ct(e);
+  }
+}
+async function Eu(e, t, n, r) {
+  let o = r !== void 0 && r.hoverRestOn ? r.source : void 0, s = o === void 0 ? void 0 : Ba(e, o.isKeySegment);
+  if (o !== void 0 && s !== void 0) {
+    let c = await nFe(s, t, n, o);
+    if (c !== void 0) return c;
+  }
+  let i = bu(t), a;
+  try {
+    a = await (0, import_promises9.readdir)(e, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (let c of a) {
+    if (!c.isFile() || !c.name.endsWith(".jsonl")) continue;
+    let l = await Gf((0, import_path10.join)(e, c.name));
+    if (l === null) continue;
+    if (UW(l, i, n)) return true;
+  }
+  return false;
+}
+function UW(e, t, n) {
+  let r = Sy(e.tail, "relocated", "relocatedCwd") ?? GC(e.head, "cwd");
+  if (r === void 0) return false;
+  let o = bu(ct(r));
+  return n ? o.toLowerCase() === t.toLowerCase() : o === t;
+}
+async function nFe(e, t, n, r) {
+  let { backend: o, transcriptKey: s, isKeySegment: i } = r, a = bu(t), c = false, l = /* @__PURE__ */ new Set();
+  try {
+    let u = await So((p) => o.listEntries({ namespace: "transcript", projectKey: e }, DW(p)), async (p) => {
+      for (let f of p) {
+        if (f.kind !== "key" || f.key.namespace !== "transcript" || f.key.projectKey !== e || f.key.agentId !== void 0 || !i(f.key.sessionId) || l.has(f.key.sessionId)) continue;
+        let m = f.key.sessionId, h = await LW({ backend: o, key: s(e, m) });
+        if (h === null) continue;
+        if (l.add(m), UW(h, a, n)) {
+          c = true;
+          return;
+        }
+      }
+    }, { until: () => c });
+    if (c) return true;
+    if (u.status !== "done") return;
+  } catch {
+    return;
+  }
+  return false;
+}
+async function Qn(e, t) {
+  if (t !== void 0 && t.hoverRestOn) return rFe(e, t);
+  let n = Su(e), r = [];
+  try {
+    await (0, import_promises9.readdir)(n), r.push(n);
+  } catch {
+  }
+  let o = qC(e);
+  if (o !== void 0) {
+    let p = (0, import_path10.join)(bt(), o);
+    try {
+      await (0, import_promises9.readdir)(p), r.push(p);
+    } catch {
+    }
+    return r;
+  }
+  let s = Wf(e);
+  if (s.length <= Cs) return r;
+  let i = bt(), a = process.platform === "win32", c = (p) => a ? p.toLowerCase() : p, l = c(s.slice(0, Cs) + "-"), u = c(n);
+  try {
+    for (let p of await (0, import_promises9.readdir)(i, { withFileTypes: true })) {
+      if (!p.isDirectory() || !c(p.name).startsWith(l)) continue;
+      let f = (0, import_path10.join)(i, p.name);
+      if (c(f) !== u && await Eu(f, e, a)) r.push(f);
+    }
+  } catch {
+  }
+  return r;
+}
+async function rFe(e, t) {
+  let n = await xu(t.source);
+  if (n === null) {
+    let r = qC(e);
+    return [Su(e), ...r !== void 0 ? [(0, import_path10.join)(bt(), r)] : []];
+  }
+  return VC(e, n, process.platform === "win32", t);
+}
+async function xu(e) {
+  let { backend: t, isKeySegment: n } = e, r = [], o = /* @__PURE__ */ new Set(), s = 0;
+  try {
+    if ((await So((a) => t.listEntries({ namespace: "transcript" }, DW(a)), (a) => {
+      for (let c of a) {
+        let l = xy(c, n);
+        if (l !== void 0 && !o.has(l)) o.add(l), r.push(l);
+      }
+      s++;
+    })).status === "error") return s === 0 ? null : r;
+  } catch {
+    return s === 0 ? null : r;
+  }
+  return r;
+}
+async function VC(e, t, n, r) {
+  let o = ks(e), s = Su(e), i = qC(e), a = i === void 0 && o.length > Cs ? o.slice(0, Cs) + "-" : void 0, c = bt(), l = (S) => n ? S.toLowerCase() : S, u = a !== void 0 ? l(a) : void 0, p = l(o), f = false, m, h = [], g = /* @__PURE__ */ new Set();
+  for (let S of t) if (S === o) f = true;
+  else if (i !== void 0) {
+    if (m === void 0 && l(S) === l(i)) m = (0, import_path10.join)(c, S);
+  } else if (u !== void 0 && l(S).startsWith(u) && l(S) !== p && !g.has(l(S))) g.add(l(S)), h.push(S);
+  let y = [];
+  for (let S of h) {
+    let b = (0, import_path10.join)(c, S);
+    if (await Eu(b, e, n, r)) y.push(b);
+  }
+  return [...f ? [s] : [], ...m !== void 0 ? [m] : [], ...y];
 }
 var iFe = Buffer.from('"compact_boundary"');
 var by = Buffer.from('{"type":"attribution-snapshot"');
 var aFe = Buffer.from('{"type":"system"');
 var Bf = 10;
 var cFe = Buffer.from([Bf]);
+var zW = /^[0-9a-f]{16}(?:[0-9a-f]{48})?@v\d+$/;
+function HW(e, t, n) {
+  return { type: "history-suppression", sessionId: e, cause: t, ...n && { vetoedAgainstAccountUuid: n }, ts: (/* @__PURE__ */ new Date()).toISOString() };
+}
 var uFe = String.fromCharCode(0);
+var dFe = /^\.[0-9a-f]{16}\.aside$/;
+function pFe(e) {
+  if (e.charCodeAt(0) !== 46) return false;
+  return Os(e).some((t) => dFe.test(t));
+}
+function BW(e) {
+  return typeof e === "string" && /^[. ]+$/.test(e);
+}
+function dn(e) {
+  return !(typeof e !== "string" || e.length === 0 || BW(e) || e.includes("/") || e.includes("\\") || e.includes(uFe) || pFe(e));
+}
+function er(e) {
+  return e.length > 0 && e.every(dn);
+}
+function qf(e) {
+  return Os(e).some((t) => t.endsWith(".jsonl"));
+}
+function Os(e) {
+  let t = vy.get(e);
+  if (t !== void 0) return t;
+  let n = Object.freeze(fFe(e));
+  if (vy.size >= mFe) vy.clear();
+  return vy.set(e, n), n;
+}
+function fFe(e) {
+  let t = e.toLowerCase(), n = t.indexOf(":");
+  return n === -1 ? [ZC(t)] : [ZC(t), ZC(t.slice(0, n))];
+}
+var vy = /* @__PURE__ */ new Map();
+var mFe = 32768;
+function ZC(e) {
+  let t = e.length;
+  while (t > 0) {
+    let n = e.charCodeAt(t - 1);
+    if (n !== 46 && n !== 32) break;
+    t -= 1;
+  }
+  return t === e.length ? e : e.slice(0, t);
+}
 function wy(e, t, n) {
   return n === void 0 ? e : { ...e, [t]: n };
 }
@@ -26158,6 +26600,31 @@ var KW = class {
   procUnreadableLogged = false;
 };
 var Mkt = new tt(() => new KW());
+function SFe(e) {
+  return J(e, "expected a segment that is not empty or made only of dots and spaces, with no path separator, NUL or set-aside shape");
+}
+function Ps(e) {
+  if (typeof e !== "object" || e === null) return J("key", "expected a key object");
+  let t = OFe(e);
+  if (t !== void 0) return t;
+  let n = oje(e);
+  if (n === void 0) return J("key", `${e.namespace} is not a storage namespace`);
+  return WW("key", n);
+}
+function WW(e, t) {
+  for (let [n, r, o] of t) {
+    let s = `${e}.${n}`;
+    if (r === void 0) {
+      if (o !== "optional") return J(s, "required");
+    } else if (EFe(n)) {
+      if (!(e === "scope" && n === "agentRelPath" && Array.isArray(r) && r.length === 0) && (!Array.isArray(r) || !er(r))) return J(s, "expected a non-empty array of segments, none empty or made only of dots and spaces, with no path separator, NUL or set-aside shape");
+    } else if (typeof r !== "string" || !dn(r)) return SFe(s);
+  }
+  return;
+}
+function EFe(e) {
+  return e === "relPath" || e === "agentRelPath";
+}
 var qW = ["commands", "agents", "output-styles", "skills", "workflows", "routines", "themes", "rules", "session-env", "uploads", "mcp-skill-archives", "usage-data", "mcp-discovery-cache"];
 var VW = new Set(qW);
 var ZW = `must be one of the userConfigDir directory names (${qW.join(", ")})`;
@@ -26170,20 +26637,257 @@ var AFe = `must be one of the marketplaceCache forms (${JW.join(", ")})`;
 var XW = ["world"];
 var TFe = new Set(XW);
 var CFe = `must be one of the session journal names (${XW.join(", ")})`;
+function kFe(e) {
+  return TFe.has(e);
+}
+function RFe(e) {
+  return typeof e === "string" && /^[0-9a-f]{64}$/.test(e);
+}
+function OFe(e) {
+  if (e.namespace === "transcript") return DFe(e);
+  if (e.namespace === "pluginAssetCache" && !RFe(e.digest)) return J("key.digest", "must be a SHA-256 digest: 64 lowercase hexadecimal characters");
+  if (e.namespace === "globalConfig" && "kind" in e) {
+    if (!nq(e.kind)) return J("key.kind", tq);
+    if (typeof e.stamp !== "string") return J("key.stamp", "a recovery copy key carries its stamp");
+  }
+  if (e.namespace === "task") return ZFe(e);
+  if (e.namespace === "sidecar") {
+    let t = Ty("key.sessionId", e.sessionId);
+    if (t !== void 0) return t;
+    if (Cy(e.relPath)) return J("key.relPath", Vf);
+    return iq(e.relPath) ? J("key.relPath", oq) : void 0;
+  }
+  if (e.namespace === "recording") return Ty("key.sessionId", e.sessionId) ?? (sq(e.stamp) ? void 0 : J("key.stamp", NFe));
+  if (e.namespace === "jobsRoot") return YFe(e);
+  if (e.namespace === "userConfigDir" && !VW.has(e.dir)) return J("key.dir", ZW);
+  if (e.namespace === "fileHistory") return PFe(e);
+  if (e.namespace === "settings" && !VFe(e.layer)) return J("key.layer", "must be user, project or local");
+  if (e.namespace === "log" && !uq(e.channel)) return J("key.channel", lq);
+  if (e.namespace === "job" && fq(e.relPath)) return J("key.relPath", pq);
+  if (e.namespace === "sessionLog") return mq("key", e) ?? (tje(e.logName) ? void 0 : J("key.logName", "must be the session-log stem <sessionId8>[-<title-slug>]: up to eight word characters, then lower-case a-z / 0-9 runs joined by single hyphens; not a bare device name"));
+  if (e.namespace === "pluginRegistry" && !xFe.has(e.file)) return J("key.file", vFe);
+  if (e.namespace === "marketplaceCache") {
+    if (!("relPath" in e)) return wFe.has(e.form) ? void 0 : J("key.form", AFe);
+    return e.form === void 0 ? void 0 : J("key.form", "a tree file key carries relPath, not form");
+  }
+  if (e.namespace !== "agentMemory") return;
+  if (!QW(e.layer)) return J("key.layer", "must be user, project or local");
+  if (e.layer === "user" && "projectKey" in e) return J("key.projectKey", "the user layer is not keyed by project");
+  if (e.layer !== "user" && typeof e.projectKey !== "string") return J("key.projectKey", "required for the project and local layers");
+  return typeof e.agentType === "string" ? void 0 : J("key.agentType", "an agent memory key names its agent");
+}
+function PFe(e) {
+  return typeof e.backupFileName !== "string" || !zW.test(e.backupFileName) ? J("key.backupFileName", "must be a backup file name the engine has ever written (hex hash @v version)") : void 0;
+}
+function QW(e) {
+  return e === "user" || e === "project" || e === "local";
+}
 var eq = ["backup", "corrupted"];
 var IFe = new Set(eq);
 var tq = `must be one of the global-config copy kinds (${eq.join(", ")})`;
+function nq(e) {
+  return IFe.has(e);
+}
+function DFe(e) {
+  let t = Ty("key.sessionId", e.sessionId);
+  if (t !== void 0) return t;
+  if (Cy(e.agentRelPath)) return J("key.agentRelPath", Vf);
+  if ("sessionJournal" in e) {
+    if (typeof e.sessionJournal !== "string" || !kFe(e.sessionJournal)) return J("key.sessionJournal", CFe);
+    return e.agentId === void 0 && e.agentRelPath === void 0 && !("journal" in e) ? void 0 : J("key.sessionJournal", "a session journal key names the session's own journal: no agentId, agentRelPath or run journal");
+  }
+  if ("journal" in e) {
+    if (e.journal !== true) return J("key.journal", "must be true");
+    if (!Array.isArray(e.agentRelPath)) return J("key.agentRelPath", "a run journal key carries its run directory");
+    return e.agentId === void 0 ? void 0 : J("key.agentId", "a transcript key names an agent transcript or the run journal, never both");
+  }
+  return e.agentRelPath !== void 0 && e.agentId === void 0 ? J("key.agentRelPath", "requires agentId or journal") : void 0;
+}
 var LFe = "cloud-snapshots";
 var rq = /* @__PURE__ */ new Set(["memory", "tiny_memory", "bagel", LFe, "bridge-pointer.json", ".session-aliases"]);
+var MFe = /^[0-9]{1,16}$/;
+var NFe = "must be the recording stamp: 1 to 16 decimal digits (epoch milliseconds)";
 var Ay = ".cast";
 var oq = `<stamp>${Ay} inside a session's folder is that session's terminal recording stream: address it as keys.recording(projectKey, sessionId, stamp)`;
+function sq(e) {
+  return typeof e === "string" && MFe.test(e);
+}
+function iq(e) {
+  return Array.isArray(e) && typeof e[0] === "string" && Os(e[0]).some((t) => UFe(t) !== void 0);
+}
+function UFe(e) {
+  if (!e.endsWith(Ay)) return;
+  let t = e.slice(0, -Ay.length);
+  return sq(t) ? t : void 0;
+}
 var aq = [".ccr-tip.json", ".precompact.json", Ay];
 var FFe = `must not end with ${aq.join(", ")}: those name a session's project-level sibling files`;
+function jFe(e) {
+  return Os(e).some((t) => aq.some((n) => t.endsWith(n)));
+}
 var cq = ".dir-sync.json";
 var $Fe = `must not end with ${cq}: that names a cloud session's directory-sync record at the project level`;
+function zFe(e) {
+  return Os(e).some((t) => t.endsWith(cq));
+}
 var HFe = `${[...rq].join(", ")} are reserved: they name project-level entries, not sessions`;
+function BFe(e) {
+  return Os(e).some((t) => rq.has(t));
+}
+function Ty(e, t) {
+  if (typeof t !== "string") return;
+  if (BFe(t)) return J(e, HFe);
+  if (jFe(t)) return J(e, FFe);
+  if (zFe(t)) return J(e, $Fe);
+  return qf(t) ? J(e, Vf) : void 0;
+}
+var KFe = ".meta.json";
+var GFe = ".meta is reserved for the list metadata key, under every spelling that opens its file";
+function WFe(e) {
+  return qFe(`${e}.json`);
+}
+function qFe(e) {
+  return Os(e).includes(KFe);
+}
+var Vf = "names a .jsonl stream, which only a transcript key addresses";
+function Cy(e) {
+  return Array.isArray(e) && e.some((t) => typeof t === "string" && qf(t));
+}
+function VFe(e) {
+  return e === "user" || e === "project" || e === "local";
+}
+var lq = "must be debug, telemetry or apiDump";
+function uq(e) {
+  return e === "debug" || e === "telemetry" || e === "apiDump";
+}
+function ZFe(e) {
+  if ("taskId" in e && ("meta" in e || "highWaterMark" in e)) return J("key.taskId", "a task key names an item, the list metadata or the list high-water mark, never more than one");
+  if ("meta" in e && "highWaterMark" in e) return J("key.highWaterMark", "a task key names an item, the list metadata or the list high-water mark, never more than one");
+  if ("meta" in e && e.meta !== true) return J("key.meta", "must be true");
+  if ("highWaterMark" in e && e.highWaterMark !== true) return J("key.highWaterMark", "must be true");
+  if (typeof e.listId !== "string") return J("key.listId", "a task key carries its listId");
+  if ("meta" in e || "highWaterMark" in e) return;
+  if (typeof e.taskId !== "string") return J("key.taskId", "a task item key carries its taskId");
+  if (WFe(e.taskId)) return J("key.taskId", GFe);
+  return;
+}
+function YFe(e) {
+  if ("file" in e && "draftKey" in e) return J("key.draftKey", "a jobs-root key names the pins file or one draft, never both");
+  if ("file" in e) return e.file === "pins" ? void 0 : J("key.file", "must be pins");
+  if (typeof e.draftKey !== "string") return J("key.draftKey", "a jobs-root draft key carries its draftKey");
+  return rje.test(e.draftKey) ? void 0 : J("key.draftKey", "must be 8 lowercase hex characters");
+}
 var dq = "timeline.jsonl";
 var pq = `${dq} is the job's timeline stream: address it as keys.jobTimeline(jobId)`;
+function fq(e) {
+  return Array.isArray(e) && typeof e[0] === "string" && Os(e[0]).includes(dq);
+}
+var JFe = /^\d{4}$/;
+var GW = /^\d{2}$/;
+var XFe = /^[A-Za-z0-9_-]{1,8}(?:-[a-z0-9]+)*$/;
+var QFe = 128;
+var eje = /^(?:con|prn|aux|nul|com\d|lpt\d)$/i;
+function tje(e) {
+  return typeof e === "string" && e.length <= QFe && XFe.test(e) && !eje.test(e);
+}
+function mq(e, t) {
+  if (t.year !== void 0 && !YC(JFe, t.year)) return J(`${e}.year`, "must be four digits (YYYY)");
+  if (t.month !== void 0 && !YC(GW, t.month)) return J(`${e}.month`, "must be two digits (MM)");
+  if (t.day !== void 0 && !YC(GW, t.day)) return J(`${e}.day`, "must be two digits (DD)");
+  return;
+}
+function YC(e, t) {
+  return typeof t === "string" && e.test(t);
+}
+var rje = /^[0-9a-f]{8}$/;
+function oje(e) {
+  switch (e.namespace) {
+    case "transcript":
+      return [["projectKey", e.projectKey], ["sessionId", e.sessionId], ["agentId", e.agentId, "optional"], ["agentRelPath", e.agentRelPath, "optional"]];
+    case "history":
+    case "identity":
+      return [];
+    case "globalConfig":
+      return "kind" in e ? [["stamp", e.stamp]] : [];
+    case "settings":
+      return e.layer === "user" ? [] : e.layer === "project" ? [["projectKey", e.projectKey]] : [["consentRootKey", e.consentRootKey]];
+    case "task":
+      return "taskId" in e ? [["listId", e.listId], ["taskId", e.taskId]] : [["listId", e.listId]];
+    case "memory":
+      return [["projectKey", e.projectKey], ["relPath", e.relPath]];
+    case "pluginRegistry":
+      return [];
+    case "marketplaceCache":
+      return "relPath" in e ? [["marketplace", e.marketplace], ["relPath", e.relPath]] : [["marketplace", e.marketplace]];
+    case "pluginCache":
+      return [["marketplace", e.marketplace], ["plugin", e.plugin], ["version", e.version], ["relPath", e.relPath]];
+    case "cache":
+      return [["store", e.store], ["id", e.id]];
+    case "paste":
+      return [["id", e.id]];
+    case "pluginAssetCache":
+      return [["digest", e.digest]];
+    case "state":
+      return [["id", e.id]];
+    case "plan":
+      return [["name", e.name]];
+    case "feedbackDraft":
+      return [["draftId", e.draftId]];
+    case "agentMemory":
+      return [...e.layer === "user" ? [] : [["projectKey", e.projectKey]], ["agentType", e.agentType], ["relPath", e.relPath]];
+    case "team":
+      return [["team", e.team]];
+    case "sidecar":
+      return [["projectKey", e.projectKey], ["sessionId", e.sessionId], ["relPath", e.relPath]];
+    case "scratch":
+      return [["sessionId", e.sessionId], ["relPath", e.relPath]];
+    case "userConfigDir":
+      return [["relPath", e.relPath]];
+    case "fileHistory":
+      return [["sessionId", e.sessionId], ["backupFileName", e.backupFileName]];
+    case "job":
+      return [["jobId", e.jobId], ["relPath", e.relPath]];
+    case "daemon":
+      return [["relPath", e.relPath]];
+    case "jobsRoot":
+      return "file" in e ? [] : [["draftKey", e.draftKey]];
+    case "session":
+      return [["file", e.file]];
+    case "bridgePointer":
+    case "sessionAliases":
+      return [["projectKey", e.projectKey]];
+    case "dirSyncRecord":
+      return [["projectKey", e.projectKey], ["sessionId", e.sessionId]];
+    case "mailbox":
+      return [["team", e.team], ["teammate", e.teammate]];
+    case "log":
+      return [["sessionId", e.sessionId], ["agentId", e.agentId, "optional"], ["runId", e.runId, "optional"]];
+    case "jobTimeline":
+      return [["jobId", e.jobId]];
+    case "recording":
+      return [["projectKey", e.projectKey], ["sessionId", e.sessionId], ["stamp", e.stamp]];
+    case "sessionLog":
+      return [["projectKey", e.projectKey], ["year", e.year], ["month", e.month], ["day", e.day], ["logName", e.logName]];
+  }
+  return;
+}
+function Ai(e, t) {
+  if (!Te() || t === void 0) return;
+  if (!e.endsWith(".jsonl")) return;
+  let n = (0, import_path12.dirname)(e);
+  if ((0, import_path12.dirname)(n) !== bt()) return;
+  let r = (0, import_path12.basename)(n), o = (0, import_path12.basename)(e, ".jsonl");
+  if (e !== (0, import_path12.join)(bt(), r, `${o}.jsonl`)) return;
+  let s = en.transcript(r, o);
+  return Ps(s) === void 0 ? { backend: t, key: s } : void 0;
+}
+function tr(e) {
+  if (!Te() || e === void 0) return;
+  return { backend: e, transcriptKey: en.transcript, isKeySegment: dn };
+}
+function Nn(e) {
+  return e === void 0 ? void 0 : { source: e, hoverRestOn: Te() };
+}
 var vq = class {
   projectDirCache = /* @__PURE__ */ new Map();
   agentTranscriptSubdirs = /* @__PURE__ */ new Map();
@@ -28161,9 +28865,243 @@ function gze(e) {
   return qV(p4, e);
 }
 nr(pR());
+var E4 = 200;
+function Eze(e) {
+  return [...e.replace(/[\x00-\x1f\x7f-\x9f]/g, "")].slice(0, E4).join("");
+}
+function x4(e) {
+  return Eze(gy(e.trim())).trim();
+}
+var xze = 6;
+function A4(e) {
+  let t = (0, import_path14.basename)(e);
+  if (qf(t)) return;
+  let n = bt(), r = [t], o = (0, import_path14.dirname)(e);
+  while (o !== n && r.length <= xze + 1) {
+    let l = (0, import_path14.dirname)(o);
+    if (l === o) return;
+    r.unshift((0, import_path14.basename)(o)), o = l;
+  }
+  if (o !== n || r.length < 3) return;
+  let [s, i, ...a] = r;
+  if (!dn(s) || !dn(i) || a.length === 0 || !a.every(dn)) return;
+  let c = en.sidecar(s, i, a);
+  return Ps(c) === void 0 ? c : void 0;
+}
 var Tze = M(() => C({ customTitle: _() }));
+function Cze(e, t) {
+  return (0, import_path13.join)((0, import_path13.dirname)(e), t, "custom-title.json");
+}
+async function ku(e, t, n) {
+  let r = await kze(Cze(e, t), n);
+  if (r === void 0) return;
+  let o;
+  try {
+    o = JSON.parse(r);
+  } catch {
+    return;
+  }
+  let s = Tze().safeParse(o);
+  if (!s.success) return;
+  return x4(s.data.customTitle) || void 0;
+}
+async function kze(e, t) {
+  if (Te() && t !== void 0) try {
+    let n = A4(e);
+    if (n !== void 0) {
+      let r = await t.readText([n]);
+      if (!r.ok) return;
+      let o = r.value.items[0];
+      return o.found ? o.value : void 0;
+    }
+  } catch {
+    return;
+  }
+  try {
+    return await (0, import_promises10.readFile)(e, "utf8");
+  } catch {
+    return;
+  }
+}
+async function Gze(e, t, n) {
+  let r = `${e}.jsonl`, o = Nn(tr(n));
+  async function s(c) {
+    let l = Nn(Ai((0, import_path15.join)(c, r), n));
+    if (l !== void 0 && l.hoverRestOn) try {
+      let u = await l.source.backend.read([l.source.key]);
+      if (!u.ok) return null;
+      let p = u.value.items[0];
+      if (!p?.found) return null;
+      if (p.value.byteLength === 0) {
+        let f = await l.source.backend.statMeta(l.source.key);
+        if (!f.ok || (f.value.storedBytes ?? f.value.size) === 0) return null;
+      }
+      return { buf: Buffer.from(p.value), projectDir: c };
+    } catch {
+      return null;
+    }
+    try {
+      let u = await Sl().readBytes((0, import_path15.join)(c, r));
+      if (u.length === 0) return null;
+      return { buf: u, projectDir: c };
+    } catch {
+      return null;
+    }
+  }
+  if (t) {
+    let c = await Rs(t);
+    for (let u of await Qn(c, o)) {
+      let p = await s(u);
+      if (p) return p;
+    }
+    let l;
+    try {
+      l = await Ts(c);
+    } catch {
+      l = [];
+    }
+    for (let u of l) {
+      if (u === c) continue;
+      for (let p of await Qn(u, o)) {
+        let f = await s(p);
+        if (f) return f;
+      }
+    }
+    return null;
+  }
+  let i = bt();
+  if (o !== void 0 && o.hoverRestOn) {
+    let c = await xu(o.source);
+    if (c !== null) {
+      for (let l of c) {
+        let u = await s((0, import_path15.join)(i, l));
+        if (u) return u;
+      }
+      return null;
+    }
+  }
+  let a;
+  try {
+    a = await Sl().list(i);
+  } catch {
+    return null;
+  }
+  for (let c of a) {
+    let l = await s((0, import_path15.join)(i, c));
+    if (l) return l;
+  }
+  return null;
+}
+var Wze = /* @__PURE__ */ new Set(["user", "assistant", "attachment", "system", "progress"]);
+function qze(e, t) {
+  let n = [], r = [], o, s = { historySuppressed: false }, i = 10, a = e.length, c = 0;
+  while (c < a) {
+    let l = e.indexOf(10, c);
+    if (l === -1) l = a;
+    let u = c;
+    while (u < l && e[u] <= 32) u++;
+    if (c = l + 1, u >= l) continue;
+    let p = e.toString("utf-8", u, l);
+    try {
+      o = F4(yt(p), t, n, r, s) ?? o;
+    } catch {
+    }
+  }
+  return { transcript: n, contentReplacements: r, relocatedCwd: o, historySuppressed: s.historySuppressed, atisLatch: s.atisLatch };
+}
+function Vze(e, t) {
+  let n = [], r = [], o, s = { historySuppressed: false };
+  for (let i of e) {
+    if (typeof i !== "object" || i === null) continue;
+    o = F4(i, t, n, r, s) ?? o;
+  }
+  return { transcript: n, contentReplacements: r, relocatedCwd: o, historySuppressed: s.historySuppressed, atisLatch: s.atisLatch };
+}
+function F4(e, t, n, r, o) {
+  if (Wze.has(e.type) && typeof e.uuid === "string") n.push(e);
+  else if (e.type === "history-suppression") {
+    if (o) o.historySuppressed = true;
+  } else if (e.type === "atis-latch" && e.sessionId === t && typeof e.atis === "string" && /^[\x21-\x7e]*$/.test(e.atis)) {
+    if (o) o.atisLatch = e.atis;
+  } else if (e.type === "content-replacement" && e.sessionId === t && Array.isArray(e.replacements)) r.push(...e.replacements);
+  else if (e.type === "relocated" && e.sessionId === t && typeof e.relocatedCwd === "string" && e.relocatedCwd !== "") return e.relocatedCwd;
+  return;
+}
+async function j4(e, t = {}, n) {
+  let r = Te() ? n : void 0;
+  if (!rt(e)) throw new qe(`Invalid sessionId: ${e}`, "forkSession: invalid sessionId (not a UUID)");
+  if (t.upToMessageId && !rt(t.upToMessageId)) throw new qe(`Invalid upToMessageId: ${t.upToMessageId}`, "forkSession: invalid upToMessageId (not a UUID)");
+  let o = await Gze(e, t.dir, r);
+  if (!o) throw Error(t.dir ? `Session ${e} not found in project directory for ${t.dir}` : `Session ${e} not found`);
+  let s = await ku((0, import_path15.join)(o.projectDir, `${e}.jsonl`), e, r), { entries: i, forkedSessionId: a } = Yze(o.buf, e, t, s);
+  return await Kf((0, import_path15.join)(o.projectDir, `${a}.jsonl`), i, Nn(Zze(o.projectDir, a, tr(r)))), { sessionId: a };
+}
+function Zze(e, t, n) {
+  if (n === void 0) return;
+  let r = (0, import_path15.basename)(e);
+  if ((0, import_path15.join)(bt(), r) !== e || !n.isKeySegment(r) || !n.isKeySegment(t)) return;
+  return { backend: n.backend, key: n.transcriptKey(r, t) };
+}
+function Yze(e, t, n, r) {
+  let o = qze(e, t);
+  return z4(o, t, n, () => {
+    let i = e.length, a = e.toString("utf-8", 0, Math.min(i, Cr)), c = e.toString("utf-8", Math.max(0, i - Cr)), l = un(c, "customTitle");
+    return (l !== void 0 ? l : r ?? un(a, "customTitle")) || un(c, "aiTitle") || un(a, "aiTitle") || Ey(a);
+  });
+}
+function $4(e, t, n) {
+  let r = Vze(e, t);
+  return z4(r, t, n, () => Jze(e));
+}
+function Jze(e) {
+  let t, n;
+  for (let r of e) {
+    if (typeof r !== "object" || r === null) continue;
+    let o = r;
+    if (typeof o.customTitle === "string" && o.customTitle) t = o.customTitle;
+    if (typeof o.aiTitle === "string" && o.aiTitle) n = o.aiTitle;
+  }
+  return t || n || IW(e) || void 0;
+}
+function z4(e, t, n, r) {
+  let o = e.transcript.filter((f) => !f.isSidechain);
+  if (o.length === 0) throw Error(`Session ${t} has no messages to fork`);
+  if (n.upToMessageId) {
+    let f = o.findIndex((m) => m.uuid === n.upToMessageId);
+    if (f === -1) throw Error(`Message ${n.upToMessageId} not found in session ${t}`);
+    o = o.slice(0, f + 1);
+  }
+  let s = /* @__PURE__ */ new Map();
+  for (let f of o) s.set(f.uuid, (0, import_crypto7.randomUUID)());
+  let i = o.filter((f) => f.type !== "progress");
+  if (i.length === 0) throw Error(`Session ${t} has no messages to fork`);
+  let a = /* @__PURE__ */ new Map();
+  for (let f of o) a.set(f.uuid, f);
+  let c = (0, import_crypto7.randomUUID)(), l = (/* @__PURE__ */ new Date()).toISOString(), u = [];
+  if (e.historySuppressed) u.push(HW(c, "fork_inherit"));
+  for (let f = 0; f < i.length; f++) {
+    let m = i[f], h = s.get(m.uuid), g = null, y = m.parentUuid;
+    while (y) {
+      let A = a.get(y);
+      if (!A) break;
+      if (A.type !== "progress") {
+        g = s.get(y) ?? null;
+        break;
+      }
+      y = A.parentUuid;
+    }
+    let S = f === i.length - 1 ? l : m.timestamp, b = m.logicalParentUuid == null ? m.logicalParentUuid : s.get(m.logicalParentUuid) ?? null, x = m.type === "system" && m.subtype === "model_refusal_fallback" ? { neutralizedByFork: true } : void 0, v = { ...m, ...x, uuid: h, parentUuid: g, logicalParentUuid: b, sessionId: c, timestamp: S, isSidechain: false, teamName: void 0, agentName: void 0, sessionKind: void 0, slug: void 0, sourceToolAssistantUUID: void 0, forkedFrom: { sessionId: t, messageUuid: m.uuid } };
+    u.push(v);
+  }
+  if (e.contentReplacements.length > 0) u.push({ type: "content-replacement", sessionId: c, replacements: e.contentReplacements, uuid: (0, import_crypto7.randomUUID)(), timestamp: l });
+  if (e.atisLatch !== void 0) u.push({ type: "atis-latch", sessionId: c, atis: e.atisLatch });
+  if (e.relocatedCwd) u.push({ type: "relocated", sessionId: c, relocatedCwd: e.relocatedCwd });
+  let p = n.title?.trim();
+  if (!p) p = `${r() || "Forked session"} (fork)`;
+  return u.push({ type: "custom-title", sessionId: c, customTitle: p, uuid: (0, import_crypto7.randomUUID)(), timestamp: l }), { entries: u, forkedSessionId: c };
+}
 function r6(e) {
-  return { globalConfig: (0, import_path10.join)(e || (0, import_os6.homedir)(), ".claude.json"), userSettings: (0, import_path10.join)(e || (0, import_path10.join)((0, import_os6.homedir)(), ".claude"), "settings.json") };
+  return { globalConfig: (0, import_path16.join)(e || (0, import_os6.homedir)(), ".claude.json"), userSettings: (0, import_path16.join)(e || (0, import_path16.join)((0, import_os6.homedir)(), ".claude"), "settings.json") };
 }
 function SO(e, t, n, r) {
   return e !== void 0 && t === n ? { backend: e, key: r } : void 0;
@@ -28171,11 +29109,11 @@ function SO(e, t, n, r) {
 async function tb(e, t, n, r) {
   if (r) return p1e(r, e, t, n);
   try {
-    if (n) await (0, import_promises9.writeFile)(t, n(await (0, import_promises9.readFile)(e)), { mode: 384 });
-    else await (0, import_promises9.copyFile)(e, t);
+    if (n) await (0, import_promises11.writeFile)(t, n(await (0, import_promises11.readFile)(e)), { mode: 384 });
+    else await (0, import_promises11.copyFile)(e, t);
   } catch (o) {
     if (Ne(o) === void 0) throw o;
-    if (!br(o)) await (0, import_promises9.rm)(t, { force: true }).catch(() => {
+    if (!br(o)) await (0, import_promises11.rm)(t, { force: true }).catch(() => {
     }), de(`sessionStore resume: skipping ${e} (${Ne(o)})`);
   }
 }
@@ -28190,16 +29128,16 @@ async function p1e({ backend: e, key: t }, n, r, o) {
   if (!i?.found) return;
   let a = Buffer.from(i.value);
   try {
-    await (0, import_promises9.writeFile)(r, o ? o(a) : a, { mode: 384 });
+    await (0, import_promises11.writeFile)(r, o ? o(a) : a, { mode: 384 });
   } catch (c) {
     if (Ne(c) === void 0) throw c;
-    if (!br(c)) await (0, import_promises9.rm)(r, { force: true }).catch(() => {
+    if (!br(c)) await (0, import_promises11.rm)(r, { force: true }).catch(() => {
     }), de(`sessionStore resume: skipping ${n} (${Ne(c)})`);
   }
 }
 var o6 = "-credentials";
 function s6(e = "") {
-  let t = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, n = t !== void 0 ? !t : !process.env.CLAUDE_CONFIG_DIR, r = t !== void 0 ? t.normalize("NFC") : Gt(), o = n ? "" : `-${(0, import_crypto7.createHash)("sha256").update(r).digest("hex").substring(0, 8)}`;
+  let t = process.env.CLAUDE_SECURESTORAGE_CONFIG_DIR, n = t !== void 0 ? !t : !process.env.CLAUDE_CONFIG_DIR, r = t !== void 0 ? t.normalize("NFC") : Gt(), o = n ? "" : `-${(0, import_crypto8.createHash)("sha256").update(r).digest("hex").substring(0, 8)}`;
   return `Claude Code${CF().OAUTH_FILE_SUFFIX}${e}${o}`;
 }
 var h1e = /^[a-zA-Z0-9._-]+$/;
@@ -28431,7 +29369,7 @@ async function U6e(e, t) {
   try {
     await n.appendFile(e, t);
   } catch {
-    await n.mkdir((0, import_path12.dirname)(e)).catch(sJ), await n.appendFile(e, t);
+    await n.mkdir((0, import_path18.dirname)(e)).catch(sJ), await n.appendFile(e, t);
   }
 }
 var iJ = class {
@@ -29218,7 +30156,7 @@ var AJ = class {
     return this.managedFilePath ??= r3e(), this.managedFilePath;
   }
   getDropInDir() {
-    return this.dropInDir ??= (0, import_path13.join)(ac(), "managed-settings.d"), this.dropInDir;
+    return this.dropInDir ??= (0, import_path19.join)(ac(), "managed-settings.d"), this.dropInDir;
   }
   clearDropInDir() {
     this.dropInDir = void 0;
@@ -29925,7 +30863,7 @@ var NZe = M(() => C({ files: I(CS()).optional().describe("Credential files or di
     for (let a of i) n.add(a);
   }
 }).optional());
-var gI = M(() => C({ enabled: R().optional(), failIfUnavailable: R().optional().describe("Exit with an error at startup if sandbox.enabled is true but the sandbox cannot start (missing dependencies or unsupported platform). When false (default), a warning is shown and commands run unsandboxed. Intended for managed-settings deployments that require sandboxing as a hard gate."), autoAllowBashIfSandboxed: R().optional(), allowUnsandboxedCommands: R().optional().describe("Allow commands to run outside the sandbox via the dangerouslyDisableSandbox parameter. When false, the dangerouslyDisableSandbox parameter is completely ignored and all commands must run sandboxed. Default: true."), network: DZe(), filesystem: LZe(), credentials: NZe(), ignoreViolations: X(_(), I(_())).optional(), enableWeakerNestedSandbox: R().optional(), enableWeakerNetworkIsolation: R().optional().describe("macOS only: Allow access to com.apple.trustd.agent in the sandbox. Needed for Go-based CLI tools (gh, gcloud, terraform, etc.) to verify TLS certificates when using httpProxyPort with a MITM proxy and custom CA. **Reduces security** \u2014 opens a potential data exfiltration vector through the trustd service. Default: false"), allowAppleEvents: R().optional().describe("macOS only: Allow sandboxed commands to send Apple Events (and look up the appleeventsd Mach service). Needed for `open`, `osascript`, and browser-based auth flows that open URLs. **Removes code-execution isolation** \u2014 sandboxed commands can launch other applications unsandboxed with no user prompt, and can script running apps (e.g. Terminal) subject to the user's per-app TCC automation consent. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored. Default: false"), excludedCommands: I(_()).optional(), ripgrep: C({ command: _(), args: I(_()).optional() }).optional().describe("Custom ripgrep configuration for bundled ripgrep support. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored."), bwrapPath: st((e) => typeof e === "string" && (0, import_path16.isAbsolute)(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the bwrap (bubblewrap) binary. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings."), socatPath: st((e) => typeof e === "string" && (0, import_path16.isAbsolute)(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the socat binary used for the sandbox network proxy. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings.") }).passthrough());
+var gI = M(() => C({ enabled: R().optional(), failIfUnavailable: R().optional().describe("Exit with an error at startup if sandbox.enabled is true but the sandbox cannot start (missing dependencies or unsupported platform). When false (default), a warning is shown and commands run unsandboxed. Intended for managed-settings deployments that require sandboxing as a hard gate."), autoAllowBashIfSandboxed: R().optional(), allowUnsandboxedCommands: R().optional().describe("Allow commands to run outside the sandbox via the dangerouslyDisableSandbox parameter. When false, the dangerouslyDisableSandbox parameter is completely ignored and all commands must run sandboxed. Default: true."), network: DZe(), filesystem: LZe(), credentials: NZe(), ignoreViolations: X(_(), I(_())).optional(), enableWeakerNestedSandbox: R().optional(), enableWeakerNetworkIsolation: R().optional().describe("macOS only: Allow access to com.apple.trustd.agent in the sandbox. Needed for Go-based CLI tools (gh, gcloud, terraform, etc.) to verify TLS certificates when using httpProxyPort with a MITM proxy and custom CA. **Reduces security** \u2014 opens a potential data exfiltration vector through the trustd service. Default: false"), allowAppleEvents: R().optional().describe("macOS only: Allow sandboxed commands to send Apple Events (and look up the appleeventsd Mach service). Needed for `open`, `osascript`, and browser-based auth flows that open URLs. **Removes code-execution isolation** \u2014 sandboxed commands can launch other applications unsandboxed with no user prompt, and can script running apps (e.g. Terminal) subject to the user's per-app TCC automation consent. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored. Default: false"), excludedCommands: I(_()).optional(), ripgrep: C({ command: _(), args: I(_()).optional() }).optional().describe("Custom ripgrep configuration for bundled ripgrep support. Only honored from user, managed/policy, or CLI (--settings) settings \u2014 project settings (.claude/settings.json and .claude/settings.local.json) are ignored."), bwrapPath: st((e) => typeof e === "string" && (0, import_path22.isAbsolute)(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the bwrap (bubblewrap) binary. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings."), socatPath: st((e) => typeof e === "string" && (0, import_path22.isAbsolute)(e) ? e : void 0, _()).optional().catch(void 0).describe("Linux/WSL only: Absolute path to the socat binary used for the sandbox network proxy. Overrides auto-detection via PATH. Only honored from admin-controlled managed settings.") }).passthrough());
 var Xm = ["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"];
 var G8 = [...Xm];
 var W8 = G8;
@@ -29992,7 +30930,7 @@ function pX() {
   return { sourceCommand: _().max(vI + 20).optional().catch(void 0).describe("The `command`-source command the user accepted at explicit install/update. The once-per-session background re-resolve only runs while the marketplace entry still declares this exact command; a changed command (or an entry that became command-sourced later) is skipped with a warning until the user runs an explicit update."), sourceProducerPath: _().max(4096).refine(iX, { message: "must be an absolute path" }).optional().catch(void 0).describe("The directory a `command`-source plugin was last resolved to (what its command printed). Served in place in link mode and re-copied every session in copy mode, so the sandbox write-denies it; refreshed on every install/update, including no-op updates that resolve to a new location."), previousProducerPaths: I(Ae()).transform((e) => e.filter((t) => typeof t === "string" && t.length <= 4096 && iX(t)).slice(-e5e)).optional().catch(void 0).describe("Producer directories this installation was resolved to before the current one (most recent last, bounded). A concurrent older session may still serve one of them, so the sandbox keeps write-denying them too.") };
 }
 function iX(e) {
-  return import_path17.posix.isAbsolute(e) || import_path17.win32.isAbsolute(e);
+  return import_path23.posix.isAbsolute(e) || import_path23.win32.isAbsolute(e);
 }
 var fX = /[^\x20-\x7E]| {4,}/;
 function wI() {
@@ -30439,7 +31377,7 @@ function vYe(e, t, n = {}) {
     if (n.rejectDriveRelative) {
       if (!/^[A-Za-z]:\\/.test(r) && !o && /^(\\|[A-Za-z]:)/.test(r)) return false;
     }
-    if (import_path15.win32.normalize(r) !== r) return false;
+    if (import_path21.win32.normalize(r) !== r) return false;
     let s = r.split("\\");
     if (s.some((a) => a === "." || a === "..")) return false;
     if (s.some((a, c) => /[. ]$/.test(a) || a.includes(":") && !(c === 0 && /^[A-Za-z]:$/.test(a)))) return false;
@@ -30449,7 +31387,7 @@ function vYe(e, t, n = {}) {
   }
   if (n.rejectNetworkRoot && EYe(e)) return false;
   if (n.rejectMagicLinkRoot && xYe(e)) return false;
-  if (import_path15.posix.normalize(e) !== e) return false;
+  if (import_path21.posix.normalize(e) !== e) return false;
   if (e.split("/").some((r) => r === "." || r === "..")) return false;
   if (/\/{2}/.test(e)) return false;
   return !e.endsWith("/") || e === "/";
@@ -30486,7 +31424,7 @@ function MYe(e) {
 }
 function NYe(e) {
   let t = LYe(e), n = MYe(e);
-  return _().max(1024, { message: "path must be at most 1024 characters" }).refine((r) => !bYe.test(r), { message: "path must not contain control, line/paragraph-separator, or invisible (default-ignorable) characters" }).refine((r) => (t === "win32" ? import_path15.win32 : import_path15.posix).isAbsolute(r), { message: "path must be absolute" }).refine((r) => !(t === "win32" && n.requireWin32ExecutableSuffix) || wYe.test(r), { message: "path must end in .exe or .ps1 on Windows" }).refine((r) => t !== "win32" || !TYe(r), { message: CYe }).refine((r) => vYe(r, t, n), { message: t === "win32" ? 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, no component ending in "." or a space, no ":" outside the drive letter, no device-namespace (\\\\?\\) prefix, no drive-relative (\\dir or C:name) or UNC (\\\\server\\share) form' : 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, and not under a network automount root (/net/<host>, /Network/Servers) or a kernel magic-link root (/proc, /dev/fd)' }).describe("Absolute path to the helper executable");
+  return _().max(1024, { message: "path must be at most 1024 characters" }).refine((r) => !bYe.test(r), { message: "path must not contain control, line/paragraph-separator, or invisible (default-ignorable) characters" }).refine((r) => (t === "win32" ? import_path21.win32 : import_path21.posix).isAbsolute(r), { message: "path must be absolute" }).refine((r) => !(t === "win32" && n.requireWin32ExecutableSuffix) || wYe.test(r), { message: "path must end in .exe or .ps1 on Windows" }).refine((r) => t !== "win32" || !TYe(r), { message: CYe }).refine((r) => vYe(r, t, n), { message: t === "win32" ? 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, no component ending in "." or a space, no ":" outside the drive letter, no device-namespace (\\\\?\\) prefix, no drive-relative (\\dir or C:name) or UNC (\\\\server\\share) form' : 'path must be in normalized form: no "." or ".." segments, no doubled or trailing separators, and not under a network automount root (/net/<host>, /Network/Servers) or a kernel magic-link root (/proc, /dev/fd)' }).describe("Absolute path to the helper executable");
 }
 var jI = [...ss, "default"];
 var DI = ["path", "script", "interpreter", "outputBehavior", "timeoutMs", "refreshIntervalMs", "defaultSettings"];
@@ -30795,7 +31733,7 @@ function KYe(e) {
 `) ? 0 : 1) };
 }
 function GYe(e) {
-  return (0, import_crypto8.createHash)("sha256").update(me(e)).digest("hex");
+  return (0, import_crypto9.createHash)("sha256").update(me(e)).digest("hex");
 }
 function WYe(e) {
   if (typeof e === "string") return e || void 0;
@@ -30807,7 +31745,7 @@ function qYe(e) {
   return me(HS({ shellSettings: e.shellSettings, envVars: e.envVars, hooks: e.hooks, claudeMd: e.claudeMd }));
 }
 function e7(e) {
-  return (0, import_crypto8.createHash)("sha256").update(qYe(e)).digest("hex");
+  return (0, import_crypto9.createHash)("sha256").update(qYe(e)).digest("hex");
 }
 function YX(e, t, n) {
   return me([e, typeof t === "string" ? t : null, typeof n === "string" ? n : null]);
@@ -30825,7 +31763,7 @@ function VYe(e) {
 }
 var r7 = "remote-settings-helper-consent";
 function YYe() {
-  return (0, import_path14.join)(Gt(), r7);
+  return (0, import_path20.join)(Gt(), r7);
 }
 function JYe(e) {
   if (e.policyHelpers === void 0 && e.extraKnownMarketplaces === void 0 && !Jm.some(({ alias: n, canonical: r }) => r === "extraKnownMarketplaces" && e[n] !== void 0)) return;
@@ -31179,7 +32117,7 @@ var h8e = new B7();
 function lh(e, t) {
   return new Promise((n) => {
     try {
-      (0, import_child_process4.execFile)(e, t, { encoding: "utf-8", timeout: d7, windowsHide: true }, (r, o) => {
+      (0, import_child_process5.execFile)(e, t, { encoding: "utf-8", timeout: d7, windowsHide: true }, (r, o) => {
         n({ stdout: o ?? "", code: r ? 1 : 0 });
       });
     } catch {
@@ -31191,7 +32129,7 @@ function JI() {
   return (async () => {
     if (process.platform === "darwin") {
       let e = p7(), n = (await Promise.all(e.map(async ({ path: r, label: o }) => {
-        if (!(0, import_fs11.existsSync)(r)) return { stdout: "", label: o, ok: false };
+        if (!(0, import_fs12.existsSync)(r)) return { stdout: "", label: o, ok: false };
         let { stdout: s, code: i } = await lh(l7, [...u7, r]);
         return { stdout: s, label: o, ok: i === 0 && !!s };
       }))).find((r) => r.ok);
@@ -31314,25 +32252,25 @@ async function S8e(e) {
       return false;
     }
   }
-  if (await t((0, import_path11.join)(cd, "managed-settings.json"))) return true;
+  if (await t((0, import_path17.join)(cd, "managed-settings.json"))) return true;
   try {
-    let n = (0, import_path11.join)(cd, "managed-settings.d");
-    for (let r of await eQ(n, e)) if ((r.isFile() || r.isSymbolicLink()) && r.name.endsWith(".json") && !r.name.startsWith(".") && await t((0, import_path11.join)(n, r.name))) return true;
+    let n = (0, import_path17.join)(cd, "managed-settings.d");
+    for (let r of await eQ(n, e)) if ((r.isFile() || r.isSymbolicLink()) && r.name.endsWith(".json") && !r.name.startsWith(".") && await t((0, import_path17.join)(n, r.name))) return true;
   } catch {
   }
   return false;
 }
 async function q7(e, t) {
   try {
-    if (await W7((0, import_path11.join)(e, "managed-settings.json"), t)) return true;
+    if (await W7((0, import_path17.join)(e, "managed-settings.json"), t)) return true;
   } catch {
   }
   try {
-    let n = (0, import_path11.join)(e, "managed-settings.d"), r = await eQ(n, t);
+    let n = (0, import_path17.join)(e, "managed-settings.d"), r = await eQ(n, t);
     for (let o of r) {
       if (!(o.isFile() || o.isSymbolicLink()) || !o.name.endsWith(".json") || o.name.startsWith(".")) continue;
       try {
-        if (await W7((0, import_path11.join)(n, o.name), t)) return true;
+        if (await W7((0, import_path17.join)(n, o.name), t)) return true;
       } catch {
       }
     }
@@ -31538,6 +32476,10 @@ function H8e(e, t) {
     r.spawnAbort(f), n.setError(f);
   }), iD(n, r, e, o), n;
 }
+async function jGt(e, t) {
+  if (t?.sessionStore) return J8e(t.sessionStore, e, t);
+  return j4(e, t);
+}
 function pQ(e) {
   let t = (0, import_path2.resolve)(e ?? "."), n;
   try {
@@ -31554,6 +32496,14 @@ function Qr(e, t) {
 }
 function nD(e) {
   return typeof e === "object" && e !== null && "type" in e && e.type === "agent_metadata";
+}
+async function J8e(e, t, n) {
+  if (!rt(t)) throw new qe(`Invalid sessionId: ${t}`, "forkSession: invalid sessionId (must be a UUID)");
+  if (n.upToMessageId && !rt(n.upToMessageId)) throw new qe(`Invalid upToMessageId: ${n.upToMessageId}`, "forkSession: invalid upToMessageId (must be a UUID)");
+  let r = Qr(n.dir), o = await e.load({ projectKey: r, sessionId: t });
+  if (!o || o.length === 0) throw Error(`Session ${t} not found`);
+  let { entries: s, forkedSessionId: i } = $4(o, t, n);
+  return await e.append({ projectKey: r, sessionId: i }, s), { sessionId: i };
 }
 function iQ(e, t) {
   let n = (0, import_path2.relative)(t, e), r = n.split(import_path2.sep);
@@ -51666,6 +52616,245 @@ function digest(value) {
   return (0, import_node_crypto2.createHash)("sha256").update(value, "utf8").digest("hex");
 }
 
+// server/claude-model-manifest.ts
+var CLAUDE_MODEL_MANIFEST = [
+  {
+    id: "claude-opus-5",
+    label: "Opus 5",
+    description: "Opus 5 \xB7 Latest release",
+    contextWindowMaxTokens: 1e6,
+    supportsFastMode: true
+  },
+  {
+    id: "claude-fable-5-1",
+    label: "Fable 5.1",
+    description: "Fable 5.1 \xB7 Most powerful model",
+    contextWindowMaxTokens: 1e6
+  },
+  {
+    id: "claude-fable-5",
+    aliases: ["claude-fable-5[1m]"],
+    label: "Fable 5",
+    description: "Fable 5 \xB7 Previous release",
+    contextWindowMaxTokens: 1e6
+  },
+  {
+    id: "claude-opus-4-8[1m]",
+    label: "Opus 4.8 1M",
+    description: "Opus 4.8 with 1M context window",
+    contextWindowMaxTokens: 1e6,
+    supportsFastMode: true
+  },
+  {
+    id: "claude-opus-4-8",
+    label: "Opus 4.8",
+    description: "Opus 4.8 \xB7 Previous release",
+    contextWindowMaxTokens: 2e5,
+    supportsFastMode: true
+  },
+  {
+    id: "claude-sonnet-5",
+    label: "Sonnet 5",
+    description: "Sonnet 5 \xB7 Best for everyday tasks",
+    contextWindowMaxTokens: 2e5
+  },
+  {
+    id: "claude-sonnet-5[1m]",
+    label: "Sonnet 5 1M",
+    description: "Sonnet 5 with 1M context window",
+    contextWindowMaxTokens: 1e6
+  },
+  {
+    id: "claude-opus-4-7[1m]",
+    label: "Opus 4.7 1M",
+    description: "Opus 4.7 with 1M context window",
+    contextWindowMaxTokens: 1e6,
+    supportsFastMode: true
+  },
+  {
+    id: "claude-opus-4-7",
+    label: "Opus 4.7",
+    description: "Opus 4.7 \xB7 Previous release",
+    contextWindowMaxTokens: 2e5,
+    supportsFastMode: true
+  },
+  {
+    id: "claude-opus-4-6[1m]",
+    label: "Opus 4.6 1M",
+    description: "Opus 4.6 with 1M context window",
+    contextWindowMaxTokens: 1e6,
+    supportsFastMode: true
+  },
+  {
+    id: "claude-opus-4-6",
+    label: "Opus 4.6",
+    description: "Opus 4.6 \xB7 Most capable for complex work",
+    contextWindowMaxTokens: 2e5,
+    supportsFastMode: true
+  },
+  {
+    id: "claude-sonnet-4-6[1m]",
+    label: "Sonnet 4.6 1M",
+    description: "Sonnet 4.6 with 1M context window",
+    contextWindowMaxTokens: 1e6
+  },
+  {
+    id: "claude-sonnet-4-6",
+    label: "Sonnet 4.6",
+    description: "Sonnet 4.6 \xB7 Best for everyday tasks",
+    contextWindowMaxTokens: 2e5
+  },
+  {
+    id: "claude-haiku-4-5",
+    label: "Haiku 4.5",
+    description: "Haiku 4.5 \xB7 Fastest for quick answers",
+    contextWindowMaxTokens: 2e5
+  }
+];
+function findClaudeModel(modelId) {
+  if (typeof modelId !== "string" || modelId.trim().length === 0) return null;
+  const normalized = modelId.trim();
+  for (const model of CLAUDE_MODEL_MANIFEST) {
+    if (model.id === normalized) return model;
+    if (model.aliases?.includes(normalized) === true) return model;
+  }
+  const withoutDate = /^(\S+)-\d{8}$/.exec(normalized);
+  if (withoutDate !== null) return findClaudeModel(withoutDate[1]);
+  return null;
+}
+function claudeModelSupportsFastMode(modelId) {
+  return findClaudeModel(modelId)?.supportsFastMode === true;
+}
+
+// server/claude-sessions.ts
+var import_promises12 = require("node:fs/promises");
+var import_node_path3 = require("node:path");
+
+// server/claude-project-dir.ts
+var import_node_fs = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path2 = require("node:path");
+var PROJECT_DIR_LENGTH_CAP = 200;
+function resolveClaudeConfigDir() {
+  const override = process.env["CLAUDE_CONFIG_DIR"];
+  if (typeof override === "string" && override.length > 0) return override;
+  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude");
+}
+function canonicalizeProjectCwd(input2) {
+  const trimmed = input2.replace(/[\\/]+$/, "") || input2;
+  try {
+    return normalizeProjectPath(import_node_fs.realpathSync.native(trimmed));
+  } catch {
+    return normalizeProjectPath(trimmed);
+  }
+}
+function encodeProjectDir(input2) {
+  const replaced = input2.replace(/[^a-zA-Z0-9]/g, "-");
+  if (replaced.length <= PROJECT_DIR_LENGTH_CAP) return replaced;
+  let hash2 = 0;
+  for (let i = 0; i < input2.length; i++) {
+    hash2 = (hash2 << 5) - hash2 + input2.charCodeAt(i) | 0;
+  }
+  return `${replaced.slice(0, PROJECT_DIR_LENGTH_CAP)}-${Math.abs(hash2).toString(36)}`;
+}
+function claudeProjectDir(cwd) {
+  return (0, import_node_path2.join)(resolveClaudeConfigDir(), "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
+}
+function normalizeProjectPath(input2) {
+  return process.platform === "darwin" ? input2.normalize("NFC") : input2;
+}
+
+// server/claude-sessions.ts
+async function readTranscriptPreview(path3) {
+  const base = path3.split(/[\\/]/).pop() ?? "";
+  const claudeSessionId = /^([0-9a-fA-F][0-9a-fA-F-]{7,})\.jsonl$/.exec(base)?.[1];
+  if (claudeSessionId === void 0) return null;
+  let raw;
+  try {
+    raw = await (0, import_promises12.readFile)(path3, "utf8");
+  } catch {
+    return null;
+  }
+  const head = raw.slice(0, 512e3);
+  let title;
+  let updatedAt;
+  for (const line of head.split("\n")) {
+    if (line.trim().length === 0) continue;
+    let entry;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed !== "object" || parsed === null) continue;
+      entry = parsed;
+    } catch {
+      continue;
+    }
+    if (updatedAt === void 0 && typeof entry.timestamp === "string") {
+      const parsed = new Date(entry.timestamp);
+      if (!Number.isNaN(parsed.getTime())) updatedAt = parsed;
+    }
+    if (title === void 0 && entry.type === "user") {
+      const text = firstUserText(entry.message);
+      if (text !== void 0) title = text;
+    }
+    if (title !== void 0 && updatedAt !== void 0) break;
+  }
+  if (title === void 0) return null;
+  try {
+    const stats = await (0, import_promises12.stat)(path3);
+    updatedAt = updatedAt ?? stats.mtime;
+  } catch {
+  }
+  return {
+    claudeSessionId,
+    title: title.length > 200 ? `${title.slice(0, 200)}\u2026` : title,
+    updatedAt: updatedAt ?? /* @__PURE__ */ new Date(0)
+  };
+}
+function firstUserText(message) {
+  if (typeof message !== "object" || message === null) return void 0;
+  const content = message.content;
+  const parts = [];
+  if (typeof content === "string") {
+    parts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
+        parts.push(block.text);
+      }
+    }
+  }
+  const joined = parts.join("\n").trim();
+  return joined.length > 0 ? joined : void 0;
+}
+async function listClaudeTranscriptSummaries(cwd, limit) {
+  const directory = claudeProjectDir(cwd);
+  let names;
+  try {
+    names = await (0, import_promises12.readdir)(directory);
+  } catch {
+    return [];
+  }
+  const previews = [];
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const preview = await readTranscriptPreview((0, import_node_path3.join)(directory, name));
+    if (preview === null) continue;
+    previews.push(preview);
+  }
+  previews.sort((left, right) => right.updatedAt.getTime() - left.updatedAt.getTime());
+  return previews.slice(0, Math.max(1, limit)).map((preview) => ({
+    persistence: { version: 1, data: { claudeSessionId: preview.claudeSessionId } },
+    cwd,
+    title: preview.title,
+    updatedAt: preview.updatedAt.toISOString()
+  }));
+}
+
+// server/claude-rewind.ts
+var forkSession = {
+  forkSession: jGt
+};
+
 // server/prompt-text.ts
 function isSerializedAttachment(text) {
   if (!text.startsWith("{")) return false;
@@ -52346,9 +53535,9 @@ function flattenBlockContent(content) {
 
 // server/image-output.ts
 var import_node_crypto4 = require("node:crypto");
-var import_node_fs = require("node:fs");
-var import_node_os2 = __toESM(require("node:os"));
-var import_node_path2 = __toESM(require("node:path"));
+var import_node_fs2 = require("node:fs");
+var import_node_os3 = __toESM(require("node:os"));
+var import_node_path4 = __toESM(require("node:path"));
 var IMAGE_ATTACHMENT_DIR = "paseo-attachments";
 var IMAGE_ATTACHMENT_DIR_PREFIX = `${IMAGE_ATTACHMENT_DIR}-`;
 var PRIVATE_DIR_MODE = 448;
@@ -52356,8 +53545,8 @@ var IMAGE_FILE_MODE = 384;
 var materializedDir = null;
 function canReuseDir(dir) {
   try {
-    if (!(0, import_node_fs.lstatSync)(dir).isDirectory()) return false;
-    (0, import_node_fs.chmodSync)(dir, PRIVATE_DIR_MODE);
+    if (!(0, import_node_fs2.lstatSync)(dir).isDirectory()) return false;
+    (0, import_node_fs2.chmodSync)(dir, PRIVATE_DIR_MODE);
     return true;
   } catch {
     return false;
@@ -52365,8 +53554,8 @@ function canReuseDir(dir) {
 }
 function attachmentDir() {
   if (materializedDir !== null && canReuseDir(materializedDir)) return materializedDir;
-  materializedDir = (0, import_node_fs.mkdtempSync)(import_node_path2.default.join(import_node_os2.default.tmpdir(), IMAGE_ATTACHMENT_DIR_PREFIX));
-  (0, import_node_fs.chmodSync)(materializedDir, PRIVATE_DIR_MODE);
+  materializedDir = (0, import_node_fs2.mkdtempSync)(import_node_path4.default.join(import_node_os3.default.tmpdir(), IMAGE_ATTACHMENT_DIR_PREFIX));
+  (0, import_node_fs2.chmodSync)(materializedDir, PRIVATE_DIR_MODE);
   return materializedDir;
 }
 function imageExtension(mimeType) {
@@ -52428,10 +53617,10 @@ function materializeImageOutput(data, mimeType) {
   }
   if (bytes.length === 0) return null;
   const hash2 = (0, import_node_crypto4.createHash)("sha256").update(bytes).digest("hex");
-  const filePath = import_node_path2.default.join(attachmentDir(), `${hash2}.${extension}`);
+  const filePath = import_node_path4.default.join(attachmentDir(), `${hash2}.${extension}`);
   try {
-    if (!(0, import_node_fs.existsSync)(filePath)) (0, import_node_fs.writeFileSync)(filePath, bytes, { mode: IMAGE_FILE_MODE });
-    (0, import_node_fs.chmodSync)(filePath, IMAGE_FILE_MODE);
+    if (!(0, import_node_fs2.existsSync)(filePath)) (0, import_node_fs2.writeFileSync)(filePath, bytes, { mode: IMAGE_FILE_MODE });
+    (0, import_node_fs2.chmodSync)(filePath, IMAGE_FILE_MODE);
   } catch {
     return null;
   }
@@ -52442,41 +53631,17 @@ function renderImageOutputMarkdown(uri, altText = "Image") {
 }
 
 // server/claude-transcript.ts
-var import_node_fs2 = require("node:fs");
-var import_promises10 = require("node:fs/promises");
-var import_node_os3 = require("node:os");
-var import_node_path3 = require("node:path");
-var PROJECT_DIR_LENGTH_CAP = 200;
+var import_promises13 = require("node:fs/promises");
+var import_node_path5 = require("node:path");
 var MAX_REPLAY_LINES = 1e4;
 var MAX_REPLAY_ITEMS = 2e3;
 var MAX_REPLAY_CHILD_ITEMS = 2e3;
 var MAX_REPLAY_SIDECARS = 50;
-function resolveConfigDir() {
-  const override = process.env["CLAUDE_CONFIG_DIR"];
-  if (typeof override === "string" && override.length > 0) return override;
-  return (0, import_node_path3.join)((0, import_node_os3.homedir)(), ".claude");
-}
-function encodeProjectDir(input2) {
-  const replaced = input2.replace(/[^a-zA-Z0-9]/g, "-");
-  if (replaced.length <= PROJECT_DIR_LENGTH_CAP) return replaced;
-  let hash2 = 0;
-  for (let i = 0; i < input2.length; i++) {
-    hash2 = (hash2 << 5) - hash2 + input2.charCodeAt(i) | 0;
-  }
-  return `${replaced.slice(0, PROJECT_DIR_LENGTH_CAP)}-${Math.abs(hash2).toString(36)}`;
-}
-function canonicalize(input2) {
-  try {
-    return import_node_fs2.realpathSync.native(input2);
-  } catch {
-    return input2;
-  }
-}
 function readString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
 }
 async function readJsonLines(path3) {
-  const raw = await (0, import_promises10.readFile)(path3, "utf8");
+  const raw = await (0, import_promises13.readFile)(path3, "utf8");
   const rawLines = raw.split("\n");
   const windowed = rawLines.length > MAX_REPLAY_LINES ? rawLines.slice(-MAX_REPLAY_LINES) : rawLines;
   const entries = [];
@@ -52620,7 +53785,8 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
           withTimestamp({
             type: "user_message",
             id: `${idSeed}`,
-            text: await restoreBlock(text)
+            text: await restoreBlock(text),
+            ...rewindIdentity(entry)
           })
         );
       }
@@ -52658,11 +53824,20 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
         withTimestamp({
           type: "user_message",
           id: `${idSeed}`,
-          text: texts.join("\n")
+          text: texts.join("\n"),
+          ...rewindIdentity(entry)
         })
       );
     }
   }
+}
+function rewindIdentity(entry) {
+  const uuid3 = typeof entry.uuid === "string" ? entry.uuid : void 0;
+  if (uuid3 === void 0 || uuid3.length === 0) return {};
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid3)) {
+    return {};
+  }
+  return { messageId: uuid3, revertToken: uuid3 };
 }
 function flattenReplayContent(content) {
   if (typeof content === "string") return content;
@@ -52691,8 +53866,8 @@ async function readClaudeReplay(cwd, claudeSessionId, restore) {
   }
 }
 async function readReplayInner(cwd, claudeSessionId, restore) {
-  const projectDir = (0, import_node_path3.join)(resolveConfigDir(), "projects", encodeProjectDir(canonicalize(cwd)));
-  const entries = await readJsonLines((0, import_node_path3.join)(projectDir, `${claudeSessionId}.jsonl`));
+  const projectDir = claudeProjectDir(cwd);
+  const entries = await readJsonLines((0, import_node_path5.join)(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
   const root = createCollector(null);
   let seed = 0;
@@ -52722,7 +53897,7 @@ async function readReplayInner(cwd, claudeSessionId, restore) {
 async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   let files;
   try {
-    files = await (0, import_promises10.readdir)((0, import_node_path3.join)(projectDir, claudeSessionId, "subagents"));
+    files = await (0, import_promises13.readdir)((0, import_node_path5.join)(projectDir, claudeSessionId, "subagents"));
   } catch {
     return [];
   }
@@ -52731,7 +53906,7 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
     sidecars.map(async (file2) => {
       let mtimeMs = 0;
       try {
-        const fileStat = await (0, import_promises10.stat)((0, import_node_path3.join)(projectDir, claudeSessionId, "subagents", file2));
+        const fileStat = await (0, import_promises13.stat)((0, import_node_path5.join)(projectDir, claudeSessionId, "subagents", file2));
         if (Number.isFinite(fileStat.mtimeMs)) mtimeMs = fileStat.mtimeMs;
       } catch {
         mtimeMs = 0;
@@ -52776,10 +53951,10 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   });
 }
 async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUserBlock) {
-  const base = (0, import_node_path3.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
+  const base = (0, import_node_path5.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
   let meta3 = null;
   try {
-    const raw = await (0, import_promises10.readFile)(`${base}.meta.json`, "utf8");
+    const raw = await (0, import_promises13.readFile)(`${base}.meta.json`, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null) {
       meta3 = parsed;
@@ -52807,9 +53982,14 @@ var CAPABILITIES = [
   "prompt.image",
   "prompt.steer",
   "permission",
+  "permission.tool_policy",
   "session.persistence",
   "session.configure",
-  "session.subsession"
+  "session.subsession",
+  "session.list",
+  "session.revert.files",
+  "session.revert.conversation",
+  "session.revert.both"
 ];
 var STATIC_MODES = [
   { id: "plan", label: "Plan Mode", description: "Analyze the codebase without executing tools or edits" },
@@ -52827,7 +54007,7 @@ function scanPathForClaude(pathValue, platform) {
   for (const name of names) {
     for (const directory of directories) {
       if (directory.length === 0) continue;
-      const candidate = import_node_path4.default.join(directory, name);
+      const candidate = import_node_path6.default.join(directory, name);
       try {
         (0, import_node_fs3.accessSync)(candidate, import_node_fs3.constants.X_OK);
         return candidate;
@@ -52891,12 +54071,14 @@ function createPromptSink() {
 function createTranslateClaudeProvider(deps) {
   const translator = createTranslator(deps);
   const queryFactory = deps.queryFactory ?? PGt;
+  const forkClaudeSession = deps.forkSession ?? ((id2, options) => forkSession.forkSession(id2, options));
   const listeners = /* @__PURE__ */ new Set();
   const sessions = /* @__PURE__ */ new Map();
   const context = {
     sessions,
     translator,
     queryFactory,
+    forkClaudeSession,
     loadValues: () => deps.loadConfig(),
     emit(event) {
       if (!connectionClosed) for (const listener of listeners) listener(event);
@@ -52994,21 +54176,115 @@ async function dispatch(input2, context, capabilities) {
     }
     case "session.archive":
     case "session.unarchive":
-    case "session.revert":
       context.emit({
         type: "request.failed",
         requestId: input2.requestId,
         error: { message: `${input2.type} is not supported by the Translate Claude provider` }
       });
       return;
+    case "session.revert":
+      (0, import_provider.requireProviderCapabilities)(capabilities, input2);
+      await revertSession(input2, context);
+      return;
     case "sessions":
       (0, import_provider.requireProviderCapabilities)(capabilities, input2);
-      context.emit({
-        type: "request.failed",
-        requestId: input2.requestId,
-        error: { message: "Session listing is not supported by the Translate Claude provider" }
-      });
+      await listSessions(input2, context);
       return;
+  }
+}
+async function listSessions(input2, context) {
+  const sessions = await listClaudeTranscriptSummaries(
+    input2.cwd ?? process.cwd(),
+    Math.max(1, Math.min(input2.limit ?? 20, 100))
+  );
+  context.emit({ type: "sessions", requestId: input2.requestId, sessions });
+  context.emit({ type: "request.completed", requestId: input2.requestId });
+}
+async function revertSession(input2, context) {
+  const session = context.sessions.get(input2.sessionId);
+  if (session === void 0) {
+    context.emit({
+      type: "request.failed",
+      requestId: input2.requestId,
+      error: { message: `Unknown session: ${input2.sessionId}` }
+    });
+    return;
+  }
+  const messageId = typeof input2.token === "string" ? input2.token : "";
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(messageId)) {
+    context.emit({
+      type: "request.failed",
+      requestId: input2.requestId,
+      error: { message: `Invalid rewind target: ${JSON.stringify(input2.token)}` }
+    });
+    return;
+  }
+  try {
+    if (input2.scope === "files" || input2.scope === "both") {
+      await rewindFilesOnce(session, messageId, context);
+    }
+    if (input2.scope === "conversation" || input2.scope === "both") {
+      await rewindConversationOnce(session, messageId, context);
+    }
+    context.emit({
+      type: "timeline.item",
+      sessionId: session.id,
+      item: {
+        type: "notification",
+        id: `rewind-${(0, import_node_crypto5.randomUUID)()}`,
+        level: "info",
+        message: `Rewound ${input2.scope} to message ${messageId}.`
+      }
+    });
+    context.emit({ type: "request.completed", requestId: input2.requestId });
+  } catch (error62) {
+    context.emit({
+      type: "request.failed",
+      requestId: input2.requestId,
+      error: { message: `Rewind failed: ${describe3(error62)}` }
+    });
+  }
+}
+async function rewindFilesOnce(session, messageId, context) {
+  await ensureQuery(session, context);
+  if (session.query?.rewindFiles === void 0) {
+    throw new Error("This Claude build does not expose file rewind");
+  }
+  const result = await session.query.rewindFiles(messageId, { dryRun: false });
+  if (!result.canRewind) {
+    throw new Error(result.error ?? `No file checkpoint found for message ${messageId}`);
+  }
+}
+async function rewindConversationOnce(session, messageId, context) {
+  if (session.claudeSessionId === null) {
+    throw new Error("Claude session is not ready for rewind");
+  }
+  const fork = await context.forkClaudeSession(session.claudeSessionId, { upToMessageId: messageId });
+  session.claudeSessionId = fork.sessionId;
+  await resetQuery(session, (event) => context.emit(event));
+  context.emit({
+    type: "session.persistence",
+    sessionId: session.id,
+    persistence: { version: 1, data: { claudeSessionId: fork.sessionId } }
+  });
+}
+async function resetQuery(session, emit) {
+  session.detached = true;
+  session.abort.abort();
+  session.abort = new AbortController();
+  for (const pending of session.pendingPermissions.values()) {
+    pending.resolve({ behavior: "deny", message: "Superseded by a rewind" });
+  }
+  session.pendingPermissions.clear();
+  const pump = session.pump;
+  session.query = null;
+  session.pump = null;
+  const active = session.active;
+  session.active = null;
+  await pump?.catch(() => void 0);
+  session.detached = false;
+  if (active !== null) {
+    emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
   }
 }
 async function openSession(input2, context, capabilities) {
@@ -53052,9 +54328,20 @@ async function openSession(input2, context, capabilities) {
     active: null,
     interrupted: false,
     closed: false,
+    detached: false,
+    fastModeSupported: claudeModelSupportsFastMode(input2.config.model),
     toolNames: /* @__PURE__ */ new Map(),
     toolInputs: /* @__PURE__ */ new Map(),
     contextUsage: null,
+    contextWindowMaxTokens: findClaudeModel(input2.config.model)?.contextWindowMaxTokens ?? null,
+    fastMode: input2.config.settings?.["fast_mode"] === true,
+    compactionMarkerOpen: false,
+    planResumeMode: readConfigured(input2.config.mode),
+    rewindUserMessageIds: [],
+    pendingUserAnchors: [],
+    streamInputTokens: null,
+    streamOutputTokens: null,
+    recentStderr: "",
     pendingPermissions: /* @__PURE__ */ new Map(),
     subagents: null,
     supportsSubsessions: capabilities.includes("session.subsession"),
@@ -53084,6 +54371,13 @@ async function openSession(input2, context, capabilities) {
     sessionId: input2.sessionId,
     config: configStateFor(session)
   });
+  if (session.contextWindowMaxTokens !== null) {
+    context.emit({
+      type: "session.usage",
+      sessionId: input2.sessionId,
+      usage: { contextWindowMaxTokens: session.contextWindowMaxTokens }
+    });
+  }
 }
 function readConfigured(value) {
   if (typeof value !== "string" || value.length === 0 || value === "default") return null;
@@ -53204,7 +54498,16 @@ function configStateFor(session) {
     models: catalogModelsCache ?? [],
     modes: STATIC_MODES,
     thinkingOptions: [],
-    settings: []
+    // The Fast toggle is offered only for models whose manifest row allows it.
+    settings: session.fastModeSupported ? [
+      {
+        type: "toggle",
+        id: "fast_mode",
+        label: "Fast",
+        description: "Lower latency Opus responses at higher token cost",
+        value: session.fastMode
+      }
+    ] : []
   };
 }
 function readStoredSessionId(persistence) {
@@ -53213,6 +54516,16 @@ function readStoredSessionId(persistence) {
   }
   const stored = persistence.data.claudeSessionId;
   return typeof stored === "string" && stored.length > 0 ? stored : null;
+}
+function rawPromptText(content) {
+  const parts = [];
+  for (const block of content) {
+    if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
+      parts.push(block.text);
+    }
+  }
+  const joined = parts.join("\n").trim();
+  return joined.length > 0 ? joined : "[attachment]";
 }
 async function promptSession(input2, context) {
   const session = context.sessions.get(input2.sessionId);
@@ -53262,6 +54575,10 @@ async function promptSession(input2, context) {
     message: { role: "user", content: blocks },
     parent_tool_use_id: null
   });
+  session.pendingUserAnchors.push({
+    clientMessageId: input2.prompt.clientMessageId,
+    text: rawPromptText(input2.prompt.input.content)
+  });
   await publishCommands(session, context);
 }
 async function commandSession(input2, context, session) {
@@ -53308,6 +54625,10 @@ async function commandSession(input2, context, session) {
     message: { role: "user", content: [{ type: "text", text }] },
     parent_tool_use_id: null
   });
+  session.pendingUserAnchors.push({
+    clientMessageId: input2.prompt.clientMessageId,
+    text: `/${input2.prompt.input.name}${args.trim().length > 0 ? ` ${args}` : ""}`
+  });
   await publishCommands(session, context);
 }
 async function steerSession(input2, context, session) {
@@ -53351,6 +54672,10 @@ async function steerSession(input2, context, session) {
     parent_tool_use_id: null,
     priority: "next",
     uuid: (0, import_node_crypto5.randomUUID)()
+  });
+  session.pendingUserAnchors.push({
+    clientMessageId: input2.prompt.clientMessageId,
+    text: rawPromptText(input2.prompt.input.content)
   });
   context.emit({
     type: "session.prompt_result",
@@ -53406,19 +54731,50 @@ async function ensureQuery(session, context) {
   const values = await context.loadValues();
   const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const permissionMode = session.desiredMode ?? void 0;
+  const providerOptions = resolveProviderOptions(session);
+  const thinking = thinkingStartOptions(session.desiredThinking);
+  const effortLevel = thinking.settings !== void 0 && typeof thinking.settings === "object" && thinking.settings !== null && "effortLevel" in thinking.settings ? thinking.settings.effortLevel : void 0;
+  const settings = {
+    ...providerOptions.settings,
+    // Thinking effort wins over a leftover providerOptions.settings.effortLevel
+    // so a mode picker change is not silently ignored.
+    ...effortLevel !== void 0 ? { effortLevel } : {},
+    ...session.fastMode ? { fastMode: true } : {}
+  };
   const options = {
     cwd: session.config.cwd,
     env: { ...process.env, ...session.config.env },
     abortController: session.abort,
+    // Token-level stream events drive the mid-turn context ring (the timeline
+    // itself still renders complete messages).
+    includePartialMessages: true,
+    // Mirror the native provider: load the user's settings/CLAUDE.md layers.
+    settingSources: ["user", "project", "local"],
+    // Required for provider-level file rewind.
+    enableFileCheckpointing: true,
+    stderr: (data) => captureStderr(session, data),
     ...session.claudeSessionId !== null ? { resume: session.claudeSessionId } : {},
     ...session.desiredModel !== null ? { model: session.desiredModel } : {},
-    ...session.translatedSystemPrompt !== null ? { systemPrompt: session.translatedSystemPrompt } : {},
-    ...permissionMode !== void 0 ? {
-      permissionMode,
-      ...permissionMode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}
+    ...session.translatedSystemPrompt !== null ? {
+      // Preset + append keeps Claude Code's built-in system prompt (only
+      // the agent-specific instructions are translated), matching the
+      // native provider.
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: session.translatedSystemPrompt
+      }
     } : {},
+    // Keep the bypass launch capability available so a later
+    // setPermissionMode("bypassPermissions") does not fail after a restart
+    // (native provider parity).
+    allowDangerouslySkipPermissions: true,
+    ...permissionMode !== void 0 ? { permissionMode } : {},
+    ...session.config.persist ? { persistSession: true } : {},
     ...executable !== null ? { pathToClaudeCodeExecutable: executable } : {},
-    ...thinkingStartOptions(session.desiredThinking),
+    ...thinking.thinking !== void 0 ? { thinking: thinking.thinking } : {},
+    ...Object.keys(settings).length > 0 ? { settings } : {},
+    ...providerOptions.spread,
     canUseTool: ((toolName, input2, toolOptions) => requestPermission(
       session,
       toolName,
@@ -53427,9 +54783,88 @@ async function ensureQuery(session, context) {
       context
     ))
   };
+  const servers = normalizeMcpServers(session.config.mcpServers);
+  if (servers !== void 0) options.mcpServers = servers;
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
   session.pump = pumpQuery(session, query, context);
+}
+function normalizeMcpServers(servers) {
+  const result = {};
+  for (const [name, server] of Object.entries(servers)) {
+    if (typeof name !== "string" || name.length === 0) continue;
+    if (server.type === "stdio") {
+      result[name] = {
+        type: "stdio",
+        command: server.command,
+        ...server.args !== void 0 ? { args: [...server.args] } : {},
+        ...server.env !== void 0 ? { env: { ...server.env } } : {},
+        ...server.alwaysLoad === true ? { alwaysLoad: true } : {}
+      };
+    } else if (server.type === "http" || server.type === "sse") {
+      result[name] = {
+        type: server.type,
+        url: server.url,
+        ...server.headers !== void 0 ? { headers: { ...server.headers } } : {},
+        ...server.alwaysLoad === true ? { alwaysLoad: true } : {}
+      };
+    }
+  }
+  return result;
+}
+function toolPolicyAllowedTools(toolPolicy) {
+  if (toolPolicy === void 0 || !Array.isArray(toolPolicy.preapproved)) return [];
+  const grants = [];
+  for (const grant of toolPolicy.preapproved) {
+    if (typeof grant === "object" && grant !== null && grant.kind === "mcp" && typeof grant.server === "string" && typeof grant.tool === "string") {
+      grants.push(`mcp__${grant.server}__${grant.tool}`);
+    }
+  }
+  return grants;
+}
+function resolveProviderOptions(session) {
+  const allowedTools = toolPolicyAllowedTools(session.config.toolPolicy);
+  const disallowedTools = [];
+  const additionalDirectories = [];
+  const settings = {};
+  let sandbox;
+  const raw = session.config.providerOptions;
+  if (typeof raw === "object" && raw !== null) {
+    for (const key of ["allowedTools", "disallowedTools", "additionalDirectories"]) {
+      const list = raw[key];
+      if (!Array.isArray(list)) continue;
+      for (const entry of list) {
+        if (typeof entry !== "string" || entry.length === 0) continue;
+        if (key === "allowedTools") allowedTools.push(entry);
+        else if (key === "disallowedTools") disallowedTools.push(entry);
+        else additionalDirectories.push(entry);
+      }
+    }
+    const rawSettings = raw["settings"];
+    if (typeof rawSettings === "object" && rawSettings !== null) {
+      Object.assign(settings, rawSettings);
+    }
+    const rawSandbox = raw["sandbox"];
+    if (typeof rawSandbox === "object" && rawSandbox !== null) {
+      sandbox = rawSandbox;
+    }
+  }
+  return {
+    spread: {
+      ...allowedTools.length > 0 ? { allowedTools: [...new Set(allowedTools)] } : {},
+      ...disallowedTools.length > 0 ? { disallowedTools: [...new Set(disallowedTools)] } : {},
+      ...additionalDirectories.length > 0 ? { additionalDirectories: [...new Set(additionalDirectories)] } : {},
+      ...sandbox !== void 0 ? { sandbox } : {}
+    },
+    settings
+  };
+}
+function captureStderr(session, data) {
+  const line = data.trim();
+  if (line.length === 0) return;
+  console.error(`[translate-claude] ${line}`);
+  session.recentStderr = `${session.recentStderr}
+${line}`.slice(-4e3);
 }
 async function publishCommands(session, context) {
   if (session.commandsPublished || session.query?.supportedCommands === void 0 || session.closed) {
@@ -53478,16 +54913,30 @@ async function applyConfigChanges(session, changes) {
   if (Object.hasOwn(changes, "model")) {
     const model = changes.model ?? null;
     session.desiredModel = model === null || model === "default" ? null : model;
+    session.fastModeSupported = claudeModelSupportsFastMode(session.desiredModel);
+    session.contextWindowMaxTokens = findClaudeModel(session.desiredModel)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
+    if (session.fastMode && !session.fastModeSupported) {
+      session.fastMode = false;
+      if (session.query?.applyFlagSettings !== void 0) {
+        await session.query.applyFlagSettings({ fastMode: false }).catch(() => void 0);
+      }
+    }
     if (session.query?.setModel !== void 0) {
       await session.query.setModel(session.desiredModel ?? void 0).catch(() => void 0);
     }
   }
   if (Object.hasOwn(changes, "mode")) {
     const mode = changes.mode ?? null;
+    const previousMode = session.desiredMode ?? "default";
     if (mode === null || mode === "default") {
       session.desiredMode = null;
     } else if (VALID_MODES.has(mode)) {
       session.desiredMode = mode;
+    }
+    if (session.desiredMode === "plan") {
+      if (previousMode !== "plan") session.planResumeMode = previousMode;
+    } else {
+      session.planResumeMode = session.desiredMode ?? "default";
     }
     if (session.query?.setPermissionMode !== void 0) {
       await session.query.setPermissionMode(session.desiredMode ?? "default").catch(() => void 0);
@@ -53498,6 +54947,18 @@ async function applyConfigChanges(session, changes) {
     session.desiredThinking = thinking === null || thinking === "default" || thinking.length === 0 ? null : thinking;
     if (session.query?.applyFlagSettings !== void 0) {
       await session.query.applyFlagSettings(thinkingFlagSettings(session.desiredThinking)).catch(() => void 0);
+    }
+  }
+  if (Object.hasOwn(changes, "settings")) {
+    const settings = changes.settings ?? {};
+    if (Object.hasOwn(settings, "fast_mode")) {
+      session.fastMode = settings["fast_mode"] === true;
+      if (session.fastMode && !session.fastModeSupported) {
+        session.fastMode = false;
+      }
+      if (session.query?.applyFlagSettings !== void 0) {
+        await session.query.applyFlagSettings({ fastMode: session.fastMode }).catch(() => void 0);
+      }
     }
   }
 }
@@ -53547,10 +55008,12 @@ function fallbackModels() {
 }
 function modelInfoToProviderModel(info) {
   const thinkingOptions = thinkingOptionsForModel(info);
+  const manifest = findClaudeModel(info.value);
   return {
     id: info.value,
     label: info.displayName ?? info.value,
     ...info.description !== void 0 ? { description: info.description } : {},
+    ...manifest?.contextWindowMaxTokens !== void 0 ? { contextWindowMaxTokens: manifest.contextWindowMaxTokens } : {},
     thinkingOptions,
     defaultThinkingOptionId: thinkingOptions.find((option) => option.isDefault)?.id
   };
@@ -53591,9 +55054,13 @@ function requestPermission(session, toolName, input2, toolOptions, context) {
   }
   return requestToolPermission(session, toolName, input2, toolOptions, context);
 }
-function waitForPermissionResponse(session, permissionId, request, toolOptions, emit, question) {
+function waitForPermissionResponse(session, permissionId, request, toolOptions, emit, question, plan = false) {
   return new Promise((resolve5) => {
-    session.pendingPermissions.set(permissionId, { resolve: resolve5, ...question !== void 0 ? { question } : {} });
+    session.pendingPermissions.set(permissionId, {
+      resolve: resolve5,
+      ...question !== void 0 ? { question } : {},
+      ...plan ? { plan: true } : {}
+    });
     toolOptions.signal.addEventListener("abort", () => {
       const pending = session.pendingPermissions.get(permissionId);
       if (pending === void 0) return;
@@ -53607,26 +55074,61 @@ function waitForPermissionResponse(session, permissionId, request, toolOptions, 
 function requestToolPermission(session, toolName, input2, toolOptions, context) {
   const emit = (event) => context.emit(event);
   const permissionId = toolOptions.requestId;
+  const kind = resolvePermissionKind(toolName, input2);
   return waitForPermissionResponse(
     session,
     permissionId,
     {
       id: permissionId,
       name: toolName,
-      kind: "tool",
+      kind,
       ...toolOptions.title !== void 0 ? { title: toolOptions.title } : {},
       ...toolOptions.description !== void 0 ? { description: toolOptions.description } : toolOptions.displayName !== void 0 ? { description: toolOptions.displayName } : {},
       // The SDK hands a plain JSON object; round-trip keeps the wire shape
       // the daemon's JsonValue contract expects.
       input: JSON.parse(JSON.stringify(input2)),
-      actions: [
-        { id: "allow", label: "Allow", behavior: "allow" },
-        { id: "deny", label: "Deny", behavior: "deny" }
-      ]
+      // The SDK's permission suggestions (e.g. "always allow") ride along so
+      // the app can offer them with the card.
+      ...toolOptions.suggestions !== void 0 ? { suggestions: JSON.parse(JSON.stringify(toolOptions.suggestions)) } : {},
+      ...kind === "plan" ? {
+        metadata: {
+          ...typeof input2.plan === "string" && input2.plan.length > 0 ? { planText: input2.plan } : {}
+        },
+        actions: buildPlanPermissionActions(session.planResumeMode)
+      } : {},
+      ...kind === "tool" ? {
+        actions: [
+          { id: "allow", label: "Allow", behavior: "allow" },
+          { id: "deny", label: "Deny", behavior: "deny" }
+        ]
+      } : {}
     },
     toolOptions,
-    emit
+    emit,
+    void 0,
+    kind === "plan"
   );
+}
+function resolvePermissionKind(toolName, input2) {
+  if (toolName === "ExitPlanMode") return "plan";
+  if (toolName === "AskUserQuestion" && Array.isArray(input2.questions)) return "question";
+  return "tool";
+}
+function buildPlanPermissionActions(resumeMode) {
+  const actions = [
+    { id: "reject", label: "Reject", behavior: "deny", variant: "danger", intent: "dismiss" },
+    { id: "implement", label: "Implement", behavior: "allow", variant: "primary", intent: "implement" }
+  ];
+  if (resumeMode === "bypassPermissions") {
+    actions.push({
+      id: "implement_resume",
+      label: "Implement with Bypass",
+      behavior: "allow",
+      variant: "secondary",
+      intent: "implement_resume"
+    });
+  }
+  return actions;
 }
 async function requestQuestionPermission(session, input2, toolOptions, context) {
   const emit = (event) => context.emit(event);
@@ -53676,6 +55178,20 @@ async function respondToPermission(session, permissionId, response, context) {
     if (pending.question !== void 0) {
       await resolveQuestionAllow(pending.question, response, pending.resolve, context);
     } else {
+      if (pending.plan === true) {
+        const shouldResumeBypass = response.selectedActionId === "implement_resume" && session.planResumeMode === "bypassPermissions";
+        const targetMode = shouldResumeBypass ? "bypassPermissions" : "acceptEdits";
+        session.desiredMode = targetMode;
+        session.planResumeMode = targetMode;
+        if (session.query?.setPermissionMode !== void 0) {
+          await session.query.setPermissionMode(targetMode).catch(() => void 0);
+        }
+        emit({
+          type: "session.config",
+          sessionId: session.id,
+          config: configStateFor(session)
+        });
+      }
       pending.resolve({
         behavior: "allow",
         updatedInput: response.updatedInput,
@@ -53721,10 +55237,20 @@ async function pumpQuery(session, query, context) {
       handleSdkMessage(session, message, context);
     }
   } catch (error62) {
-    if (!session.closed) finishDeadQuery(session, describe3(error62), emit);
+    if (session.closed) return;
+    if (session.detached) {
+      session.detached = false;
+      return;
+    }
+    finishDeadQuery(session, describe3(error62), emit);
     return;
   }
-  if (!session.closed) finishDeadQuery(session, "Claude exited unexpectedly", emit);
+  if (session.closed) return;
+  if (session.detached) {
+    session.detached = false;
+    return;
+  }
+  finishDeadQuery(session, "Claude exited unexpectedly", emit);
 }
 function finishDeadQuery(session, message, emit) {
   session.query = null;
@@ -53756,7 +55282,10 @@ function finishDeadQuery(session, message, emit) {
     emit({
       type: "session.runtime_failed",
       sessionId: session.id,
-      error: { message }
+      error: {
+        message,
+        ...session.recentStderr.length > 0 ? { diagnostic: session.recentStderr } : {}
+      }
     });
   }
 }
@@ -53765,11 +55294,23 @@ function handleSdkMessage(session, message, context) {
   if (session.subagents?.observeSystemMessage(message) === true) return;
   if (message.type === "system") {
     if (message.subtype === "init") void publishCommands(session, context);
+    if (message.subtype === "status") {
+      noteCompactionStatus(session, message, emit);
+      return;
+    }
+    if (message.subtype === "compact_boundary") {
+      noteCompactionBoundary(session, message, emit);
+      return;
+    }
     return;
   }
   const parentToolUseId = message.parent_tool_use_id;
   if (typeof parentToolUseId === "string" && parentToolUseId.length > 0) {
     session.subagents?.handleSidechainMessage(message, parentToolUseId);
+    return;
+  }
+  if (message.type === "stream_event") {
+    noteStreamEventUsage(session, message, emit);
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
@@ -53826,6 +55367,7 @@ function handleSdkMessage(session, message, context) {
     return;
   }
   if (message.type === "user" && message.parent_tool_use_id === null) {
+    noteRewindAnchor(session, message, emit);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
     for (const block of content) {
@@ -53862,23 +55404,64 @@ function handleSdkMessage(session, message, context) {
     return;
   }
   if (message.type === "result") {
+    const missingConversation = readMissingConversationError(message, session.claudeSessionId);
+    if (missingConversation !== null) {
+      session.claudeSessionId = null;
+      emit({
+        type: "session.persistence",
+        sessionId: session.id,
+        persistence: { version: 1, data: {} }
+      });
+      emit({
+        type: "session.notice",
+        sessionId: session.id,
+        notice: {
+          id: "claude-resume-missing",
+          severity: "warning",
+          title: "Claude session not found",
+          description: "The stored Claude transcript is gone; the next prompt starts a fresh session. " + missingConversation
+        }
+      });
+      const active2 = session.active;
+      session.active = null;
+      if (active2 !== null) {
+        emit({
+          type: "session.turn",
+          sessionId: session.id,
+          turnId: active2.turnId,
+          state: "failed",
+          error: { message: missingConversation }
+        });
+      }
+      session.detached = true;
+      session.abort.abort();
+      session.abort = new AbortController();
+      for (const pending of session.pendingPermissions.values()) {
+        pending.resolve({ behavior: "deny", message: "Claude session ended" });
+      }
+      session.pendingPermissions.clear();
+      session.query = null;
+      session.pump = null;
+      return;
+    }
     session.claudeSessionId = message.session_id;
     emit({
       type: "session.persistence",
       sessionId: session.id,
       persistence: { version: 1, data: { claudeSessionId: message.session_id } }
     });
+    recordModelContextWindow(session, message.modelUsage);
+    session.streamInputTokens = null;
+    session.streamOutputTokens = null;
     const active = session.active;
     if (active === null) return;
-    const modelUsage = message.modelUsage;
-    const usage = summarizeModelUsage(modelUsage);
-    const context2 = contextWindowUsage(session, modelUsage);
-    if (usage !== void 0 || context2 !== void 0) {
+    const usage = buildResultUsage(session, message);
+    if (usage !== void 0) {
       emit({
         type: "session.usage",
         sessionId: session.id,
         turnId: active.turnId,
-        usage: { ...usage, ...context2 }
+        usage
       });
     }
     session.active = null;
@@ -53899,6 +55482,17 @@ function handleSdkMessage(session, message, context) {
       });
     }
   }
+}
+function readMissingConversationError(message, claudeSessionId) {
+  if (claudeSessionId === null) return null;
+  if (message.type !== "result" || message.subtype !== "error_during_execution") return null;
+  const errors = Array.isArray(message.errors) ? message.errors : [];
+  for (const entry of errors) {
+    if (typeof entry !== "string") continue;
+    const match = /^No conversation found with session ID:\s*(.+)$/.exec(entry.trim());
+    if (match !== null && match[1]?.trim() === claudeSessionId) return entry.trim();
+  }
+  return null;
 }
 function flattenToolResult(content) {
   if (typeof content === "string") return { text: content, images: [] };
@@ -53923,68 +55517,186 @@ function flattenToolResult(content) {
   }
   return { text: parts.length > 0 ? parts.join("\n") : null, images };
 }
-function summarizeModelUsage(modelUsage) {
-  if (typeof modelUsage !== "object" || modelUsage === null) return void 0;
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let totalCostUsd = 0;
-  for (const entry of Object.values(modelUsage)) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const record2 = entry;
-    if (typeof record2.inputTokens === "number") inputTokens += record2.inputTokens;
-    if (typeof record2.outputTokens === "number") outputTokens += record2.outputTokens;
-    if (typeof record2.costUSD === "number") totalCostUsd += record2.costUSD;
+function buildResultUsage(session, message) {
+  const usage = message.usage;
+  const usageRecord = typeof usage === "object" && usage !== null ? usage : void 0;
+  const totalCostUsd = typeof message.total_cost_usd === "number" && Number.isFinite(message.total_cost_usd) ? message.total_cost_usd : void 0;
+  const inputTokens = readFiniteToken(usageRecord?.input_tokens);
+  const cachedInputTokens = readFiniteToken(usageRecord?.cache_read_input_tokens);
+  const outputTokens = readFiniteToken(usageRecord?.output_tokens);
+  if (inputTokens === void 0 && outputTokens === void 0 && totalCostUsd === void 0) {
+    const ring2 = ringUsage(session);
+    return ring2 === void 0 ? void 0 : { ...ring2 };
   }
-  if (inputTokens === 0 && outputTokens === 0 && totalCostUsd === 0) return void 0;
-  return {
-    ...inputTokens > 0 ? { inputTokens: Math.round(inputTokens) } : {},
-    ...outputTokens > 0 ? { outputTokens: Math.round(outputTokens) } : {},
-    ...totalCostUsd > 0 ? { totalCostUsd } : {}
+  const result = {
+    ...inputTokens !== void 0 ? { inputTokens } : {},
+    ...cachedInputTokens !== void 0 && cachedInputTokens > 0 ? { cachedInputTokens } : {},
+    ...outputTokens !== void 0 ? { outputTokens } : {},
+    ...totalCostUsd !== void 0 ? { totalCostUsd } : {}
   };
+  const ring = ringUsage(session);
+  return { ...result, ...ring };
+}
+function readFiniteToken(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.round(value) : void 0;
 }
 function noteAssistantContextUsage(session, message) {
   const usage = message.usage;
   if (typeof usage !== "object" || usage === null) return;
   const record2 = usage;
   if (typeof record2.input_tokens !== "number" || record2.input_tokens < 0) return;
-  const used = record2.input_tokens + (typeof record2.cache_read_input_tokens === "number" && record2.cache_read_input_tokens > 0 ? record2.cache_read_input_tokens : 0) + (typeof record2.cache_creation_input_tokens === "number" && record2.cache_creation_input_tokens > 0 ? record2.cache_creation_input_tokens : 0);
-  if (used <= 0) return;
-  session.contextUsage = {
-    usedTokens: used,
-    model: typeof message.model === "string" ? message.model : session.contextUsage?.model ?? null
-  };
+  const promptUsed = record2.input_tokens + (typeof record2.cache_read_input_tokens === "number" && record2.cache_read_input_tokens > 0 ? record2.cache_read_input_tokens : 0) + (typeof record2.cache_creation_input_tokens === "number" && record2.cache_creation_input_tokens > 0 ? record2.cache_creation_input_tokens : 0);
+  if (promptUsed <= 0) return;
+  const output2 = typeof record2.output_tokens === "number" && record2.output_tokens > 0 ? record2.output_tokens : 0;
+  session.contextUsage = { usedTokens: promptUsed + output2 };
 }
-function contextWindowUsage(session, modelUsage) {
-  const context = session.contextUsage;
-  const used = context?.usedTokens;
-  const max = context === null ? void 0 : contextWindowForModel(modelUsage, context.model);
+function recordModelContextWindow(session, modelUsage) {
+  if (typeof modelUsage !== "object" || modelUsage === null) return;
+  let max;
+  for (const value of Object.values(modelUsage)) {
+    if (typeof value !== "object" || value === null) continue;
+    const window2 = value.contextWindow;
+    if (typeof window2 !== "number" || !Number.isFinite(window2) || window2 <= 0) continue;
+    max = Math.max(max ?? 0, window2);
+  }
+  if (max !== void 0) session.contextWindowMaxTokens = max;
+}
+function ringUsage(session) {
+  const used = session.contextUsage?.usedTokens;
+  const max = session.contextWindowMaxTokens ?? void 0;
   if (used === void 0 && max === void 0) return void 0;
   return {
     ...used !== void 0 ? { contextWindowUsedTokens: used } : {},
     ...max !== void 0 ? { contextWindowMaxTokens: max } : {}
   };
 }
-function contextWindowForModel(modelUsage, model) {
-  if (typeof modelUsage !== "object" || modelUsage === null) return void 0;
-  const candidates = [];
-  for (const [key, entry] of Object.entries(modelUsage)) {
-    if (typeof entry !== "object" || entry === null) continue;
-    const record2 = entry;
-    if (typeof record2.contextWindow !== "number" || record2.contextWindow <= 0) continue;
-    candidates.push({
-      key,
-      canonical: typeof record2.canonicalModel === "string" ? record2.canonicalModel : void 0,
-      contextWindow: record2.contextWindow
+function noteStreamEventUsage(session, message, emit) {
+  const event = message.event;
+  if (typeof event !== "object" || event === null) return;
+  const record2 = event;
+  let used;
+  if (record2.type === "message_start") {
+    const request = readStreamRequestInputTokens(
+      event.message
+    );
+    if (request === void 0) return;
+    session.streamInputTokens = request;
+    session.streamOutputTokens = 0;
+  } else if (record2.type === "message_delta") {
+    const output2 = readStreamRequestOutputTokens(event);
+    if (output2 === void 0) return;
+    session.streamOutputTokens = output2;
+  } else {
+    return;
+  }
+  if (typeof session.streamInputTokens !== "number" || typeof session.streamOutputTokens !== "number") {
+    return;
+  }
+  used = session.streamInputTokens + session.streamOutputTokens;
+  if (used <= 0) return;
+  session.contextUsage = { usedTokens: used };
+  emit({
+    type: "session.usage",
+    sessionId: session.id,
+    ...session.active !== null ? { turnId: session.active.turnId } : {},
+    usage: {
+      contextWindowUsedTokens: used,
+      ...session.contextWindowMaxTokens !== null ? { contextWindowMaxTokens: session.contextWindowMaxTokens } : {}
+    }
+  });
+}
+function readStreamRequestInputTokens(message) {
+  const usage = typeof message === "object" && message !== null ? message.usage : void 0;
+  if (typeof usage !== "object" || usage === null) return void 0;
+  const record2 = usage;
+  const inputTokens = typeof record2.input_tokens === "number" && Number.isFinite(record2.input_tokens) ? record2.input_tokens : void 0;
+  if (inputTokens === void 0 || inputTokens < 0) return void 0;
+  const cacheCreation = typeof record2.cache_creation_input_tokens === "number" && Number.isFinite(record2.cache_creation_input_tokens) && record2.cache_creation_input_tokens > 0 ? record2.cache_creation_input_tokens : 0;
+  const cacheRead = typeof record2.cache_read_input_tokens === "number" && Number.isFinite(record2.cache_read_input_tokens) && record2.cache_read_input_tokens > 0 ? record2.cache_read_input_tokens : 0;
+  return inputTokens + cacheCreation + cacheRead;
+}
+function readStreamRequestOutputTokens(event) {
+  const output2 = typeof event === "object" && event !== null ? event.usage : void 0;
+  const outputTokens = typeof output2 === "object" && output2 !== null ? output2.output_tokens : void 0;
+  return typeof outputTokens === "number" && Number.isFinite(outputTokens) && outputTokens >= 0 ? outputTokens : void 0;
+}
+function noteCompactionStatus(session, message, emit) {
+  const status = message.status;
+  if (status !== "compacting") return;
+  if (session.compactionMarkerOpen) return;
+  session.compactionMarkerOpen = true;
+  emit({
+    type: "timeline.item",
+    sessionId: session.id,
+    item: { type: "compaction", id: "compaction", status: "loading" }
+  });
+}
+function noteCompactionBoundary(session, message, emit) {
+  session.compactionMarkerOpen = false;
+  const metadata = readCompactionMetadata(message);
+  emit({
+    type: "timeline.item",
+    sessionId: session.id,
+    item: {
+      type: "compaction",
+      id: "compaction",
+      status: "completed",
+      // An absent trigger is an automatic compaction (native parity).
+      trigger: metadata?.trigger === "manual" ? "manual" : "auto",
+      ...metadata?.preTokens !== void 0 ? { preTokens: metadata.preTokens } : {}
+    }
+  });
+  session.streamInputTokens = null;
+  session.streamOutputTokens = null;
+  if (metadata?.postTokens !== void 0) {
+    session.contextUsage = { usedTokens: metadata.postTokens };
+    emit({
+      type: "session.usage",
+      sessionId: session.id,
+      ...session.active !== null ? { turnId: session.active.turnId } : {},
+      usage: {
+        contextWindowUsedTokens: metadata.postTokens,
+        ...session.contextWindowMaxTokens !== null ? { contextWindowMaxTokens: session.contextWindowMaxTokens } : {}
+      }
     });
   }
-  if (candidates.length === 0) return void 0;
-  if (model !== null) {
-    const matched = candidates.filter(
-      (candidate) => candidate.key === model || candidate.canonical === model || model.startsWith(candidate.key) || candidate.canonical !== void 0 && model.startsWith(candidate.canonical)
-    ).sort((left, right) => right.key.length - left.key.length);
-    if (matched.length > 0) return matched[0]?.contextWindow;
+}
+function readCompactionMetadata(message) {
+  const record2 = message;
+  const metadata = typeof record2.compaction === "object" && record2.compaction !== null ? record2.compaction : typeof record2.metadata === "object" && record2.metadata !== null ? record2.metadata : void 0;
+  if (metadata === void 0) return void 0;
+  const source = metadata;
+  return {
+    ...typeof source.trigger === "string" ? { trigger: source.trigger } : {},
+    ...typeof source.preTokens === "number" && Number.isFinite(source.preTokens) ? { preTokens: source.preTokens } : {},
+    ...typeof source.postTokens === "number" && Number.isFinite(source.postTokens) ? { postTokens: source.postTokens } : {}
+  };
+}
+function noteRewindAnchor(session, message, emit) {
+  const uuid3 = message.uuid;
+  if (typeof uuid3 !== "string" || uuid3.length === 0) return;
+  const content = message.message?.content;
+  if (Array.isArray(content) && content.some(
+    (block) => typeof block === "object" && block !== null && block.type === "tool_result"
+  )) {
+    return;
   }
-  return candidates.length === 1 ? candidates[0]?.contextWindow : void 0;
+  if (session.rewindUserMessageIds.includes(uuid3)) return;
+  session.rewindUserMessageIds.push(uuid3);
+  const anchor2 = session.pendingUserAnchors.shift();
+  if (anchor2 === void 0) return;
+  emit({
+    type: "timeline.item",
+    sessionId: session.id,
+    item: {
+      type: "user_message",
+      id: `um-${uuid3}`,
+      text: anchor2.text,
+      messageId: uuid3,
+      clientMessageId: anchor2.clientMessageId,
+      revertToken: uuid3
+    }
+  });
 }
 async function teardownSession(session) {
   if (session.closed) return;
