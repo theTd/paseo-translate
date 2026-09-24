@@ -4,6 +4,7 @@ import {
   adapterCommand,
   assertAcpConfigured,
   assertConfigured,
+  isDataUriImageOnlyText,
   isReasoningTranslationEligible,
   knownAcpCommand,
   resolveTranslationSystemPrompt,
@@ -161,6 +162,39 @@ describe("translate settings schema", () => {
       translateProvidersRpc.output.safeParse({ providers: [{ id: "x", command: null, acp: "known" }] })
         .success,
     ).toBe(false);
+  });
+});
+
+describe("data-URI image text gate", () => {
+  it("matches a lone tool-screenshot message", () => {
+    expect(isDataUriImageOnlyText("![tool image](data:image/png;base64,aGVsbG8=)")).toBe(true);
+  });
+
+  it("matches several images separated by whitespace", () => {
+    expect(
+      isDataUriImageOnlyText(
+        "![tool image](data:image/png;base64,aGVsbG8=)\n![tool image](data:image/jpeg;base64,aGk=)",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps ordinary text eligible", () => {
+    expect(isDataUriImageOnlyText("Hello world")).toBe(false);
+  });
+
+  it("fails open on mixed text plus image", () => {
+    expect(isDataUriImageOnlyText("See this: ![tool image](data:image/png;base64,aGk=)")).toBe(
+      false,
+    );
+  });
+
+  it("keeps remote-URL images eligible (their alt text still translates)", () => {
+    expect(isDataUriImageOnlyText("![diagram](https://example.com/x.png)")).toBe(false);
+  });
+
+  it("leaves empty texts to the length gate", () => {
+    expect(isDataUriImageOnlyText("")).toBe(false);
+    expect(isDataUriImageOnlyText("   \n  ")).toBe(false);
   });
 });
 

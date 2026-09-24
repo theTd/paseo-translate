@@ -261,6 +261,27 @@ export const translatedReasoningDataSchema = z.object({
 export type TranslatedReasoningData = z.output<typeof translatedReasoningDataSchema>;
 
 /**
+ * Matches one Markdown image whose target is a data URI
+ * (`![alt](data:<mime>;base64,<payload>)`). Base64 has no `)` in its
+ * alphabet, so the first `)` always ends the target.
+ */
+const DATA_URI_IMAGE_PATTERN = /!\[[^\]]*\]\(data:[^)]*\)/g;
+
+/**
+ * True when a timeline text carries nothing translatable beyond embedded
+ * data-URI images (tool screenshots persisted before the provider stopped
+ * emitting base64, or foreign providers' equivalents). Sending such texts to
+ * the translation endpoint burns quota on base64 soup while the translated
+ * Markdown view cannot render images anyway, so the renderer keeps the
+ * original instead. Pure for unit tests. Mixed text-plus-image stays
+ * eligible (fail open, matching previous behavior).
+ */
+export function isDataUriImageOnlyText(text: string): boolean {
+  if (text.trim().length === 0) return false;
+  return text.replace(DATA_URI_IMAGE_PATTERN, "").trim().length === 0;
+}
+
+/**
  * Display eligibility for one reasoning block. Pure so the gating matrix is
  * unit-testable: only `complete` blocks translate (streaming shows the
  * original), empty texts would fail the RPC's min(1) contract, the pair is

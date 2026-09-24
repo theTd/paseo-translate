@@ -51430,6 +51430,13 @@ var translateSettings = (0, import_plugin.defineSettings)({
     translatePrompts: external_exports.boolean().default(true),
     translateResponses: external_exports.boolean().default(true),
     translateAllTimelines: external_exports.boolean().default(false),
+    /**
+     * Translate reasoning (thinking) blocks for display, like replies.
+     * Off by default: thinking blocks are often long, so translating them
+     * doubles endpoint spend on auxiliary text. Requires `translateResponses`
+     * (the server display path shares that gate).
+     */
+    translateReasoning: external_exports.boolean().default(false),
     translationTimeoutMs: external_exports.number().int().min(1e3).max(6e5).default(3e4),
     /**
      * Language of this plugin's own client screens and hints. "system"
@@ -51491,6 +51498,11 @@ var translateProvidersRpc = (0, import_plugin.defineRpc)({
   })
 });
 var translatedMessageDataSchema = external_exports.object({
+  text: external_exports.string(),
+  phase: external_exports.enum(["streaming", "complete"]),
+  messageId: external_exports.string().nullable()
+});
+var translatedReasoningDataSchema = external_exports.object({
   text: external_exports.string(),
   phase: external_exports.enum(["streaming", "complete"]),
   messageId: external_exports.string().nullable()
@@ -53681,17 +53693,6 @@ function handleSdkMessage(session, message, context) {
             detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output2.text)
           }
         });
-        output2.images.forEach((image, index) => {
-          emit({
-            type: "timeline.item",
-            sessionId: session.id,
-            item: {
-              type: "assistant_message",
-              id: `${result.tool_use_id}-image-${index}`,
-              text: `![tool image](data:${image.mimeType};base64,${image.data})`
-            }
-          });
-        });
       }
     }
     return;
@@ -53731,10 +53732,9 @@ function handleSdkMessage(session, message, context) {
   }
 }
 function flattenToolResult(content) {
-  if (typeof content === "string") return { text: content, images: [] };
-  if (!Array.isArray(content)) return { text: null, images: [] };
+  if (typeof content === "string") return { text: content };
+  if (!Array.isArray(content)) return { text: null };
   const parts = [];
-  const images = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) continue;
     const record2 = block;
@@ -53743,15 +53743,11 @@ function flattenToolResult(content) {
     } else if (record2.type === "image") {
       const source = block.source;
       if (typeof source === "object" && source !== null && typeof source.data === "string" && typeof source.media_type === "string") {
-        images.push({
-          mimeType: source.media_type,
-          data: source.data
-        });
         parts.push("[image]");
       }
     }
   }
-  return { text: parts.length > 0 ? parts.join("\n") : null, images };
+  return { text: parts.length > 0 ? parts.join("\n") : null };
 }
 function summarizeModelUsage(modelUsage) {
   if (typeof modelUsage !== "object" || modelUsage === null) return void 0;

@@ -1550,20 +1550,15 @@ function handleSdkMessage(
             detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output.text),
           },
         });
-        // Tool results can carry screenshots as base64 image blocks. Base64
-        // must never reach the tool output text; each image renders as its
-        // own markdown message instead (matching the native provider).
-        output.images.forEach((image, index) => {
-          emit({
-            type: "timeline.item",
-            sessionId: session.id,
-            item: {
-              type: "assistant_message",
-              id: `${result.tool_use_id}-image-${index}`,
-              text: `![tool image](data:${image.mimeType};base64,${image.data})`,
-            },
-          });
-        });
+        // Tool results can carry screenshots as base64 image blocks. The
+        // provider protocol has no image timeline item, and base64 must never
+        // become translatable text: a data URI inside an assistant_message
+        // would be sent to the translation endpoint (burning quota and
+        // stalling on multi-hundred-KB payloads) while rendering as garbage
+        // in the translated Markdown view, which has no image support (the
+        // ACP-internal native path drops non-text content the same way).
+        // The tool text keeps one "[image]" marker per screenshot instead;
+        // the pixels stay available to Claude in the SDK transcript.
       }
     }
     return;
@@ -1608,14 +1603,12 @@ function handleSdkMessage(
 
 interface ToolResultOutput {
   text: string | null;
-  images: Array<{ mimeType: string; data: string }>;
 }
 
 function flattenToolResult(content: unknown): ToolResultOutput {
-  if (typeof content === "string") return { text: content, images: [] };
-  if (!Array.isArray(content)) return { text: null, images: [] };
+  if (typeof content === "string") return { text: content };
+  if (!Array.isArray(content)) return { text: null };
   const parts: string[] = [];
-  const images: Array<{ mimeType: string; data: string }> = [];
   for (const block of content) {
     if (typeof block !== "object" || block === null) continue;
     const record = block as { type?: unknown };
@@ -1629,15 +1622,13 @@ function flattenToolResult(content: unknown): ToolResultOutput {
         typeof (source as { data?: unknown }).data === "string" &&
         typeof (source as { media_type?: unknown }).media_type === "string"
       ) {
-        images.push({
-          mimeType: (source as { media_type: string }).media_type,
-          data: (source as { data: string }).data,
-        });
+        // One marker per screenshot; the base64 payload itself is never
+        // kept (see the tool_result handler above).
         parts.push("[image]");
       }
     }
   }
-  return { text: parts.length > 0 ? parts.join("\n") : null, images };
+  return { text: parts.length > 0 ? parts.join("\n") : null };
 }
 
 /**

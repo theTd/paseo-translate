@@ -1209,6 +1209,105 @@ describe("translate claude provider extended protocol", () => {
     expect(usage).toMatchObject({ usage: { inputTokens: 100, outputTokens: 50 } });
   });
 
+  it("keeps tool-result screenshots out of translatable timeline text", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-shot", "tu-shot", "Bash", { command: "screenshot" });
+      yield {
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tu-shot",
+              content: [
+                { type: "text", text: "captured" },
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+                },
+              ],
+            },
+          ],
+        },
+        parent_tool_use_id: null,
+      } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Take a screenshot"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // The tool card keeps a marker so the screenshot is still visible as
+    // having been returned, but the base64 payload must never enter any
+    // timeline text (it would be sent to the translation endpoint).
+    const toolCall = events.find(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "tool_call" &&
+        event.item.callId === "tu-shot" &&
+        event.item.status === "completed",
+    );
+    expect(toolCall).toBeDefined();
+    if (toolCall?.type !== "timeline.item" || toolCall.item.type !== "tool_call") return;
+    // Pinned to the shell detail's output field: the marker must survive in
+    // the card itself, not just somewhere in the event envelope.
+    expect(JSON.stringify(toolCall.item.detail)).toContain("[image]");
+    expect(JSON.stringify(toolCall.item.detail)).not.toContain("base64");
+    const texts = events
+      .filter((event) => event.type === "timeline.item" && "text" in event.item)
+      .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : ""));
+    expect(texts.some((text) => text.includes("base64") || text.includes("data:image"))).toBe(false);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "timeline.item" &&
+          event.item.type === "assistant_message" &&
+          event.item.id === "tu-shot-image-0",
+      ),
+    ).toBe(false);
+  });
+
+  it("marks image-only tool results without leaking base64", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-shot-only", "tu-shot-only", "Bash", { command: "screenshot" });
+      yield {
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tu-shot-only",
+              content: [
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" },
+                },
+              ],
+            },
+          ],
+        },
+        parent_tool_use_id: null,
+      } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Take a screenshot"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const toolCall = events.find(
+      (event) =>
+        event.type === "timeline.item" &&
+        event.item.type === "tool_call" &&
+        event.item.callId === "tu-shot-only" &&
+        event.item.status === "completed",
+    );
+    expect(toolCall).toBeDefined();
+    if (toolCall?.type !== "timeline.item" || toolCall.item.type !== "tool_call") return;
+    // No text blocks at all: the whole output is the marker.
+    expect(JSON.stringify(toolCall.item.detail)).toContain("[image]");
+    expect(JSON.stringify(events)).not.toContain("base64");
+  });
+
   it("publishes slash commands reported by the CLI", async () => {
     const { fake, events, send } = await createHarness();
     fake.state.supportedCommands = [{ name: "review", description: "Review code" }];

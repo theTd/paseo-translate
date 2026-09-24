@@ -8,6 +8,7 @@ import {
 } from "@getpaseo/plugin/client";
 import {
   TRANSLATE_PROVIDER_IDS,
+  isDataUriImageOnlyText,
   translateSettings,
   type TranslatedMessageData,
 } from "../shared/translate";
@@ -50,9 +51,13 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
   const ownedByTranslateProvider =
     provider !== null && (TRANSLATE_PROVIDER_IDS as readonly string[]).includes(provider);
   // Empty assistant texts would fail the RPC's min(1) contract for nothing.
+  // Data-URI image texts (tool screenshots from older timelines or foreign
+  // providers) would burn endpoint quota on base64 soup the Markdown view
+  // cannot render anyway, so they keep the original without a job.
   const eligible =
     data.phase === "complete" &&
     data.text.length > 0 &&
+    !isDataUriImageOnlyText(data.text) &&
     languagePair !== null &&
     (ownedByTranslateProvider || translateAllTimelines);
 
