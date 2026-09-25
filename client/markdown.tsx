@@ -37,7 +37,11 @@ function Block({ node, colors }: { node: BlockNode; colors: MarkdownColors }) {
   switch (node.type) {
     case "paragraph":
       return (
-        <Text style={{ color: colors.foreground, marginBottom: 8 }}>
+        // selectable keeps translated text copyable on every host: native
+        // has no inherited selectability, and on web it opts the node into
+        // user-select:text next to the host's plugin surface. Inline children
+        // stay plain so each block remains a single native selection scope.
+        <Text selectable style={{ color: colors.foreground, marginBottom: 8 }}>
           <Inline nodes={node.children} colors={colors} />
         </Text>
       );
@@ -45,6 +49,7 @@ function Block({ node, colors }: { node: BlockNode; colors: MarkdownColors }) {
       const sizes = [22, 19, 17, 15, 14, 13];
       return (
         <Text
+          selectable
           style={{
             color: colors.foreground,
             fontSize: sizes[node.level - 1] ?? 14,
@@ -67,7 +72,10 @@ function Block({ node, colors }: { node: BlockNode; colors: MarkdownColors }) {
             marginBottom: 8,
           }}
         >
-          <Text style={{ color: colors.foreground, fontFamily: MONOSPACE, fontSize: 12.5 }}>
+          <Text
+            selectable
+            style={{ color: colors.foreground, fontFamily: MONOSPACE, fontSize: 12.5 }}
+          >
             {node.text}
           </Text>
         </View>
@@ -157,7 +165,10 @@ function TableRow({
             backgroundColor: header ? CODE_BACKGROUND : "transparent",
           }}
         >
-          <Text style={{ color: colors.foreground, fontWeight: header ? "700" : "400" }}>
+          <Text
+            selectable
+            style={{ color: colors.foreground, fontWeight: header ? "700" : "400" }}
+          >
             <Inline nodes={cell} colors={colors} />
           </Text>
         </View>
