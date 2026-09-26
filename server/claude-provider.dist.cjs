@@ -52377,6 +52377,8 @@ var translateSettings = (0, import_plugin.defineSettings)({
     innerAgentEnv: external_exports.record(external_exports.string(), external_exports.string()).default({}),
     /** Optional Claude Code executable path for the direct provider (Windows .cmd escape hatch). */
     claudeExecutablePath: external_exports.string().trim().default(""),
+    /** Optional Codex CLI executable path for the direct provider (Windows .cmd escape hatch). */
+    codexExecutablePath: external_exports.string().trim().default(""),
     translatePrompts: external_exports.boolean().default(true),
     translateResponses: external_exports.boolean().default(true),
     translateAllTimelines: external_exports.boolean().default(false),
@@ -52726,6 +52728,82 @@ function claudeModelSupportsFastMode(modelId) {
   return findClaudeModel(modelId)?.supportsFastMode === true;
 }
 
+// server/prompt-text.ts
+function isSerializedAttachment(text) {
+  if (!text.startsWith("{")) return false;
+  try {
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
+    return typeof parsed.mimeType === "string";
+  } catch {
+    return false;
+  }
+}
+async function translatePromptFragment(text, translate) {
+  if (text.trim().length === 0) return text;
+  if (isSerializedAttachment(text)) return text;
+  if (!text.startsWith("/")) return translate(text);
+  const match = /^(\S+\s*)([\s\S]*)$/.exec(text);
+  if (match === null || match[2].trim().length === 0) return text;
+  return `${match[1]}${await translate(match[2])}`;
+}
+function restorePromptFragment(translated, lookup) {
+  if (translated.trim().length === 0) return translated;
+  if (isSerializedAttachment(translated)) return translated;
+  if (!translated.startsWith("/")) return lookup(translated) ?? translated;
+  const match = /^(\S+\s*)([\s\S]*)$/.exec(translated);
+  if (match === null || match[2].trim().length === 0) return translated;
+  const restored = lookup(match[2]);
+  return restored === void 0 ? translated : `${match[1]}${restored}`;
+}
+
+// server/session-titles.ts
+var SESSION_TITLE_DISPLAY_LIMIT = 2e3;
+async function translateSessionTitlesForDisplay(sessions, deps) {
+  let display = false;
+  try {
+    const values = await deps.loadValues();
+    display = values.translateResponses && (values.userLanguage === void 0 || values.agentLanguage === void 0 || values.userLanguage !== values.agentLanguage);
+  } catch {
+    display = false;
+  }
+  const out = [];
+  for (const session of sessions) {
+    out.push(await restoreAndMaybeTranslate(session, deps.translator, display));
+  }
+  return out;
+}
+async function restoreAndMaybeTranslate(session, translator, display) {
+  const title = session.title;
+  if (title === void 0 || title.trim().length === 0) return session;
+  if (isSerializedAttachment(title)) return session;
+  let restored = title;
+  try {
+    restored = restorePromptFragment(title, (fragment) => {
+      try {
+        return translator.restoreOriginalFragment(fragment);
+      } catch {
+        return void 0;
+      }
+    });
+  } catch {
+    restored = title;
+  }
+  if (restored !== title) return { ...session, title: restored };
+  if (!display) return session;
+  if (title.length > SESSION_TITLE_DISPLAY_LIMIT) return session;
+  try {
+    const translated = await translatePromptFragment(
+      title,
+      (fragment) => translator.translate(fragment, "agent-to-user")
+    );
+    if (translated.trim().length === 0) return session;
+    return { ...session, title: translated };
+  } catch {
+    return session;
+  }
+}
+
 // server/claude-sessions.ts
 var import_promises12 = require("node:fs/promises");
 var import_node_path3 = require("node:path");
@@ -52854,35 +52932,6 @@ async function listClaudeTranscriptSummaries(cwd, limit) {
 var forkSession = {
   forkSession: jGt
 };
-
-// server/prompt-text.ts
-function isSerializedAttachment(text) {
-  if (!text.startsWith("{")) return false;
-  try {
-    const parsed = JSON.parse(text);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-    return typeof parsed.mimeType === "string";
-  } catch {
-    return false;
-  }
-}
-async function translatePromptFragment(text, translate) {
-  if (text.trim().length === 0) return text;
-  if (isSerializedAttachment(text)) return text;
-  if (!text.startsWith("/")) return translate(text);
-  const match = /^(\S+\s*)([\s\S]*)$/.exec(text);
-  if (match === null || match[2].trim().length === 0) return text;
-  return `${match[1]}${await translate(match[2])}`;
-}
-function restorePromptFragment(translated, lookup) {
-  if (translated.trim().length === 0) return translated;
-  if (isSerializedAttachment(translated)) return translated;
-  if (!translated.startsWith("/")) return lookup(translated) ?? translated;
-  const match = /^(\S+\s*)([\s\S]*)$/.exec(translated);
-  if (match === null || match[2].trim().length === 0) return translated;
-  const restored = lookup(match[2]);
-  return restored === void 0 ? translated : `${match[1]}${restored}`;
-}
 
 // server/question.ts
 var ASK_USER_QUESTION_TOOL = "AskUserQuestion";
@@ -54198,7 +54247,11 @@ async function listSessions(input2, context) {
     input2.cwd ?? process.cwd(),
     Math.max(1, Math.min(input2.limit ?? 20, 100))
   );
-  context.emit({ type: "sessions", requestId: input2.requestId, sessions });
+  context.emit({
+    type: "sessions",
+    requestId: input2.requestId,
+    sessions: await translateSessionTitlesForDisplay(sessions, context)
+  });
   context.emit({ type: "request.completed", requestId: input2.requestId });
 }
 async function revertSession(input2, context) {

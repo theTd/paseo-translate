@@ -26,6 +26,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslator, type TranslatorDeps } from "./translate";
 import { claudeModelSupportsFastMode, findClaudeModel } from "./claude-model-manifest";
+import { translateSessionTitlesForDisplay } from "./session-titles";
 import { listClaudeTranscriptSummaries } from "./claude-sessions";
 import { forkSession as sdkForkSession } from "./claude-rewind";
 import {
@@ -484,6 +485,8 @@ async function dispatch(
  * Session listing (capability `session.list`): this provider's own Claude
  * sessions for a working directory, from Claude's transcript files. Failures
  * read as an empty list — listing is discoverability, never a blocker.
+ * Titles are stored agent-language user text, so they are translated for
+ * display (fail soft: a failed title keeps its original text).
  */
 async function listSessions(
   input: Extract<ProviderInput, { type: "sessions" }>,
@@ -493,7 +496,11 @@ async function listSessions(
     input.cwd ?? process.cwd(),
     Math.max(1, Math.min(input.limit ?? 20, 100)),
   );
-  context.emit({ type: "sessions", requestId: input.requestId, sessions });
+  context.emit({
+    type: "sessions",
+    requestId: input.requestId,
+    sessions: await translateSessionTitlesForDisplay(sessions, context),
+  });
   context.emit({ type: "request.completed", requestId: input.requestId });
 }
 

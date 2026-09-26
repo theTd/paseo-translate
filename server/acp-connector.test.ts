@@ -54,13 +54,15 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 function permissionStream(
   permissionLine: string,
-  display: (text: string) => Promise<string>,
+  display?: (text: string) => Promise<string>,
+  restoreOriginal?: (fragment: string) => string | undefined,
 ): AcpStream {
   const stream = createTranslatingAcpStream({
     command: [process.execPath, "-e", PERMISSION_AGENT],
     env: { PERMISSION_LINE: permissionLine },
     translate: async (text) => text,
-    translateDisplay: display,
+    ...(display !== undefined ? { translateDisplay: display } : {}),
+    ...(restoreOriginal !== undefined ? { restoreOriginal } : {}),
   });
   streams.push(stream);
   return stream;
@@ -450,5 +452,90 @@ describe("translating ACP connector", () => {
       { type: "content", content: { type: "text", text: "Wähle eine Farbe" } },
       terminal,
     ]);
+  });
+
+  it("translates session/list result titles and keeps failures verbatim", async () => {
+    const sessionsLine = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 77,
+      result: {
+        sessions: [
+          { sessionId: "s-1", cwd: "/repo", title: "Welche Farbe?" },
+          { sessionId: "s-2", cwd: "/repo", title: "FAIL Farbe?" },
+          { sessionId: "s-3", cwd: "/repo" },
+        ],
+      },
+    });
+    const stream = permissionStream(sessionsLine, async (text) => {
+      if (text.includes("FAIL")) throw new Error("endpoint down");
+      return `EN(${text})`;
+    });
+
+    const messages = await readCount(stream, 2);
+    const result = messages.find((message) => "result" in message);
+    if (result === undefined || !("result" in result)) throw new Error("no list result received");
+    const sessions = (result.result as { sessions: Array<Record<string, unknown>> }).sessions;
+    expect(sessions.map((entry) => entry.title)).toEqual([
+      "EN(Welche Farbe?)",
+      "FAIL Farbe?",
+      undefined,
+    ]);
+    expect(sessions.map((entry) => entry.sessionId)).toEqual(["s-1", "s-2", "s-3"]);
+  });
+
+  it("leaves non-list results untouched", async () => {
+    const promptLine = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 78,
+      result: { stopReason: "end_turn" },
+    });
+    let called = false;
+    const stream = permissionStream(promptLine, async (text) => {
+      called = true;
+      return `EN(${text})`;
+    });
+
+    const messages = await readCount(stream, 2);
+    const result = messages.find((message) => "result" in message);
+    expect(result).toMatchObject({ id: 78, result: { stopReason: "end_turn" } });
+    expect(called).toBe(false);
+  });
+
+  it("restores list titles from prompt-time originals without display translation", async () => {
+    const sessionsLine = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 79,
+      result: { sessions: [{ sessionId: "s-1", cwd: "/repo", title: "DE(Hallo)" }] },
+    });
+    // No translateDisplay: exact originals still restore, with zero endpoint calls.
+    const stream = permissionStream(sessionsLine, undefined, (fragment) =>
+      fragment === "DE(Hallo)" ? "Hallo" : undefined,
+    );
+
+    const messages = await readCount(stream, 2);
+    const result = messages.find((message) => "result" in message);
+    expect(result).toMatchObject({
+      id: 79,
+      result: { sessions: [{ sessionId: "s-1", title: "Hallo" }] },
+    });
+  });
+
+  it("leaves over-long list titles verbatim without an endpoint call", async () => {
+    const long = `Titel ${"x".repeat(2_500)}`;
+    const sessionsLine = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 80,
+      result: { sessions: [{ sessionId: "s-1", cwd: "/repo", title: long }] },
+    });
+    let called = false;
+    const stream = permissionStream(sessionsLine, async (text) => {
+      called = true;
+      return `EN(${text})`;
+    });
+
+    const messages = await readCount(stream, 2);
+    const result = messages.find((message) => "result" in message);
+    expect(result).toMatchObject({ id: 80, result: { sessions: [{ title: long }] } });
+    expect(called).toBe(false);
   });
 });

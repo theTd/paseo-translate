@@ -1,7 +1,10 @@
 import { spawn } from "node:child_process";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
-import { translatePromptFragment } from "./prompt-text";
-
+import { isSerializedAttachment, restorePromptFragment, translatePromptFragment } from "./prompt-text";
+import {
+  MAX_SESSION_LIST_TITLES_PER_FRAME,
+  SESSION_TITLE_DISPLAY_LIMIT,
+} from "./session-titles";
 export interface TranslatingConnectorConfig {
   /** argv of the inner ACP-speaking agent, e.g. ["node", "agent.js"]. */
   command: readonly string[];
@@ -13,14 +16,20 @@ export interface TranslatingConnectorConfig {
   translate(text: string): Promise<string>;
   /**
    * Translates one agent-language text fragment into the user language for
-   * display. Used only for question-like `session/request_permission`
-   * requests inbound from the inner agent (chooser options, titles, and
-   * text content); option ids, kinds, raw input/output, diffs, and paths
-   * always pass through untouched so agent behavior never changes. Absent
-   * means no inbound translation. Fail soft: a rejection delivers the
-   * original frame rather than breaking the turn.
+   * display. Used for question-like `session/request_permission` requests
+   * inbound from the inner agent (chooser options, titles, and text content)
+   * and `session/list` result titles; option ids, kinds, raw input/output,
+   * diffs, and paths always pass through untouched so agent behavior never
+   * changes. Absent means no inbound translation. Fail soft: a rejection
+   * delivers the original frame rather than breaking the turn.
    */
   translateDisplay?: (text: string) => Promise<string>;
+  /**
+   * Exact user-language original for a previously translated fragment, if the
+   * reverse entry is still cached. Session-list titles prefer this over a
+   * billed display translation; a miss falls through to translateDisplay.
+   */
+  restoreOriginal?: (translatedFragment: string) => string | undefined;
 }
 
 const KILL_GRACE_MS = 3_000;
@@ -37,14 +46,17 @@ const KILL_GRACE_MS = 3_000;
  * serialized so frame order is preserved.
  *
  * Inbound (agent → daemon): most frames pass through untouched — the live
- * stream stays in the agent language. The exception is question-like
+ * stream stays in the agent language. Two display-only exceptions, both fail
+ * soft (a failed translation delivers the original frame): question-like
  * `session/request_permission` requests (chooser shape: a repeated allow
  * option kind, which is how inner agents surface clarifying questions with
- * answer options): their human-readable title, option names, and text
+ * answer options — their human-readable title, option names, and text
  * content are translated into the user language so the permission card
- * renders translated. Everything addressable (ids, kinds, raw input,
- * diffs, terminals, locations) stays verbatim, and a failed translation
- * delivers the original frame.
+ * renders translated) and `session/list` result titles (the inner agent's
+ * own titles; exact prompt-time originals always restore first, the display
+ * path needs translateDisplay, only the first 100 entries translate and
+ * over-long titles stay verbatim). Everything addressable (ids, kinds, raw
+ * input, diffs, terminals, locations) stays verbatim.
  *
  * When a prompt translation fails, a JSON-RPC error response with the same id is
  * synthesized back to the adapter and the original frame is dropped: the
@@ -188,36 +200,103 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
   }
 
   /**
-   * Display-only translation for question-like permission requests.
-   * Anything unrecognized passes through verbatim, and any translation
-   * failure delivers the original frame: inbound text must never break the
-   * agent's turn.
+   * Display-only translation inbound (agent → daemon). Two cases, both fail
+   * soft — anything unrecognized passes through verbatim, and any failure
+   * delivers the original frame so inbound text never breaks the turn:
+   * question-like `session/request_permission` choosers, and `session/list`
+   * result titles.
    */
   async function maybeTranslateInbound(message: AcpStreamMessage): Promise<AcpStreamMessage> {
+    if ("result" in message) {
+      return maybeTranslateSessionList(message);
+    }
     const display = config.translateDisplay;
     if (display === undefined) return message;
     if (!("method" in message) || message.method !== "session/request_permission") {
       return message;
     }
-    const params = "params" in message ? message.params : undefined;
-    if (typeof params !== "object" || params === null) return message;
-    const { toolCall, options } = params as { toolCall?: unknown; options?: unknown };
-    if (!isRecord(toolCall) || !Array.isArray(options)) return message;
-    if (!isChooserOptions(options)) return message;
+    return maybeTranslatePermission(message, display);
+  }
+  async function maybeTranslatePermission(
+    message: AcpStreamMessage,
+    display: (text: string) => Promise<string>,
+  ): Promise<AcpStreamMessage> {
+    if (!("params" in message)) return message;
+    if (!isRecord(message.params)) return message;
+    const params = message.params;
+    if (!isRecord(params.toolCall) || !Array.isArray(params.options)) return message;
+    if (!isChooserOptions(params.options)) return message;
     try {
       const translatedParams = {
-        ...(params as Record<string, unknown>),
-        toolCall: await translatePermissionToolCall(toolCall, display),
-        options: await translatePermissionOptions(options, display),
+        ...params,
+        toolCall: await translatePermissionToolCall(params.toolCall, display),
+        options: await translatePermissionOptions(params.options, display),
       };
-      return { ...message, params: translatedParams } as AcpStreamMessage;
+      return { ...message, params: translatedParams };
     } catch {
-      // Display-only degradation: deliver the agent's original frame rather
-      // than breaking the turn over a translation failure.
       return message;
     }
   }
 
+  /**
+   * Translates `session/list` result titles for display. Exact prompt-time
+   * originals restore even when display translation is off (no endpoint
+   * call); the display path needs translateDisplay. Only the first
+   * MAX_SESSION_LIST_TITLES_PER_FRAME entries translate — the rest pass
+   * through — and over-long titles stay verbatim, so a hostile inner agent
+   * cannot stall the inbound lane or bill without bound.
+   */
+  async function maybeTranslateSessionList(message: AcpStreamMessage): Promise<AcpStreamMessage> {
+    if (!("result" in message)) return message;
+    if (!isRecord(message.result)) return message;
+    if (!Array.isArray(message.result.sessions)) return message;
+    const entries = message.result.sessions;
+    try {
+      const translatedSessions: unknown[] = [];
+      for (let index = 0; index < entries.length; index += 1) {
+        if (index >= MAX_SESSION_LIST_TITLES_PER_FRAME) {
+          translatedSessions.push(...entries.slice(index));
+          break;
+        }
+        translatedSessions.push(await translateSessionInfoTitle(entries[index]));
+      }
+      return {
+        ...message,
+        result: { ...message.result, sessions: translatedSessions },
+      };
+    } catch {
+      return message;
+    }
+  }
+
+  async function translateSessionInfoTitle(entry: unknown): Promise<unknown> {
+    if (!isRecord(entry)) return entry;
+    const title = entry.title;
+    if (typeof title !== "string" || title.length === 0) return entry;
+    if (isSerializedAttachment(title)) return entry;
+    const restored = restoreSessionTitle(title);
+    if (restored !== title) return { ...entry, title: restored };
+    const display = config.translateDisplay;
+    if (display === undefined) return entry;
+    if (title.length > SESSION_TITLE_DISPLAY_LIMIT) return entry;
+    try {
+      const translated = await translatePromptFragment(title, display);
+      if (translated.trim().length === 0) return entry;
+      return { ...entry, title: translated };
+    } catch {
+      return entry;
+    }
+  }
+
+  function restoreSessionTitle(title: string): string {
+    const restore = config.restoreOriginal;
+    if (restore === undefined) return title;
+    try {
+      return restorePromptFragment(title, (fragment) => safeRestore(restore, fragment));
+    } catch {
+      return title;
+    }
+  }
   // Serialized write lane: every outbound frame is forwarded in arrival order,
   // and the WritableStream waits on the lane so backpressure is preserved.
   let writeLane: Promise<void> = Promise.resolve();
@@ -351,6 +430,16 @@ function readPromptBlocks(params: unknown): unknown[] | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function safeRestore(
+  restore: (fragment: string) => string | undefined,
+  fragment: string,
+): string | undefined {
+  try {
+    return restore(fragment);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

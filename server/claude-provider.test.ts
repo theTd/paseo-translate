@@ -1720,7 +1720,9 @@ describe("translate claude provider extended protocol", () => {
           {
             persistence: { version: 1, data: { claudeSessionId: "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f" } },
             cwd: "E:\\repo",
-            title: "Fix the bug",
+            // Stored titles are agent-language text; the listing renders them
+            // for display through the agent-to-user endpoint stub.
+            title: "DE(Fix the bug)",
           },
         ],
       });
@@ -1765,7 +1767,7 @@ describe("translate claude provider extended protocol", () => {
       await waitFor(events, (event) => event.type === "sessions");
       const listing = events.find((event) => event.type === "sessions");
       expect(listing).toMatchObject({
-        sessions: [{ title: "Newer" }],
+        sessions: [{ title: "DE(Newer)" }],
       });
       expect((listing as { sessions: unknown[] }).sessions).toHaveLength(1);
     } finally {

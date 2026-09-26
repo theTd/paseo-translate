@@ -340,7 +340,9 @@ describe("translate Codex provider", () => {
     await send({ type: "sessions", requestId: "r-list", cwd: "E:\\repo", limit: 10 });
     await waitFor(events, (event) => event.type === "sessions");
     expect(events.find((event) => event.type === "sessions")).toMatchObject({
-      sessions: [{ persistence: { data: { threadId: "thread-old" } }, title: "Yesterday" }],
+      // Thread names are engine-generated agent-language text; the listing
+      // renders them for display through the agent-to-user endpoint stub.
+      sessions: [{ persistence: { data: { threadId: "thread-old" } }, title: "DE(Yesterday)" }],
     });
     await send({
       type: "session.revert",

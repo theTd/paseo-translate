@@ -46,6 +46,7 @@ import {
   translatePromptFragment,
 } from "./prompt-text";
 import { translateQuestionsForDisplay } from "./question";
+import { translateSessionTitlesForDisplay } from "./session-titles";
 import { createTranslator, type TranslatorDeps } from "./translate";
 import {
   TRANSLATE_CODEX_PROVIDER_ID,
@@ -1691,7 +1692,13 @@ async function listSessions(
   } catch {
     sessions = [];
   }
-  context.emit({ type: "sessions", requestId: input.requestId, sessions });
+  // Thread names/previews are engine-generated in the agent language; render
+  // them for display (fail soft: a failed title keeps its original text).
+  context.emit({
+    type: "sessions",
+    requestId: input.requestId,
+    sessions: await translateSessionTitlesForDisplay(sessions, context),
+  });
   context.emit({ type: "request.completed", requestId: input.requestId });
 }
 
