@@ -160,6 +160,8 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   transformers are app-wide), not just agents using the Translate provider.
   Reasoning keeps a muted style so it never looks like a reply; when thinking
   translation is off (the default) the muted view shows the original text.
+  Reasoning also keeps the host's collapse behavior: expanded while the
+  block streams, collapsed under a Thinking header once complete.
   Both the translation and the original render as Markdown through the
   plugin's own dependency-free renderer (the daemon's client compiler
   rejects Node builtins anywhere in the client import graph, which rules

@@ -36,6 +36,11 @@ import {
  * long, so translating them doubles endpoint spend on auxiliary text) plus
  * `translateResponses` (the server display path shares that gate), and both
  * original and translation render muted so thoughts never look like replies.
+ *
+ * The host collapses its native thinking blocks; since this renderer replaces
+ * that view app-wide, it restores the behavior: a muted Thinking header keeps
+ * the block expanded while it streams and collapses it once complete, with
+ * taps pinning a manual override.
  */
 export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedReasoningData>) {
   const data = props.item.data;
@@ -48,6 +53,15 @@ export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedRea
   );
   const [showOriginal, setShowOriginal] = useState(false);
   const { retryNonce, retry } = useRetryNonce();
+  const streaming = data.phase === "streaming";
+  // The host collapses thinking blocks natively; this renderer replaces that
+  // view, so it restores the behavior itself: expanded while the block is
+  // streaming, collapsed once complete, with taps pinning a manual override.
+  const [expandOverride, setExpandOverride] = useState<boolean | null>(null);
+  const expanded = expandOverride ?? streaming;
+  const toggleExpanded = useCallback(() => {
+    setExpandOverride((value) => !(value ?? streaming));
+  }, [streaming]);
   const toggleOriginal = useCallback(() => {
     setShowOriginal((value) => !value);
   }, []);
@@ -98,6 +112,7 @@ export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedRea
   const styles = useMemo(
     () => ({
       muted: { color: props.theme.colors.foregroundMuted },
+      header: { color: props.theme.colors.foregroundMuted, paddingVertical: 2 },
       toggle: { color: props.theme.colors.accent, marginTop: 4, paddingVertical: 2 },
       reasoning: props.theme.colors.foregroundMuted,
       accent: props.theme.colors.accent,
@@ -115,44 +130,76 @@ export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedRea
     [styles.accent, styles.reasoning],
   );
 
-  if (!eligible) {
+  const header = (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ expanded }}
+      accessibilityLabel={t("thinking")}
+      onPress={toggleExpanded}
+    >
+      <Text style={styles.header}>
+        {expanded ? "▾ " : "▸ "}
+        {t("thinking")}
+      </Text>
+    </Pressable>
+  );
+
+  // Empty blocks carry no content to collapse; keep the previous headerless
+  // rendering so a lone header never appears as visual noise.
+  if (data.text.length === 0) {
     return renderMarkdown(data.text);
+  }
+
+  if (!eligible) {
+    return (
+      <>
+        {header}
+        {expanded ? renderMarkdown(data.text) : null}
+      </>
+    );
   }
 
   const showTranslation = hasVisibleTranslation(stream.text) && !showOriginal;
   return (
     <>
-      {renderMarkdown(showTranslation ? (stream.text as string) : data.text)}
-      {!hasVisibleTranslation(stream.text) && stream.error === undefined && !stream.done ? (
-        <Text style={styles.muted}>{t("translating")}</Text>
-      ) : null}
-      {stream.error !== undefined ? (
+      {header}
+      {expanded ? (
         <>
-          <Text style={styles.muted} accessibilityRole="alert">
-            {t("translationUnavailable", {
-              error:
-                stream.error instanceof Error ? stream.error.message : t("translationFailedWord"),
-            })}
-          </Text>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel={t("retryTranslation")}
-            onPress={retryTranslation}
-          >
-            <Text style={styles.toggle}>{t("retryTranslation")}</Text>
-          </Pressable>
+          {renderMarkdown(showTranslation ? (stream.text as string) : data.text)}
+          {!hasVisibleTranslation(stream.text) && stream.error === undefined && !stream.done ? (
+            <Text style={styles.muted}>{t("translating")}</Text>
+          ) : null}
+          {stream.error !== undefined ? (
+            <>
+              <Text style={styles.muted} accessibilityRole="alert">
+                {t("translationUnavailable", {
+                  error:
+                    stream.error instanceof Error
+                      ? stream.error.message
+                      : t("translationFailedWord"),
+                })}
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("retryTranslation")}
+                onPress={retryTranslation}
+              >
+                <Text style={styles.toggle}>{t("retryTranslation")}</Text>
+              </Pressable>
+            </>
+          ) : null}
+          {stream.done && hasVisibleTranslation(stream.text) ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={showTranslation ? t("showOriginal") : t("showTranslation")}
+              onPress={toggleOriginal}
+            >
+              <Text style={styles.toggle}>
+                {showTranslation ? t("showOriginal") : t("showTranslation")}
+              </Text>
+            </Pressable>
+          ) : null}
         </>
-      ) : null}
-      {stream.done && hasVisibleTranslation(stream.text) ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={showTranslation ? t("showOriginal") : t("showTranslation")}
-          onPress={toggleOriginal}
-        >
-          <Text style={styles.toggle}>
-            {showTranslation ? t("showOriginal") : t("showTranslation")}
-          </Text>
-        </Pressable>
       ) : null}
     </>
   );

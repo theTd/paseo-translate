@@ -177,6 +177,7 @@ const en = {
   showOriginal: "Show original",
   showTranslation: "Show translation",
   emptyTranslation: "Translation returned no text",
+  thinking: "Thinking",
 };
 
 export type PluginStringKey = keyof typeof en;
@@ -254,6 +255,7 @@ const zhCN: PluginDictionary = {
   showOriginal: "显示原文",
   showTranslation: "显示译文",
   emptyTranslation: "翻译未返回文本",
+  thinking: "思考过程",
 };
 
 const ja: PluginDictionary = {
@@ -328,6 +330,7 @@ const ja: PluginDictionary = {
   showOriginal: "原文を表示",
   showTranslation: "訳文を表示",
   emptyTranslation: "翻訳結果が空でした",
+  thinking: "思考内容",
 };
 
 const ko: PluginDictionary = {
@@ -401,6 +404,7 @@ const ko: PluginDictionary = {
   showOriginal: "원문 보기",
   showTranslation: "번역 보기",
   emptyTranslation: "번역 결과가 비어 있습니다",
+  thinking: "사고 과정",
 };
 
 const fr: PluginDictionary = {
@@ -480,6 +484,7 @@ const fr: PluginDictionary = {
   showOriginal: "Voir l'original",
   showTranslation: "Voir la traduction",
   emptyTranslation: "La traduction n'a renvoyé aucun texte",
+  thinking: "Réflexion",
 };
 
 const es: PluginDictionary = {
@@ -558,6 +563,7 @@ const es: PluginDictionary = {
   showOriginal: "Ver original",
   showTranslation: "Ver traducción",
   emptyTranslation: "La traducción no devolvió texto",
+  thinking: "Razonamiento",
 };
 
 const ru: PluginDictionary = {
@@ -633,6 +639,7 @@ const ru: PluginDictionary = {
   showOriginal: "Показать оригинал",
   showTranslation: "Показать перевод",
   emptyTranslation: "Перевод не вернул текст",
+  thinking: "Размышления",
 };
 
 const ptBR: PluginDictionary = {
@@ -709,6 +716,7 @@ const ptBR: PluginDictionary = {
   showOriginal: "Ver original",
   showTranslation: "Ver tradução",
   emptyTranslation: "A tradução não retornou texto",
+  thinking: "Raciocínio",
 };
 
 const ar: PluginDictionary = {
@@ -782,6 +790,7 @@ const ar: PluginDictionary = {
   showOriginal: "عرض الأصل",
   showTranslation: "عرض الترجمة",
   emptyTranslation: "لم تُرجع الترجمة أي نص",
+  thinking: "التفكير",
 };
 
 const STRINGS: Record<PluginLocale, PluginDictionary> = {
