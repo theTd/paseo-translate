@@ -5,11 +5,12 @@
  */
 
 import {
+  execFile,
   spawn,
   type ChildProcessWithoutNullStreams,
   type SpawnOptions,
 } from "node:child_process";
-import { accessSync, constants as fsConstants } from "node:fs";
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -79,6 +80,7 @@ export function scanPathForCodex(pathValue: string, platform: string): string | 
       const candidate = path.join(directory, name);
       try {
         accessSync(candidate, fsConstants.X_OK);
+        if (!statSync(candidate).isFile()) continue;
         return candidate;
       } catch {
         // Keep scanning; a directory named codex is not an executable.
@@ -107,6 +109,42 @@ export interface SpawnCodexOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
 }
+
+/** Reject unrelated programs named `codex` before speaking JSON-RPC to them. */
+export async function validateCodexExecutable(options: SpawnCodexOptions): Promise<void> {
+  const invocation = resolveCodexSpawnInvocation(options.command, ["--version"], process.platform);
+  const output = await new Promise<string>((resolve, reject) => {
+    execFile(invocation.command, invocation.args, {
+      cwd: options.cwd,
+      env: { ...process.env, ...options.env },
+      windowsHide: true,
+      timeout: 10_000,
+      maxBuffer: STDERR_BUFFER_LIMIT,
+      encoding: "utf8",
+    }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(
+          `Could not verify Codex executable ${JSON.stringify(options.command)}: ${error.message}\n` +
+          `${stderr.trim()}\n${CODEX_INSTALL_HELP}`,
+        ));
+        return;
+      }
+      resolve(stdout.trim());
+    });
+  });
+  if (!/^codex-cli \d+\.\d+\.\d+(?:\S*)?$/m.test(output)) {
+    throw new Error(
+      `The executable ${JSON.stringify(options.command)} did not identify itself as OpenAI Codex ` +
+      `("codex-cli <version>"). Received: ${JSON.stringify(output)}.\n${CODEX_INSTALL_HELP}`,
+    );
+  }
+}
+
+const CODEX_INSTALL_HELP =
+  "Install the official CLI with npm install -g @openai/codex, then run codex login. " +
+  "The npm package named codex is an unrelated documentation generator. " +
+  "Set Translate's Codex executable setting to the full path of the official CLI, " +
+  "then run paseo plugin reload translate.";
 
 export interface CodexClientFactoryOptions {
   command: string;
@@ -178,7 +216,7 @@ export class CodexAppServerClient implements CodexClientLike {
   private disposed = false;
   private stderrBuffer = "";
 
-  constructor(private readonly child: CodexStdioProcess) {
+  constructor(private readonly child: CodexStdioProcess, private readonly command?: string) {
     this.rl = readline.createInterface({ input: child.stdout });
     this.rl.on("line", (line) => {
       void this.handleLine(line).catch((error) => {
@@ -202,7 +240,8 @@ export class CodexAppServerClient implements CodexClientLike {
         code === 0 && !signal
           ? "Codex app-server exited"
           : `Codex app-server exited with code ${code ?? "null"} and signal ${signal ?? "null"}`;
-      this.handleUnexpectedTermination(new Error(`${message}\n${this.stderrBuffer}`.trim()));
+      const executable = this.command ? `\nExecutable: ${JSON.stringify(this.command)}` : "";
+      this.handleUnexpectedTermination(new Error(`${message}${executable}\n${this.stderrBuffer}`.trim()));
     });
   }
 

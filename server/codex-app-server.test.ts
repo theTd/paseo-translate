@@ -1,16 +1,65 @@
 import { EventEmitter } from "node:events";
+import { execFile } from "node:child_process";
 import { PassThrough } from "node:stream";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CodexAppServerClient,
   processTreeKillInvocation,
   resolveCodexSpawnInvocation,
   scanPathForCodex,
+  validateCodexExecutable,
   type CodexStdioProcess,
 } from "./codex-app-server";
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, execFile: vi.fn(actual.execFile) };
+});
+
+afterEach(() => vi.mocked(execFile).mockReset());
+
+describe("Codex executable identity", () => {
+  function versionOutput(stdout: string, stderr = "", error: Error | null = null) {
+    return vi.mocked(execFile).mockImplementation((...args: unknown[]) => {
+      const callback = args[args.length - 1] as Function;
+      callback(error, stdout, stderr);
+      return {} as ReturnType<typeof execFile>;
+    });
+  }
+
+  it("accepts the official CLI even when stderr contains warnings", async () => {
+    const run = versionOutput("codex-cli 0.114.0-alpha.2\n", "a harmless warning");
+    await expect(validateCodexExecutable({
+      command: "/Applications/Codex CLI/codex", cwd: os.tmpdir(), env: { CODEX_TEST: "yes" },
+    })).resolves.toBeUndefined();
+    expect(run).toHaveBeenCalledWith("/Applications/Codex CLI/codex", ["--version"],
+      expect.objectContaining({
+        cwd: os.tmpdir(), env: expect.objectContaining({ CODEX_TEST: "yes" }), timeout: 10_000,
+      }), expect.any(Function));
+  });
+
+  it.each(["0.2.3\n", "", "some other codex"])(
+    "rejects a different codex executable reporting %j with installation guidance", async (version) => {
+      versionOutput(version, "Warning: Accessing non-existent property 'lineno'");
+      await expect(validateCodexExecutable({ command: "/usr/local/bin/codex" }))
+        .rejects.toThrow(/\/usr\/local\/bin\/codex[\s\S]*npm install -g @openai\/codex/);
+    },
+  );
+
+  it("reports failed version probes with their path and stderr", async () => {
+    versionOutput("", "bad interpreter", new Error("probe failed"));
+    await expect(validateCodexExecutable({ command: "/opt/homebrew/bin/codex" }))
+      .rejects.toThrow(/\/opt\/homebrew\/bin\/codex[\s\S]*probe failed[\s\S]*bad interpreter/);
+  });
+
+  it("rejects a real unrelated executable", async () => {
+    await expect(validateCodexExecutable({ command: process.execPath }))
+      .rejects.toThrow("did not identify itself as OpenAI Codex");
+  });
+});
 
 function createFakeProcess() {
   const stdin = new PassThrough();
@@ -67,6 +116,17 @@ describe("Codex Windows spawn invocation", () => {
 });
 
 describe("PATH codex resolution", () => {
+  it("skips directories with executable names", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codex-directory-"));
+    try {
+      await mkdir(path.join(root, "codex.exe"));
+      await writeFile(path.join(root, "codex.cmd"), "", { mode: 0o755 });
+      expect(scanPathForCodex(root, "win32")).toBe(path.join(root, "codex.cmd"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("prefers native executables over shell shims", async () => {
     const shimDir = await mkdtemp(path.join(os.tmpdir(), "codex-shim-"));
     const exeDir = await mkdtemp(path.join(os.tmpdir(), "codex-exe-"));
@@ -135,6 +195,17 @@ describe("Codex app-server transport", () => {
     const pending = client.request("model/list", {});
     fake.emitter.emit("exit", 17, null);
     await expect(pending).rejects.toThrow("Codex app-server exited");
+  });
+
+  it("includes the selected executable and stderr in exit errors", async () => {
+    const fake = createFakeProcess();
+    const client = new CodexAppServerClient(fake.child, "/opt/homebrew/bin/codex");
+    const pending = client.request("initialize", {});
+    fake.stderr.write("startup failed");
+    fake.emitter.emit("exit", 0, null);
+    await expect(pending).rejects.toThrow(
+      'Codex app-server exited\nExecutable: "/opt/homebrew/bin/codex"\nstartup failed',
+    );
   });
 
   it("ACKs unknown inbound methods with an empty result", async () => {

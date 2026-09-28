@@ -22,6 +22,7 @@ import {
   buildCodexInitializeParams,
   resolvePathCodex,
   spawnCodexAppServer,
+  validateCodexExecutable,
   type CodexClientFactoryOptions,
   type CodexClientLike,
 } from "./codex-app-server";
@@ -1882,12 +1883,13 @@ function rawPromptText(content: ReadonlyArray<{ type?: unknown; text?: unknown }
 }
 
 async function createRealClient(options: CodexClientFactoryOptions): Promise<CodexClientLike> {
+  await validateCodexExecutable(options);
   const child = spawnCodexAppServer({
     command: options.command,
     cwd: options.cwd,
     env: options.env,
   });
-  return new CodexAppServerClient(child);
+  return new CodexAppServerClient(child, options.command);
 }
 
 async function teardownSession(

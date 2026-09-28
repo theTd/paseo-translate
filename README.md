@@ -100,6 +100,13 @@ app after each turn.
   executable** setting overrides everything with an explicit path. PATH
   resolution is cached for the plugin process lifetime: after installing or
   upgrading `codex` on PATH, run `paseo plugin reload translate` to pick it up.
+- Before starting app-server, the provider checks that `--version` reports
+  `codex-cli <version>`. The npm package **`codex`** is an unrelated documentation
+  generator; install **`@openai/codex`** instead. On macOS, use `type -a codex`
+  and `codex --version` in Terminal to check for conflicting installations.
+  If the daemon selects a different executable, set **Codex executable** to
+  the absolute path of the official CLI, run `codex login` with that CLI,
+  and reload the plugin. Startup errors include the selected executable.
 - Model switching and thinking effort are probed live from `model/list`.
   Modes are Default Permissions / Auto-review / Full Access, matching the
   native provider. Fast mode is offered for models that support it.
