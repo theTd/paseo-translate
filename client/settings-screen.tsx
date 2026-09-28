@@ -32,6 +32,7 @@ interface Draft {
   endpointModel: string;
   reasoningEffort: TranslateSettingsValues["translationReasoningEffort"];
   systemPrompt: string;
+  domainContext: string;
   userLanguage: string;
   agentLanguage: string;
   commandText: string;
@@ -55,6 +56,7 @@ function draftFrom(settings: ReadySettings): Draft {
     endpointModel: values.endpointModel,
     reasoningEffort: values.translationReasoningEffort,
     systemPrompt: values.translationSystemPrompt,
+    domainContext: values.translationDomainContext,
     userLanguage: values.userLanguage,
     agentLanguage: values.agentLanguage,
     commandText: values.innerAgentCommand.join(" "),
@@ -161,6 +163,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     [patch],
   );
   const changeSystemPrompt = useCallback((systemPrompt: string) => patch({ systemPrompt }), [patch]);
+  const changeDomainContext = useCallback(
+    (domainContext: string) => patch({ domainContext }),
+    [patch],
+  );
   const changeUserLanguage = useCallback(
     (userLanguage: string) => patch({ userLanguage }),
     [patch],
@@ -238,6 +244,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         endpointModel: active.endpointModel,
         translationReasoningEffort: active.reasoningEffort,
         translationSystemPrompt: active.systemPrompt,
+        translationDomainContext: active.domainContext,
         userLanguage: active.userLanguage,
         agentLanguage: active.agentLanguage,
         innerAgentCommand: command,
@@ -371,6 +378,18 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
             editable={!settings.saving}
             multiline
             placeholder={t("systemPromptPlaceholder")}
+            placeholderTextColor={theme.colors.foregroundMuted}
+            style={promptInputStyle}
+          />
+        </SettingsRow>
+        <SettingsRow label={t("domainContext")} hint={t("domainContextHint")}>
+          <TextInput
+            accessibilityLabel={t("domainContext")}
+            value={active.domainContext}
+            onChangeText={changeDomainContext}
+            editable={!settings.saving}
+            multiline
+            placeholder={t("domainContextPlaceholder")}
             placeholderTextColor={theme.colors.foregroundMuted}
             style={promptInputStyle}
           />

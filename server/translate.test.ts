@@ -14,6 +14,8 @@ import {
 import {
   resolveLanguagePair,
   translationSystemPrompt,
+  unwrapTranslationInput,
+  wrapTranslationInput,
   type TranslateSettingsValues,
 } from "../shared/translate";
 
@@ -32,6 +34,7 @@ const values: TranslateSettingsValues = {
   endpointModel: "mt",
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
+  translationDomainContext: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
@@ -58,7 +61,9 @@ function translatingFetch(calls: Captured[], map: (text: string) => string): typ
     calls.push({ body });
     const user = body.messages.find((message) => message.role === "user");
     return new Response(
-      JSON.stringify({ choices: [{ message: { content: map(user?.content ?? "") } }] }),
+      JSON.stringify({
+        choices: [{ message: { content: map(unwrapTranslationInput(user?.content ?? "")) } }],
+      }),
       { status: 200 },
     );
   }) as typeof fetch;
@@ -76,7 +81,49 @@ describe("translate service", () => {
       role: "system",
       content: translationSystemPrompt({ source: "en", target: "de" }),
     });
-    expect(calls[0].body?.messages[1]).toEqual({ role: "user", content: "Hello" });
+    // The source text travels wrapped in the input-delimiter tags.
+    expect(calls[0].body?.messages[1]).toEqual({
+      role: "user",
+      content: wrapTranslationInput("Hello"),
+    });
+  });
+
+  it("appends the domain context to the prompt and invalidates the cache when it changes", async () => {
+    const calls: Captured[] = [];
+    let current = { ...values, translationDomainContext: "coding assistant chat" };
+    const translator = createTranslator({
+      loadConfig: async () => current,
+      fetchFn: translatingFetch(calls, (text) => `T:${text}`),
+    });
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls[0].body?.messages[0]?.content).toContain(
+      "Domain context: coding assistant chat",
+    );
+    // Same context: served from cache without a second endpoint call.
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls).toHaveLength(1);
+    // Editing the context changes the effective prompt, so the cache misses.
+    current = { ...values, translationDomainContext: "legal documents" };
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls).toHaveLength(2);
+    expect(calls[1].body?.messages[0]?.content).toContain("Domain context: legal documents");
+  });
+
+  it("resolves the {context} placeholder in a custom system prompt", async () => {
+    const calls: Captured[] = [];
+    const translator = createTranslator({
+      loadConfig: async () => ({
+        ...values,
+        translationSystemPrompt: "Custom {source} -> {target} engine for {context}.",
+        translationDomainContext: "coding assistant chat",
+      }),
+      fetchFn: translatingFetch(calls, (text) => `T:${text}`),
+    });
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls[0].body?.messages[0]).toEqual({
+      role: "system",
+      content: "Custom en -> de engine for coding assistant chat.",
+    });
   });
 
   it("reverses the pair for agent-to-user translations", () => {
@@ -227,7 +274,7 @@ function streamingFetch(
     };
     calls.push({ stream: body.stream === true });
     const user = body.messages.find((message) => message.role === "user");
-    const text = map(user?.content ?? "");
+    const text = map(unwrapTranslationInput(user?.content ?? ""));
     if (body.stream === true) {
       if (streamMode === "refuse") {
         return new Response("stream unsupported", { status: 400 });

@@ -137,8 +137,12 @@ const en = {
   effortHigh: "High",
   systemPrompt: "Translation system prompt",
   systemPromptHint:
-    "Custom instructions for the translation model. Empty uses the built-in default. {source} and {target} insert the language pair; editing this re-translates cached text.",
+    "Custom instructions for the translation model. Empty uses the built-in default. {source} and {target} insert the language pair, {context} inserts the domain context; the text to translate arrives wrapped in <translate-input> tags. Editing this re-translates cached text.",
   systemPromptPlaceholder: "Empty = built-in default prompt",
+  domainContext: "Domain context",
+  domainContextHint:
+    "Optional background for the translation model, e.g. “chat with a coding assistant”. Empty adds nothing; a custom system prompt can reference it as {context}.",
+  domainContextPlaceholder: "Empty = no extra context",
   userLanguage: "Your language",
   userLanguageHint: "Language you write and read, e.g. en",
   agentLanguage: "Agent language",
@@ -219,8 +223,12 @@ const zhCN: PluginDictionary = {
   effortHigh: "高",
   systemPrompt: "翻译系统提示词",
   systemPromptHint:
-    "给翻译模型的自定义指令。留空使用内置默认提示词。{source} 与 {target} 会被替换为当前语言对；修改后缓存的译文会重新翻译。",
+    "给翻译模型的自定义指令。留空使用内置默认提示词。{source} 与 {target} 会被替换为当前语言对，{context} 替换为领域上下文；待译文本以 <translate-input> 标签包裹送达。修改后缓存的译文会重新翻译。",
   systemPromptPlaceholder: "留空 = 使用内置默认提示词",
+  domainContext: "领域上下文",
+  domainContextHint:
+    "给翻译模型的可选背景信息，例如「编程助手对话」。留空不添加；自定义系统提示词中可用 {context} 引用。",
+  domainContextPlaceholder: "留空 = 无额外上下文",
   userLanguage: "你的语言",
   userLanguageHint: "你书写和阅读的语言，例如 zh-CN",
   agentLanguage: "智能体语言",
@@ -294,8 +302,12 @@ const ja: PluginDictionary = {
   effortHigh: "高",
   systemPrompt: "翻訳システムプロンプト",
   systemPromptHint:
-    "翻訳モデルへの追加指示。空欄で内蔵の既定を使用。{source} と {target} は言語ペアに置換されます。編集するとキャッシュ済み訳文は再翻訳されます。",
+    "翻訳モデルへの追加指示。空欄で内蔵の既定を使用。{source} と {target} は言語ペア、{context} はドメインコンテキストに置換されます。翻訳対象のテキストは <translate-input> タグで囲まれて届きます。編集するとキャッシュ済み訳文は再翻訳されます。",
   systemPromptPlaceholder: "空欄 = 内蔵の既定プロンプト",
+  domainContext: "ドメインコンテキスト",
+  domainContextHint:
+    "翻訳モデルへの任意の背景情報（例: コーディングアシスタントとのチャット）。空欄なら追加しません。カスタムシステムプロンプトでは {context} で参照できます。",
+  domainContextPlaceholder: "空欄 = 追加コンテキストなし",
   userLanguage: "あなたの言語",
   userLanguageHint: "読み書きする言語（例: ja）",
   agentLanguage: "エージェントの言語",
@@ -368,8 +380,12 @@ const ko: PluginDictionary = {
   effortHigh: "높음",
   systemPrompt: "번역 시스템 프롬프트",
   systemPromptHint:
-    "번역 모델에 대한 추가 지시. 비워 두면 내장 기본값을 사용합니다. {source}와 {target}은 언어 쌍으로 바뀝니다. 수정하면 캐시된 번역이 다시 번역됩니다.",
+    "번역 모델에 대한 추가 지시. 비워 두면 내장 기본값을 사용합니다. {source}와 {target}은 언어 쌍으로, {context}는 도메인 컨텍스트로 바뀝니다. 번역할 텍스트는 <translate-input> 태그로 감싸져 전달됩니다. 수정하면 캐시된 번역이 다시 번역됩니다.",
   systemPromptPlaceholder: "비워 두기 = 내장 기본 프롬프트",
+  domainContext: "도메인 컨텍스트",
+  domainContextHint:
+    "번역 모델에 제공할 선택적 배경 정보(예: 코딩 어시스턴트와의 채팅). 비워 두면 추가하지 않으며, 사용자 지정 시스템 프롬프트에서 {context}로 참조할 수 있습니다.",
+  domainContextPlaceholder: "비워 두기 = 추가 컨텍스트 없음",
   userLanguage: "사용 언어",
   userLanguageHint: "읽고 쓰는 언어(예: ko)",
   agentLanguage: "에이전트 언어",
@@ -445,8 +461,12 @@ const fr: PluginDictionary = {
   effortHigh: "Élevé",
   systemPrompt: "Prompt système de traduction",
   systemPromptHint:
-    "Instructions personnalisées pour le modèle. Vide = prompt intégré. {source} et {target} désignent la paire de langues ; toute modification retraduit le cache.",
+    "Instructions personnalisées pour le modèle. Vide = prompt intégré. {source} et {target} désignent la paire de langues, {context} le contexte de domaine ; le texte à traduire arrive entre balises <translate-input>. Toute modification retraduit le cache.",
   systemPromptPlaceholder: "Vide = prompt intégré par défaut",
+  domainContext: "Contexte de domaine",
+  domainContextHint:
+    "Contexte optionnel pour le modèle de traduction, ex. « chat avec un assistant de code ». Vide = rien d'ajouté ; un prompt personnalisé peut l'utiliser via {context}.",
+  domainContextPlaceholder: "Vide = aucun contexte supplémentaire",
   userLanguage: "Votre langue",
   userLanguageHint: "Langue d'écriture et de lecture, ex. fr",
   agentLanguage: "Langue de l'agent",
@@ -524,8 +544,12 @@ const es: PluginDictionary = {
   effortHigh: "Alto",
   systemPrompt: "Prompt de sistema de traducción",
   systemPromptHint:
-    "Instrucciones personalizadas para el modelo. Vacío = prompt integrado. {source} y {target} indican el par de idiomas; editarlo retraduce la caché.",
+    "Instrucciones personalizadas para el modelo. Vacío = prompt integrado. {source} y {target} indican el par de idiomas, {context} el contexto de dominio; el texto a traducir llega entre etiquetas <translate-input>. Editarlo retraduce la caché.",
   systemPromptPlaceholder: "Vacío = prompt integrado predeterminado",
+  domainContext: "Contexto de dominio",
+  domainContextHint:
+    "Contexto opcional para el modelo de traducción, p. ej. «chat con un asistente de código». Vacío = no se añade nada; un prompt personalizado puede usarlo como {context}.",
+  domainContextPlaceholder: "Vacío = sin contexto adicional",
   userLanguage: "Tu idioma",
   userLanguageHint: "Idioma de escritura y lectura, p. ej. es",
   agentLanguage: "Idioma del agente",
@@ -603,8 +627,12 @@ const ru: PluginDictionary = {
   effortHigh: "Высокая",
   systemPrompt: "Системный промпт перевода",
   systemPromptHint:
-    "Свои инструкции для модели перевода. Пусто — встроенный по умолчанию. {source} и {target} подставляют языковую пару; правка заново переводит кэш.",
+    "Свои инструкции для модели перевода. Пусто — встроенный по умолчанию. {source} и {target} подставляют языковую пару, {context} — контекст домена; текст для перевода приходит в тегах <translate-input>. Правка заново переводит кэш.",
   systemPromptPlaceholder: "Пусто = встроенный промпт по умолчанию",
+  domainContext: "Контекст домена",
+  domainContextHint:
+    "Необязательный фон для модели перевода, например «чат с ассистентом программиста». Пусто — ничего не добавляется; в своём промпте доступно как {context}.",
+  domainContextPlaceholder: "Пусто = без дополнительного контекста",
   userLanguage: "Ваш язык",
   userLanguageHint: "Язык, на котором вы пишете и читаете, например ru",
   agentLanguage: "Язык агента",
@@ -678,8 +706,12 @@ const ptBR: PluginDictionary = {
   effortHigh: "Alto",
   systemPrompt: "Prompt de sistema da tradução",
   systemPromptHint:
-    "Instruções personalizadas para o modelo. Vazio = prompt integrado. {source} e {target} indicam o par de idiomas; editar retraduz o cache.",
+    "Instruções personalizadas para o modelo. Vazio = prompt integrado. {source} e {target} indicam o par de idiomas, {context} o contexto de domínio; o texto a traduzir chega entre tags <translate-input>. Editar retraduz o cache.",
   systemPromptPlaceholder: "Vazio = prompt integrado padrão",
+  domainContext: "Contexto de domínio",
+  domainContextHint:
+    "Contexto opcional para o modelo de tradução, ex. «chat com um assistente de código». Vazio = nada é adicionado; um prompt personalizado pode usá-lo como {context}.",
+  domainContextPlaceholder: "Vazio = sem contexto adicional",
   userLanguage: "Seu idioma",
   userLanguageHint: "Idioma de escrita e leitura, ex. pt-BR",
   agentLanguage: "Idioma do agente",
@@ -754,8 +786,12 @@ const ar: PluginDictionary = {
   effortHigh: "مرتفع",
   systemPrompt: "موجه نظام الترجمة",
   systemPromptHint:
-    "تعليمات مخصصة لنموذج الترجمة. الفراغ يستخدم المدمج. {source} و{target} يحددان الزوج اللغوي؛ التعديل يعيد ترجمة المخزن.",
+    "تعليمات مخصصة لنموذج الترجمة. الفراغ يستخدم المدمج. {source} و{target} يحددان الزوج اللغوي و{context} سياق المجال؛ ويصل النص المراد ترجمته داخل وسمي <translate-input>. التعديل يعيد ترجمة المخزن.",
   systemPromptPlaceholder: "الفراغ = الموجه المدمج الافتراضي",
+  domainContext: "سياق المجال",
+  domainContextHint:
+    "خلفية اختيارية لنموذج الترجمة، مثل «دردشة مع مساعد برمجة». الفراغ لا يضيف شيئًا؛ ويمكن للموجه المخصص الإشارة إليه كـ {context}.",
+  domainContextPlaceholder: "الفراغ = بلا سياق إضافي",
   userLanguage: "لغتك",
   userLanguageHint: "لغة الكتابة والقراءة، مثل ar",
   agentLanguage: "لغة الوكيل",

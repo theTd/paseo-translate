@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ACP_ADAPTER_PRESETS,
+  TRANSLATION_INPUT_CLOSE_TAG,
+  TRANSLATION_INPUT_OPEN_TAG,
   adapterCommand,
   assertAcpConfigured,
   assertConfigured,
@@ -13,6 +15,8 @@ import {
   translateProvidersRpc,
   translateSettings,
   translationSystemPrompt,
+  unwrapTranslationInput,
+  wrapTranslationInput,
   type TranslateSettingsValues,
 } from "./translate";
 
@@ -22,6 +26,7 @@ const configured: TranslateSettingsValues = {
   endpointModel: "mt",
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
+  translationDomainContext: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
@@ -48,6 +53,7 @@ describe("translate settings schema", () => {
     expect(parsed.data.agentLanguage).toBe("de");
     expect(parsed.data.translateReasoning).toBe(false);
     expect(parsed.data.translationSystemPrompt).toBe("");
+    expect(parsed.data.translationDomainContext).toBe("");
     expect(parsed.data.translationTimeoutMs).toBe(30_000);
     expect(parsed.data.uiLanguage).toBe("system");
   });
@@ -118,6 +124,35 @@ describe("translate settings schema", () => {
     expect(resolveTranslationSystemPrompt("Translate everything to German.", pair)).toBe(
       "Translate everything to German.",
     );
+  });
+
+  it("appends the domain context to the built-in prompt and resolves {context} in templates", () => {
+    const pair = { source: "en", target: "de" };
+    // Empty or whitespace-only context adds nothing.
+    expect(translationSystemPrompt(pair)).not.toContain("Domain context");
+    expect(translationSystemPrompt(pair, "  \n")).not.toContain("Domain context");
+    expect(translationSystemPrompt(pair, "coding assistant chat")).toContain(
+      "Domain context: coding assistant chat",
+    );
+    expect(resolveTranslationSystemPrompt("", pair, "coding assistant chat")).toBe(
+      translationSystemPrompt(pair, "coding assistant chat"),
+    );
+    expect(
+      resolveTranslationSystemPrompt("Context: {context}. {source} -> {target}.", pair, "code"),
+    ).toBe("Context: code. en -> de.");
+  });
+
+  it("wraps source text in the translation input tags", () => {
+    expect(wrapTranslationInput("Hello")).toBe(
+      `${TRANSLATION_INPUT_OPEN_TAG}\nHello\n${TRANSLATION_INPUT_CLOSE_TAG}`,
+    );
+    // The built-in prompt references the same tags the wrapper emits.
+    const prompt = translationSystemPrompt({ source: "en", target: "de" });
+    expect(prompt).toContain(TRANSLATION_INPUT_OPEN_TAG);
+    expect(prompt).toContain(TRANSLATION_INPUT_CLOSE_TAG);
+    // unwrap is the exact inverse and tolerates unwrapped text.
+    expect(unwrapTranslationInput(wrapTranslationInput("Hello\nworld"))).toBe("Hello\nworld");
+    expect(unwrapTranslationInput("plain")).toBe("plain");
   });
 
   it("shapes the providers list RPC contract", () => {

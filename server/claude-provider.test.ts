@@ -7,7 +7,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateClaudeProvider } from "./claude-provider";
 import { translatePromptFragment } from "./prompt-text";
-import type { TranslateSettingsValues } from "../shared/translate";
+import { unwrapTranslationInput, type TranslateSettingsValues } from "../shared/translate";
 
 const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
@@ -15,6 +15,7 @@ const values: TranslateSettingsValues = {
   endpointModel: "mt",
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
+  translationDomainContext: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: [],
@@ -36,7 +37,7 @@ function translatingFetch(): typeof fetch {
       messages: Array<{ role: string; content: string }>;
     };
     const user = body.messages.find((message) => message.role === "user");
-    const text = user?.content ?? "";
+    const text = unwrapTranslationInput(user?.content ?? "");
     if (text.includes("FAIL")) throw new Error("endpoint down");
     return new Response(JSON.stringify({ choices: [{ message: { content: `DE(${text})` } }] }), {
       status: 200,

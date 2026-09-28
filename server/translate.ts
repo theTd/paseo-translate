@@ -12,6 +12,7 @@ import {
   translateStreamPollRpc,
   translateStreamStartRpc,
   translateTextRpc,
+  wrapTranslationInput,
   type LanguagePair,
   type TranslateDirection,
   type TranslateSettingsValues,
@@ -126,7 +127,11 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     }
     const values = await deps.loadConfig();
     const pair = resolveLanguagePair(values, direction);
-    const systemPrompt = resolveTranslationSystemPrompt(values.translationSystemPrompt, pair);
+    const systemPrompt = resolveTranslationSystemPrompt(
+      values.translationSystemPrompt,
+      pair,
+      values.translationDomainContext,
+    );
     // The key covers everything that changes the output: direction,
     // language pair, effective system prompt, endpoint (base URL + model,
     // so switching providers invalidates), reasoning effort, and text.
@@ -156,7 +161,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     );
     const messages = [
       { role: "system", content: systemPrompt },
-      { role: "user", content: text },
+      { role: "user", content: wrapTranslationInput(text) },
     ] as const;
     return { key, client, messages } as const;
   }
