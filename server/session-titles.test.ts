@@ -9,6 +9,7 @@ const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
+  endpointProtocol: "chat-completions" as const,
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
   translationDomainContext: "",
@@ -22,6 +23,9 @@ const values: TranslateSettingsValues = {
   translateResponses: true,
   translateReasoning: false,
   translateAllTimelines: false,
+  translationContextEnabled: true,
+  translationContextIdleMinutes: 30,
+  translationContextMaxChars: 100_000,
   translationTimeoutMs: 5_000,
   uiLanguage: "system" as const,
 };

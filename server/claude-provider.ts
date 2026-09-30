@@ -51,6 +51,8 @@ import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
   TRANSLATE_CLAUDE_PROVIDER_LABEL,
   TRANSLATION_TEXT_LIMIT,
+  omitTranslationBridgeEnv,
+  resolveTranslationContextKey,
   type TranslateSettingsValues,
 } from "../shared/translate";
 
@@ -190,6 +192,13 @@ type ProviderPermissionActions = NonNullable<
 interface ClaudeSession {
   id: string;
   config: ProviderSessionConfig;
+  /**
+   * Translation-context scope: the paseo agent id injected into the session
+   * env (see TRANSLATE_AGENT_ID_ENV), falling back to the provider session
+   * id when the bridge is absent. Keyed by agent id, prompt-path and
+   * display-path translations of one conversation share a transcript.
+   */
+  contextKey: string;
   translatedSystemPrompt: string | null;
   /** Configured overrides applied at query start and live where possible. */
   desiredModel: string | null;
@@ -637,6 +646,7 @@ async function openSession(
   if (context.sessions.has(input.sessionId)) {
     throw new Error(`Session already exists: ${input.sessionId}`);
   }
+  const contextKey = resolveTranslationContextKey(input.config.env, input.sessionId);
   let translatedSystemPrompt: string | null = null;
   if (typeof input.config.systemPrompt === "string" && input.config.systemPrompt.trim().length > 0) {
     if ((await context.loadValues()).translatePrompts) {
@@ -644,6 +654,7 @@ async function openSession(
         translatedSystemPrompt = await context.translator.translate(
           input.config.systemPrompt,
           "user-to-agent",
+          { contextKey },
         );
       } catch (error) {
         context.emit({
@@ -662,6 +673,7 @@ async function openSession(
   const session: ClaudeSession = {
     id: input.sessionId,
     config: input.config,
+    contextKey,
     translatedSystemPrompt,
     desiredModel: readConfigured(input.config.model),
     desiredMode: readConfigured(input.config.mode),
@@ -1006,7 +1018,7 @@ async function promptSession(
   }
   let blocks: SdkContentBlock[];
   try {
-    blocks = await buildMessageBlocks(input.prompt.input.content, context);
+    blocks = await buildMessageBlocks(input.prompt.input.content, context, session.contextKey);
   } catch (error) {
     // Fail closed: the prompt never reaches Claude untranslated.
     context.emit({
@@ -1068,7 +1080,9 @@ async function commandSession(
     try {
       const values = await context.loadValues();
       const translated = values.translatePrompts
-        ? await context.translator.translate(args, "user-to-agent")
+        ? await context.translator.translate(args, "user-to-agent", {
+            contextKey: session.contextKey,
+          })
         : args;
       text += ` ${translated}`;
     } catch (error) {
@@ -1135,7 +1149,7 @@ async function steerSession(
   }
   let blocks: SdkContentBlock[];
   try {
-    blocks = await buildMessageBlocks(input.prompt.input.content, context);
+    blocks = await buildMessageBlocks(input.prompt.input.content, context, session.contextKey);
   } catch (error) {
     context.emit({
       type: "session.prompt_result",
@@ -1205,10 +1219,12 @@ function isImageMimeType(
 async function buildMessageBlocks(
   content: ReadonlyArray<{ type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown } | unknown>,
   context: DispatchContext,
+  contextKey: string,
 ): Promise<SdkContentBlock[]> {
   const values = await context.loadValues();
   const translate = values.translatePrompts
-    ? (text: string) => context.translator.translate(text, "user-to-agent")
+    ? (text: string) =>
+        context.translator.translate(text, "user-to-agent", { contextKey })
     : async (text: string) => text;
   const blocks: SdkContentBlock[] = [];
   let hasContent = false;
@@ -1277,7 +1293,7 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
   };
   const options: Options = {
     cwd: session.config.cwd,
-    env: { ...process.env, ...session.config.env },
+    env: { ...process.env, ...omitTranslationBridgeEnv(session.config.env) },
     abortController: session.abort,
     // Token-level stream events drive the mid-turn context ring (the timeline
     // itself still renders complete messages).
@@ -1841,7 +1857,7 @@ async function requestQuestionPermission(
     const values = await context.loadValues();
     if (values.translateResponses) {
       translatedQuestions = await translateQuestionsForDisplay(originalQuestions, (text) =>
-        context.translator.translate(text, "agent-to-user"),
+        context.translator.translate(text, "agent-to-user", { contextKey: session.contextKey }),
       );
     }
   } catch {
@@ -1884,7 +1900,7 @@ async function respondToPermission(
   session.pendingPermissions.delete(permissionId);
   if (response.behavior === "allow") {
     if (pending.question !== undefined) {
-      await resolveQuestionAllow(pending.question, response, pending.resolve, context);
+      await resolveQuestionAllow(pending.question, response, pending.resolve, context, session.contextKey);
     } else {
       if (pending.plan === true) {
         // A plan approval switches the mode the native provider would switch
@@ -1931,11 +1947,13 @@ async function resolveQuestionAllow(
   response: Extract<ProviderPermissionResponse, { behavior: "allow" }>,
   resolve: (response: PermissionResultLike | null) => void,
   context: DispatchContext,
+  contextKey: string,
 ): Promise<void> {
   try {
     const values = await context.loadValues();
     const translate = values.translatePrompts
-      ? (text: string) => context.translator.translate(text, "user-to-agent")
+      ? (text: string) =>
+          context.translator.translate(text, "user-to-agent", { contextKey })
       : async (text: string) => text;
     const answers = await resolveQuestionAnswers(
       question.translatedQuestions,

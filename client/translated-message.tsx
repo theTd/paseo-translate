@@ -78,6 +78,7 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
     enabled: eligible,
     text: data.text,
     languagePair,
+    sessionKey: props.agentId,
     translationTimeoutMs:
       settings.status === "ready" ? settings.values.translationTimeoutMs : undefined,
     emptyResultMessage: t("emptyTranslation"),

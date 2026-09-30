@@ -12,8 +12,10 @@ export interface TranslatingConnectorConfig {
   /**
    * Translates one user-language text fragment into the agent language.
    * Fail closed: when this rejects, the prompt never reaches the inner agent.
+   * `contextKey` identifies the inner ACP session when the frame carries one,
+   * scoping the session translation transcript; absent means standalone.
    */
-  translate(text: string): Promise<string>;
+  translate(text: string, contextKey?: string): Promise<string>;
   /**
    * Translates one agent-language text fragment into the user language for
    * display. Used for question-like `session/request_permission` requests
@@ -22,8 +24,9 @@ export interface TranslatingConnectorConfig {
    * diffs, and paths always pass through untouched so agent behavior never
    * changes. Absent means no inbound translation. Fail soft: a rejection
    * delivers the original frame rather than breaking the turn.
+   * `contextKey` is passed like in translate when the frame names a session.
    */
-  translateDisplay?: (text: string) => Promise<string>;
+  translateDisplay?: (text: string, contextKey?: string) => Promise<string>;
   /**
    * Exact user-language original for a previously translated fragment, if the
    * reverse entry is still cached. Session-list titles prefer this over a
@@ -215,7 +218,13 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
     if (!("method" in message) || message.method !== "session/request_permission") {
       return message;
     }
-    return maybeTranslatePermission(message, display);
+    // Permission questions belong to one session: translate them against
+    // that session's transcript like replies do. Session-list titles stay
+    // context-free (they span every session).
+    const contextKey = readFrameSessionId(
+      "params" in message ? message.params : undefined,
+    );
+    return maybeTranslatePermission(message, (text) => display(text, contextKey));
   }
   async function maybeTranslatePermission(
     message: AcpStreamMessage,
@@ -370,10 +379,11 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
     if (blocks === null) {
       return blockRequest(message, "the prompt content array is missing or malformed");
     }
+    const contextKey = readFrameSessionId(message.params);
     try {
       const translated: unknown[] = [];
       for (const block of blocks) {
-        translated.push(await translateBlock(block, config));
+        translated.push(await translateBlock(block, config, contextKey));
       }
       const params = (message.params ?? {}) as Record<string, unknown>;
       return {
@@ -405,7 +415,12 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
     }
     if (systemPrompt.trim().length === 0) return message;
     try {
-      const translated = await config.translate(systemPrompt);
+      // session/load names the resumed session; session/new has no id yet,
+      // so a creation-time system prompt translates standalone.
+      const translated = await config.translate(
+        systemPrompt,
+        readFrameSessionId(message.params),
+      );
       const newParams = {
         ...(params as Record<string, unknown>),
         _meta: {
@@ -517,6 +532,7 @@ async function translatePermissionOptions(
 async function translateBlock(
   block: unknown,
   config: TranslatingConnectorConfig,
+  contextKey?: string,
 ): Promise<unknown> {
   if (
     typeof block !== "object" ||
@@ -527,5 +543,17 @@ async function translateBlock(
   }
   const text = (block as { text?: unknown }).text;
   if (typeof text !== "string") return block;
-  return { ...block, text: await translatePromptFragment(text, config.translate) };
+  return {
+    ...block,
+    text: await translatePromptFragment(text, (fragment) =>
+      config.translate(fragment, contextKey),
+    ),
+  };
+}
+
+/** The inner ACP session id a frame addresses, when it carries one. */
+function readFrameSessionId(params: unknown): string | undefined {
+  if (!isRecord(params)) return undefined;
+  const sessionId = params.sessionId;
+  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : undefined;
 }

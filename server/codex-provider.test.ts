@@ -6,12 +6,18 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateCodexProvider, type CodexClientFactory } from "./codex-provider";
 import type { CodexClientLike, CodexRequestHandler } from "./codex-app-server";
-import { unwrapTranslationInput, type TranslateSettingsValues } from "../shared/translate";
+import { createTranslationContextManager } from "./translation-context";
+import {
+  TRANSLATE_AGENT_ID_ENV,
+  unwrapTranslationInput,
+  type TranslateSettingsValues,
+} from "../shared/translate";
 
 const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
+  endpointProtocol: "chat-completions" as const,
   translationReasoningEffort: "default",
   translationSystemPrompt: "",
   translationDomainContext: "",
@@ -25,6 +31,9 @@ const values: TranslateSettingsValues = {
   translateResponses: true,
   translateReasoning: false,
   translateAllTimelines: false,
+  translationContextEnabled: true,
+  translationContextIdleMinutes: 30,
+  translationContextMaxChars: 100_000,
   translationTimeoutMs: 5_000,
   uiLanguage: "system",
 };
@@ -46,7 +55,7 @@ function translatingFetch(): typeof fetch {
 function createFakeClient() {
   const state = {
     requests: [] as Array<{ method: string; params: unknown }>,
-    options: null as { command: string; cwd: string } | null,
+    options: null as { command: string; cwd: string; env: NodeJS.ProcessEnv } | null,
     disposed: 0,
     handlers: {} as Record<string, (params: unknown) => unknown>,
   };
@@ -115,7 +124,7 @@ function createFakeClient() {
     },
   };
   const factory: CodexClientFactory = async (options) => {
-    state.options = { command: options.command, cwd: options.cwd };
+    state.options = { command: options.command, cwd: options.cwd, env: options.env };
     return client;
   };
   return {
@@ -135,12 +144,16 @@ function createFakeClient() {
   };
 }
 
-async function createHarness(overrides?: Partial<TranslateSettingsValues>) {
+async function createHarness(
+  overrides?: Partial<TranslateSettingsValues>,
+  context?: import("./translation-context").TranslationContextManager,
+) {
   const fake = createFakeClient();
   const provider = createTranslateCodexProvider({
     loadConfig: async () => ({ ...values, ...overrides }),
     fetchFn: translatingFetch(),
     createClient: fake.factory,
+    ...(context !== undefined ? { context } : {}),
   });
   const registration = await provider.connect({
     versions: [1],
@@ -261,6 +274,34 @@ describe("translate Codex provider", () => {
     expect(events.find((event) => event.type === "session.persistence")).toMatchObject({
       persistence: { version: 1, data: { threadId: "thread-1" } },
     });
+  });
+
+  it("scopes the translation transcript to the bridged agent id from the session env", async () => {
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const { fake, events, send } = await createHarness(undefined, context);
+    await send({
+      ...openInput,
+      config: {
+        ...openInput.config,
+        env: { [TRANSLATE_AGENT_ID_ENV]: "agent-1", KEEP_ME: "1" },
+      },
+    });
+    await waitFor(events, (event) => event.type === "session.ready");
+    await send(promptInput("Hello world"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "started");
+    expect(
+      context.snapshot("agent-1", "user-to-agent", { hardCapChars: 100_000 }).turns,
+    ).toHaveLength(1);
+    expect(
+      context.snapshot("s", "user-to-agent", { hardCapChars: 100_000 }).turns,
+    ).toHaveLength(0);
+    // The bridge var must not leak into the app-server process environment;
+    // user env passes through untouched.
+    expect(fake.state.options?.env?.[TRANSLATE_AGENT_ID_ENV]).toBeUndefined();
+    expect(fake.state.options?.env?.KEEP_ME).toBe("1");
   });
 
   it("fail-closes when prompt translation fails", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ACP_ADAPTER_PRESETS,
+  TRANSLATE_AGENT_ID_ENV,
   TRANSLATION_INPUT_CLOSE_TAG,
   TRANSLATION_INPUT_OPEN_TAG,
   adapterCommand,
@@ -11,6 +12,8 @@ import {
   isProviderImageMarkdown,
   isReasoningTranslationEligible,
   knownAcpCommand,
+  omitTranslationBridgeEnv,
+  resolveTranslationContextKey,
   resolveTranslationSystemPrompt,
   translateProvidersRpc,
   translateSettings,
@@ -24,6 +27,7 @@ const configured: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
+  endpointProtocol: "chat-completions" as const,
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
   translationDomainContext: "",
@@ -37,6 +41,9 @@ const configured: TranslateSettingsValues = {
   translateResponses: true,
   translateReasoning: false,
   translateAllTimelines: false,
+  translationContextEnabled: true,
+  translationContextIdleMinutes: 30,
+  translationContextMaxChars: 100_000,
   translationTimeoutMs: 30_000,
   uiLanguage: "system" as const,
 };
@@ -55,7 +62,15 @@ describe("translate settings schema", () => {
     expect(parsed.data.translationSystemPrompt).toBe("");
     expect(parsed.data.translationDomainContext).toBe("");
     expect(parsed.data.translationTimeoutMs).toBe(30_000);
+    expect(parsed.data.endpointProtocol).toBe("responses");
     expect(parsed.data.uiLanguage).toBe("system");
+  });
+
+  it("accepts both endpoint protocols and rejects anything else", () => {
+    for (const endpointProtocol of ["responses", "chat-completions"]) {
+      expect(translateSettings.schema.safeParse({ endpointProtocol }).success).toBe(true);
+    }
+    expect(translateSettings.schema.safeParse({ endpointProtocol: "grpc" }).success).toBe(false);
   });
 
   it("accepts every reasoning-effort gear including none", () => {
@@ -330,5 +345,22 @@ describe("reasoning translation eligibility", () => {
         translateAllTimelines: true,
       }),
     ).toBe(true);
+  });
+});
+
+describe("agent id env bridge", () => {
+  it("scopes by the bridged agent id, falling back when absent or blank", () => {
+    expect(resolveTranslationContextKey({ [TRANSLATE_AGENT_ID_ENV]: "agent-1" }, "s")).toBe(
+      "agent-1",
+    );
+    expect(resolveTranslationContextKey({}, "s")).toBe("s");
+    expect(resolveTranslationContextKey({ [TRANSLATE_AGENT_ID_ENV]: "  " }, "s")).toBe("s");
+  });
+
+  it("strips the bridge var for the inner agent environment, keeping the rest", () => {
+    expect(
+      omitTranslationBridgeEnv({ [TRANSLATE_AGENT_ID_ENV]: "agent-1", KEEP_ME: "1" }),
+    ).toEqual({ KEEP_ME: "1" });
+    expect(omitTranslationBridgeEnv({ KEEP_ME: "1" })).toEqual({ KEEP_ME: "1" });
   });
 });

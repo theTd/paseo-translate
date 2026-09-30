@@ -12,6 +12,10 @@ import {
   createPersistentTranslationCacheStore,
 } from "./translation-cache-store";
 import {
+  CONTEXT_MEMORY_KEY_PREFIX,
+  createTranslationContextManager,
+} from "./translation-context";
+import {
   resolveLanguagePair,
   translationSystemPrompt,
   unwrapTranslationInput,
@@ -32,6 +36,7 @@ const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
+  endpointProtocol: "chat-completions" as const,
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
   translationDomainContext: "",
@@ -45,6 +50,9 @@ const values: TranslateSettingsValues = {
   translateResponses: true,
   translateReasoning: false,
   translateAllTimelines: false,
+  translationContextEnabled: true,
+  translationContextIdleMinutes: 30,
+  translationContextMaxChars: 100_000,
   translationTimeoutMs: 5_000,
   uiLanguage: "system" as const,
 };
@@ -228,6 +236,29 @@ describe("translate service", () => {
     expect(calls[2].body?.messages[0]?.content).toContain("from en to de");
   });
 
+  it("retranslates after the endpoint protocol changes", async () => {
+    const calls: Array<{ responses: boolean }> = [];
+    let current = values;
+    const translator = createTranslator({
+      loadConfig: async () => current,
+      // Serves whichever shape the request's protocol implies.
+      fetchFn: (async (_input: string | URL | Request, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as { input?: unknown };
+        const isResponses = Array.isArray(body.input);
+        calls.push({ responses: isResponses });
+        const payload = isResponses
+          ? { output: [{ type: "message", content: [{ type: "output_text", text: "T:Hello" }] }] }
+          : { choices: [{ message: { content: "T:Hello" } }] };
+        return new Response(JSON.stringify(payload), { status: 200 });
+      }) as typeof fetch,
+    });
+    await expect(translator.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
+    current = { ...values, endpointProtocol: "responses" };
+    // The protocol feeds the cache key: no stale chat-protocol hit.
+    await expect(translator.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
+    expect(calls).toEqual([{ responses: false }, { responses: true }]);
+  });
+
   it("passes blank fragments through without calling the endpoint", async () => {
     const translator = createTranslator({
       loadConfig: async () => values,
@@ -316,6 +347,18 @@ async function waitForPoll(
 }
 
 describe("streaming translation jobs", () => {
+  it("translates the unary path with one bounded plain completion, no stream attempt", async () => {
+    const calls: Array<{ stream: boolean }> = [];
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: streamingFetch(calls, (text) => `DE:${text}`),
+    });
+    // Nobody consumes deltas on the fail-closed path: a stream attempt would
+    // only double the worst case past translationTimeoutMs on a refusal.
+    await expect(translator.translate("Hello", "user-to-agent")).resolves.toBe("DE:Hello");
+    expect(calls).toEqual([{ stream: false }]);
+  });
+
   it("streams partial text before completing", async () => {
     const calls: Array<{ stream: boolean }> = [];
     const manager = createTranslateStreamManager({
@@ -458,5 +501,128 @@ describe("user original restoration", () => {
       cacheStore: createPersistentTranslationCacheStore({ directory }),
     });
     expect(second.restoreOriginalFragment("T:Hello")).toBe("Hello");
+  });
+});
+
+/** Maps over the LAST user message, so transcript turns don't confuse it. */
+function contextFetch(calls: Captured[]): typeof fetch {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    calls.push({ body });
+    const lastUser = body.messages.filter((message) => message.role === "user").at(-1);
+    return new Response(
+      JSON.stringify({
+        choices: [{ message: { content: `T:${unwrapTranslationInput(lastUser?.content ?? "")}` } }],
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+}
+
+describe("session translation context", () => {
+  it("conditions later translations on the session's prior turns", async () => {
+    const calls: Captured[] = [];
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: contextFetch(calls),
+      context,
+    });
+    await expect(
+      translator.translate("Hello", "user-to-agent", { contextKey: "s" }),
+    ).resolves.toBe("T:Hello");
+    await expect(
+      translator.translate("World", "user-to-agent", { contextKey: "s" }),
+    ).resolves.toBe("T:World");
+    expect(calls).toHaveLength(2);
+    // The second request carries the committed first exchange, wrapped source
+    // and all, between the system prompt and the new input.
+    expect(calls[1].body?.messages.map((message) => message.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(calls[1].body?.messages[1]?.content).toBe(wrapTranslationInput("Hello"));
+    expect(calls[1].body?.messages[2]?.content).toBe("T:Hello");
+    expect(calls[1].body?.messages[3]?.content).toBe(wrapTranslationInput("World"));
+    // Another session stays standalone.
+    await translator.translate("Hola", "user-to-agent", { contextKey: "other" });
+    expect(calls[2].body?.messages).toHaveLength(2);
+  });
+
+  it("serves cache hits without re-recording them into the transcript", async () => {
+    const calls: Captured[] = [];
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: contextFetch(calls),
+      context,
+    });
+    await translator.translate("Hello", "user-to-agent", { contextKey: "s" });
+    // Cache hit: no endpoint call, and no duplicate transcript entry.
+    await translator.translate("Hello", "user-to-agent", { contextKey: "s" });
+    expect(calls).toHaveLength(1);
+    expect(context.snapshot("s", "user-to-agent", { hardCapChars: 100_000 }).turns).toHaveLength(1);
+  });
+
+  it("folds the compacted memory into both the system prompt and the cache key", async () => {
+    const calls: Captured[] = [];
+    const memoryStore = createMemoryTranslationCacheStore();
+    memoryStore.set(`${CONTEXT_MEMORY_KEY_PREFIX}s-mem`, "cloud = Wolke");
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      memoryStore,
+      sweepIntervalMs: 0,
+    });
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: contextFetch(calls),
+      context,
+    });
+    await translator.translate("Hello", "user-to-agent", { contextKey: "s-mem" });
+    expect(calls[0].body?.messages[0]?.content).toContain("cloud = Wolke");
+    // Same session, same memory: served from cache.
+    await translator.translate("Hello", "user-to-agent", { contextKey: "s-mem" });
+    expect(calls).toHaveLength(1);
+    // A session with a different (empty) memory must not inherit the
+    // memory-conditioned result: it gets its own cache namespace.
+    await translator.translate("Hello", "user-to-agent", { contextKey: "fresh" });
+    expect(calls).toHaveLength(2);
+    // Standalone translations live in a third namespace.
+    await translator.translate("Hello", "user-to-agent");
+    expect(calls).toHaveLength(3);
+  });
+
+  it("stays standalone when the setting is off or no context key is passed", async () => {
+    const calls: Captured[] = [];
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const disabled = createTranslator({
+      loadConfig: async () => ({ ...values, translationContextEnabled: false }),
+      fetchFn: contextFetch(calls),
+      context,
+    });
+    await disabled.translate("Hello", "user-to-agent", { contextKey: "s" });
+    expect(calls[0].body?.messages).toHaveLength(2);
+    expect(context.snapshot("s", "user-to-agent", { hardCapChars: 100_000 }).turns).toHaveLength(0);
+
+    const noKey = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: contextFetch(calls),
+      context,
+    });
+    await noKey.translate("World", "user-to-agent");
+    expect(calls[1].body?.messages).toHaveLength(2);
   });
 });

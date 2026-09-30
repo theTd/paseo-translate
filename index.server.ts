@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createProvidersHandler } from "./server/providers";
 import { createTranslateProvider } from "./server/provider";
@@ -15,14 +16,20 @@ import {
   createPersistentTranslationCacheStore,
   defaultTranslationCacheDirectory,
 } from "./server/translation-cache-store";
+import { createTranslationContextManager } from "./server/translation-context";
 import {
   assertConfigured,
+  TRANSLATE_AGENT_ID_ENV,
+  TRANSLATE_PROVIDER_IDS,
   translateProvidersRpc,
   translateSettings,
   translateStreamPollRpc,
   translateStreamStartRpc,
   translateTextRpc,
 } from "./shared/translate";
+
+/** Persisted terminology memories share the cache directory, in their own file. */
+const CONTEXT_MEMORY_CAPACITY = 500;
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(translateSettings);
@@ -43,13 +50,38 @@ export default function contribute(server: PluginServerContext) {
   const cacheStore = createPersistentTranslationCacheStore({
     directory: defaultTranslationCacheDirectory(),
   });
-  server.registerProvider(createTranslateProvider({ loadConfig, cacheStore }));
-  server.registerProvider(createTranslateClaudeProvider({ loadConfig, cacheStore }));
-  server.registerProvider(createTranslateCodexProvider({ loadConfig, cacheStore }));
-  server.handle(translateTextRpc, createTranslateHandler({ loadConfig, cacheStore }));
-  const streamManager = createTranslateStreamManager({ loadConfig, cacheStore });
+  // One process-wide transcript manager, shared like the cache: every
+  // translation for the same agent (prompt path, display path, questions)
+  // feeds one transcript, so terminology stays consistent for the
+  // conversation. The direct providers key it by agent id (injected into the
+  // session env below); the ACP proxy keys it by the inner ACP session id,
+  // which is restart-stable but separate from the display path's agent id.
+  const context = createTranslationContextManager({
+    loadConfig,
+    memoryStore: createPersistentTranslationCacheStore({
+      directory: path.join(defaultTranslationCacheDirectory(), "context"),
+      maxEntries: CONTEXT_MEMORY_CAPACITY,
+    }),
+  });
+  const deps = { loadConfig, cacheStore, context };
+  // Bridge the agent id into our providers' session env: the daemon assigns
+  // providers a fresh random session id per open, so without this the prompt
+  // path could not share a transcript with the client display path (which
+  // scopes by agent id) and memories would orphan on every restart.
+  const offSessionOpen = server.before("agent.session_open", ({ request }) => {
+    if (!(TRANSLATE_PROVIDER_IDS as readonly string[]).includes(request.provider)) return;
+    return { ...request, env: { ...request.env, [TRANSLATE_AGENT_ID_ENV]: request.agentId } };
+  });
+  server.registerProvider(createTranslateProvider(deps));
+  server.registerProvider(createTranslateClaudeProvider(deps));
+  server.registerProvider(createTranslateCodexProvider(deps));
+  server.handle(translateTextRpc, createTranslateHandler(deps));
+  const streamManager = createTranslateStreamManager(deps);
   server.handle(translateStreamStartRpc, createTranslateStreamStartHandler(streamManager));
   server.handle(translateStreamPollRpc, createTranslateStreamPollHandler(streamManager));
   server.handle(translateProvidersRpc, createProvidersHandler());
-  return () => {};
+  return () => {
+    offSessionOpen();
+    context.dispose();
+  };
 }

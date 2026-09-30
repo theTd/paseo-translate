@@ -7,12 +7,18 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateClaudeProvider } from "./claude-provider";
 import { translatePromptFragment } from "./prompt-text";
-import { unwrapTranslationInput, type TranslateSettingsValues } from "../shared/translate";
+import { createTranslationContextManager } from "./translation-context";
+import {
+  TRANSLATE_AGENT_ID_ENV,
+  unwrapTranslationInput,
+  type TranslateSettingsValues,
+} from "../shared/translate";
 
 const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
   endpointApiKey: "key",
   endpointModel: "mt",
+  endpointProtocol: "chat-completions" as const,
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
   translationDomainContext: "",
@@ -26,6 +32,9 @@ const values: TranslateSettingsValues = {
   translateResponses: true,
   translateReasoning: false,
   translateAllTimelines: false,
+  translationContextEnabled: true,
+  translationContextIdleMinutes: 30,
+  translationContextMaxChars: 100_000,
   translationTimeoutMs: 5_000,
   uiLanguage: "system" as const,
 };
@@ -177,6 +186,7 @@ async function createHarness(
   overrides?: Partial<TranslateSettingsValues>,
   cacheStore?: import("./translation-cache-store").TranslationCacheStore,
   connectCapabilities?: readonly string[],
+  context?: import("./translation-context").TranslationContextManager,
 ) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
@@ -184,6 +194,7 @@ async function createHarness(
     fetchFn: translatingFetch(),
     queryFactory: fake.factory,
     ...(cacheStore !== undefined ? { cacheStore } : {}),
+    ...(context !== undefined ? { context } : {}),
   });
   const registration = await provider.connect({
     versions: [1],
@@ -281,6 +292,44 @@ describe("translate claude provider", () => {
     });
     const promptResult = events.find((event) => event.type === "session.prompt_result");
     expect(promptResult).toMatchObject({ clientMessageId: "m-1", result: { type: "turn" } });
+  });
+
+  it("scopes the translation transcript to the bridged agent id from the session env", async () => {
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const { fake, events, send } = await createHarness(undefined, undefined, undefined, context);
+    await send({
+      ...openInput,
+      config: {
+        ...openInput.config,
+        env: { [TRANSLATE_AGENT_ID_ENV]: "agent-1", KEEP_ME: "1" },
+      },
+    });
+    fake.use(async function* (_pushed) {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hello", "m-1"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    await send(promptInput("Again", "m-2"));
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.prompt_result" && event.clientMessageId === "m-2",
+    );
+    // Both prompts recorded under the bridged agent id, not the provider
+    // session id — the display path (agentId-scoped) shares this transcript.
+    expect(
+      context.snapshot("agent-1", "user-to-agent", { hardCapChars: 100_000 }).turns,
+    ).toHaveLength(2);
+    expect(
+      context.snapshot("s", "user-to-agent", { hardCapChars: 100_000 }).turns,
+    ).toHaveLength(0);
+    // The bridge var served its purpose at open and must not leak into the
+    // inner agent's process environment; user env passes through untouched.
+    expect(fake.state.options?.env?.[TRANSLATE_AGENT_ID_ENV]).toBeUndefined();
+    expect(fake.state.options?.env?.KEEP_ME).toBe("1");
   });
 
   it("resumes the stored Claude session and translates the system prompt", async () => {

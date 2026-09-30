@@ -32528,7 +32528,8 @@ var import_node_crypto2 = require("node:crypto");
 function createLlmClient(config2, options = {}) {
   const fetchFn = options.fetchFn ?? fetch;
   async function postCompletions(messages, stream) {
-    const url2 = `${config2.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    const path3 = config2.protocol === "responses" ? "/responses" : "/chat/completions";
+    const url2 = `${config2.baseUrl.replace(/\/+$/, "")}${path3}`;
     const headers = { "content-type": "application/json" };
     if (config2.apiKey.length > 0) headers.authorization = `Bearer ${config2.apiKey}`;
     const controller = new AbortController();
@@ -32538,13 +32539,9 @@ function createLlmClient(config2, options = {}) {
       const response = await fetchFn(url2, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          model: config2.model,
-          messages,
-          temperature: 0,
-          stream,
-          ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning_effort: config2.reasoningEffort } : {}
-        }),
+        body: JSON.stringify(
+          config2.protocol === "responses" ? buildResponsesBody(config2, messages, stream) : buildChatBody(config2, messages, stream)
+        ),
         // The SDK dependency bundles DOM-style globals that clash with the
         // Node declarations; bridge them at this boundary through the
         // fetch-side signal type.
@@ -32583,7 +32580,7 @@ function createLlmClient(config2, options = {}) {
       let content;
       try {
         const parsed = JSON.parse(body);
-        content = readChoiceContent(parsed);
+        content = readResponseText(config2.protocol, parsed);
       } catch (error62) {
         throw new Error(`Translation endpoint returned an unexpected response: ${excerpt(body)}`, {
           cause: error62
@@ -32606,7 +32603,29 @@ function createLlmClient(config2, options = {}) {
         if (response.body === null) {
           throw new Error("Translation endpoint returned an empty stream");
         }
-        return await readSseDeltas(response.body, onDelta);
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await response.text();
+          let content;
+          try {
+            content = readResponseText(config2.protocol, JSON.parse(body));
+          } catch (error62) {
+            throw new Error(
+              `Translation endpoint returned an unexpected response: ${excerpt(body)}`,
+              { cause: error62 }
+            );
+          }
+          if (typeof content !== "string" || content.length === 0) {
+            throw new Error(`Translation endpoint returned no message text: ${excerpt(body)}`);
+          }
+          onDelta(content);
+          return content;
+        }
+        return await readSseDeltas(
+          response.body,
+          onDelta,
+          (parsed) => readStreamDelta(config2.protocol, parsed)
+        );
       } finally {
         release();
         try {
@@ -32617,7 +32636,63 @@ function createLlmClient(config2, options = {}) {
     }
   };
 }
-async function readSseDeltas(body, onDelta) {
+function buildChatBody(config2, messages, stream) {
+  return {
+    model: config2.model,
+    messages,
+    temperature: 0,
+    stream,
+    ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning_effort: config2.reasoningEffort } : {}
+  };
+}
+function buildResponsesBody(config2, messages, stream) {
+  const instructions = [];
+  const input2 = [];
+  for (const message of messages) {
+    if (message.role === "system") {
+      instructions.push(message.content);
+    } else if (message.role === "user") {
+      input2.push({ role: "user", content: [{ type: "input_text", text: message.content }] });
+    } else {
+      input2.push({ role: "assistant", content: [{ type: "input_text", text: message.content }] });
+    }
+  }
+  return {
+    model: config2.model,
+    ...instructions.length > 0 ? { instructions: instructions.join("\n\n") } : {},
+    input: input2,
+    stream,
+    store: false,
+    ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning: { effort: config2.reasoningEffort } } : {}
+  };
+}
+function readResponseText(protocol, parsed) {
+  if (protocol === "chat-completions") {
+    if (typeof parsed !== "object" || parsed === null) return void 0;
+    const completion = parsed;
+    return completion.choices?.[0]?.message?.content;
+  }
+  if (typeof parsed !== "object" || parsed === null) return void 0;
+  const output2 = parsed.output;
+  if (!Array.isArray(output2)) return void 0;
+  let text = "";
+  for (const item of output2) {
+    if (item.type !== "message" || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part.type === "output_text" && typeof part.text === "string") text += part.text;
+    }
+  }
+  return text.length > 0 ? text : void 0;
+}
+function readStreamDelta(protocol, parsed) {
+  if (protocol === "chat-completions") {
+    const delta = parsed.choices?.[0]?.delta?.content;
+    return typeof delta === "string" && delta.length > 0 ? delta : void 0;
+  }
+  const event = parsed;
+  return event.type === "response.output_text.delta" && typeof event.delta === "string" && event.delta.length > 0 ? event.delta : void 0;
+}
+async function readSseDeltas(body, onDelta, readDelta) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -32626,21 +32701,21 @@ async function readSseDeltas(body, onDelta) {
     const { done, value } = await reader.read();
     if (value !== void 0) buffer += decoder.decode(value, { stream: !done });
     if (done) break;
-    buffer = consumeSseEvents(buffer, (data) => {
+    buffer = consumeSseEvents(buffer, readDelta, (data) => {
       accumulated += data;
-      if (data.length > 0) onDelta(data);
+      onDelta(data);
     });
   }
-  buffer = consumeSseEvents(buffer, (data) => {
+  buffer = consumeSseEvents(buffer, readDelta, (data) => {
     accumulated += data;
-    if (data.length > 0) onDelta(data);
+    onDelta(data);
   });
   if (accumulated.length === 0) {
     throw new Error("Translation endpoint streamed no message text");
   }
   return accumulated;
 }
-function consumeSseEvents(buffer, onData) {
+function consumeSseEvents(buffer, readDelta, onData) {
   let rest = buffer;
   for (; ; ) {
     const boundary = rest.indexOf("\n\n");
@@ -32653,18 +32728,12 @@ function consumeSseEvents(buffer, onData) {
       const payload = trimmed.slice("data:".length).trim();
       if (payload === "[DONE]") continue;
       try {
-        const parsed = JSON.parse(payload);
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (typeof delta === "string" && delta.length > 0) onData(delta);
+        const delta = readDelta(JSON.parse(payload));
+        if (delta !== void 0) onData(delta);
       } catch {
       }
     }
   }
-}
-function readChoiceContent(parsed) {
-  if (typeof parsed !== "object" || parsed === null) return void 0;
-  const completion = parsed;
-  return completion.choices?.[0]?.message?.content;
 }
 function excerpt(body) {
   const flattened = body.replace(/\s+/g, " ").trim();
@@ -32672,6 +32741,13 @@ function excerpt(body) {
 }
 function describeError(error62) {
   return error62 instanceof Error ? error62.message : String(error62);
+}
+async function completeStreamFirst(client, messages, onDelta = () => void 0) {
+  try {
+    return await client.stream(messages, onDelta);
+  } catch {
+    return client.complete(messages);
+  }
 }
 
 // shared/translate.ts
@@ -52348,6 +52424,16 @@ function date4(params) {
 // shared/translate.ts
 var TRANSLATE_CLAUDE_PROVIDER_ID = "translate-claude";
 var TRANSLATE_CLAUDE_PROVIDER_LABEL = "Translate (Claude Code)";
+var TRANSLATE_AGENT_ID_ENV = "PASEO_TRANSLATE_AGENT_ID";
+function resolveTranslationContextKey(env, fallback) {
+  const agentId = env[TRANSLATE_AGENT_ID_ENV]?.trim();
+  return agentId !== void 0 && agentId.length > 0 ? agentId : fallback;
+}
+function omitTranslationBridgeEnv(env) {
+  const rest = { ...env };
+  delete rest[TRANSLATE_AGENT_ID_ENV];
+  return rest;
+}
 var TRANSLATION_TEXT_LIMIT = 1e5;
 var TRANSLATION_CACHE_CAPACITY = 1e4;
 var translateDirectionSchema = external_exports.enum(["user-to-agent", "agent-to-user"]);
@@ -52360,6 +52446,14 @@ var translateSettings = (0, import_plugin.defineSettings)({
     endpointApiKey: external_exports.string().default(""),
     endpointModel: external_exports.string().trim().default(""),
     /**
+     * Wire protocol spoken to the endpoint. "responses" (default) posts to
+     * /responses — the current OpenAI API, required by some newer models and
+     * gateways. "chat-completions" is the classic /chat/completions shape,
+     * the lowest common denominator for compatible gateways; switch to it
+     * when the endpoint has no /responses route.
+     */
+    endpointProtocol: external_exports.enum(["responses", "chat-completions"]).default("responses"),
+    /**
      * Reasoning effort sent with each translation request (OpenAI-compatible).
      * "default" omits the parameter; "none" sends reasoning_effort "none" to
      * turn thinking off where the endpoint supports it.
@@ -52368,7 +52462,9 @@ var translateSettings = (0, import_plugin.defineSettings)({
     /**
      * Custom system prompt for the translation model; empty string uses the
      * built-in default. `{source}`, `{target}`, and `{context}` placeholders
-     * resolve per request (see resolveTranslationSystemPrompt).
+     * resolve per request (see resolveTranslationSystemPrompt), and the text
+     * to translate arrives wrapped in `<translate-input>` tags (see
+     * wrapTranslationInput).
      */
     translationSystemPrompt: external_exports.string().default(""),
     /**
@@ -52390,6 +52486,26 @@ var translateSettings = (0, import_plugin.defineSettings)({
     translateResponses: external_exports.boolean().default(true),
     translateAllTimelines: external_exports.boolean().default(false),
     /**
+     * Session-scoped translation context: each agent session keeps its own
+     * transcript of prior translations (plus a compacted terminology memory),
+     * so repeated concepts translate consistently inside one conversation.
+     * Off restores the old every-request-is-independent behavior.
+     */
+    translationContextEnabled: external_exports.boolean().default(true),
+    /**
+     * Idle minutes before a session's transcript is eligible for automatic
+     * compaction. Compaction only runs when the transcript also exceeds
+     * translationContextMaxChars and no new translation arrived meanwhile.
+     */
+    translationContextIdleMinutes: external_exports.number().int().min(1).max(1440).default(30),
+    /**
+     * Transcript size (characters of kept turns) that makes an idle session
+     * eligible for compaction. During active use a deterministic tail-trim
+     * fail-safe engages at twice this bound so a busy session cannot grow
+     * without limit.
+     */
+    translationContextMaxChars: external_exports.number().int().min(1e4).max(1e6).default(1e5),
+    /**
      * Translate reasoning (thinking) blocks for display, like replies.
      * Off by default: thinking blocks are often long, so translating them
      * doubles endpoint spend on auxiliary text. Requires `translateResponses`
@@ -52409,7 +52525,13 @@ var translateTextRpc = (0, import_plugin.defineRpc)({
   name: "translate.text",
   input: external_exports.object({
     text: external_exports.string().min(1),
-    direction: translateDirectionSchema
+    direction: translateDirectionSchema,
+    /**
+     * Agent/session the text belongs to; scopes the session translation
+     * transcript (see translationContextEnabled). Omit for a standalone
+     * context-free translation.
+     */
+    sessionKey: external_exports.string().optional()
   }),
   output: external_exports.object({
     text: external_exports.string()
@@ -52419,7 +52541,9 @@ var translateStreamStartRpc = (0, import_plugin.defineRpc)({
   name: "translate.stream.start",
   input: external_exports.object({
     text: external_exports.string().min(1),
-    direction: translateDirectionSchema
+    direction: translateDirectionSchema,
+    /** See translateTextRpc.sessionKey. */
+    sessionKey: external_exports.string().optional()
   }),
   output: external_exports.object({
     jobId: external_exports.string()
@@ -52545,7 +52669,7 @@ function rememberOriginalFragment(cache, translated, original) {
 }
 function createTranslator(deps) {
   const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
-  async function setup(text, direction) {
+  async function setup(text, direction, contextKey) {
     if (text.trim().length === 0) return { trivial: text };
     if (text.length > TRANSLATION_TEXT_LIMIT) {
       throw new Error(
@@ -52559,6 +52683,11 @@ function createTranslator(deps) {
       pair,
       values.translationDomainContext
     );
+    const context = deps.context;
+    const useContext = context !== void 0 && contextKey !== void 0 && values.translationContextEnabled;
+    const snapshot = useContext ? context.snapshot(contextKey, direction, {
+      hardCapChars: values.translationContextMaxChars * 2
+    }) : void 0;
     const key = cacheKey({
       text,
       direction,
@@ -52566,57 +52695,92 @@ function createTranslator(deps) {
       systemPrompt,
       endpointBaseUrl: values.endpointBaseUrl,
       endpointModel: values.endpointModel,
-      reasoningEffort: values.translationReasoningEffort
+      endpointProtocol: values.endpointProtocol,
+      reasoningEffort: values.translationReasoningEffort,
+      contextMemory: snapshot?.memory
     });
     const cached2 = cache.get(key);
-    if (cached2 !== void 0) return { cached: cached2 };
+    if (cached2 !== void 0) {
+      if (useContext) context.touch(contextKey);
+      return { cached: cached2 };
+    }
     const client = createLlmClient(
       {
         baseUrl: values.endpointBaseUrl,
         apiKey: values.endpointApiKey,
         model: values.endpointModel,
         timeoutMs: values.translationTimeoutMs,
-        reasoningEffort: values.translationReasoningEffort
+        reasoningEffort: values.translationReasoningEffort,
+        protocol: values.endpointProtocol
       },
       { fetchFn: deps.fetchFn }
     );
-    const messages = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: wrapTranslationInput(text) }
-    ];
-    return { key, client, messages };
+    const systemContent = snapshot !== void 0 && snapshot.memory.length > 0 ? `${systemPrompt}
+
+Established translation conventions for this session (apply consistently):
+${snapshot.memory}` : systemPrompt;
+    const messages = [{ role: "system", content: systemContent }];
+    if (snapshot !== void 0) {
+      for (const turn of snapshot.turns) {
+        messages.push(
+          { role: "user", content: turn.user },
+          { role: "assistant", content: turn.assistant }
+        );
+      }
+    }
+    const userContent = wrapTranslationInput(text);
+    messages.push({ role: "user", content: userContent });
+    return {
+      key,
+      client,
+      messages,
+      userContent,
+      ...useContext ? { recordContext: { scopeKey: contextKey } } : {}
+    };
   }
   return {
-    async translate(text, direction) {
-      const prepared = await setup(text, direction);
+    async translate(text, direction, options) {
+      const prepared = await setup(text, direction, options?.contextKey);
       if ("trivial" in prepared) return prepared.trivial;
       if ("cached" in prepared) {
         if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
         return prepared.cached;
       }
-      const translated = await prepared.client.complete([...prepared.messages]);
+      const translated = await prepared.client.complete(prepared.messages);
       cache.set(prepared.key, translated);
       if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
+      if (prepared.recordContext !== void 0) {
+        deps.context?.record(
+          prepared.recordContext.scopeKey,
+          direction,
+          prepared.userContent,
+          translated
+        );
+      }
       return translated;
     },
-    async translateStream(text, direction, onDelta) {
-      const prepared = await setup(text, direction);
+    async translateStream(text, direction, onDelta, options) {
+      const prepared = await setup(text, direction, options?.contextKey);
       if ("trivial" in prepared) return prepared.trivial;
       if ("cached" in prepared) {
         if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
         return prepared.cached;
       }
-      try {
-        const translated = await prepared.client.stream([...prepared.messages], onDelta);
-        cache.set(prepared.key, translated);
-        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
-        return translated;
-      } catch {
-        const translated = await prepared.client.complete([...prepared.messages]);
-        cache.set(prepared.key, translated);
-        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
-        return translated;
-      }
+      const recordSuccess = (translated2) => {
+        cache.set(prepared.key, translated2);
+        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated2, text);
+        if (prepared.recordContext !== void 0) {
+          deps.context?.record(
+            prepared.recordContext.scopeKey,
+            direction,
+            prepared.userContent,
+            translated2
+          );
+        }
+      };
+      const translated = await completeStreamFirst(prepared.client, prepared.messages, onDelta);
+      recordSuccess(translated);
+      return translated;
     },
     restoreOriginalFragment(translatedFragment) {
       const key = originalFragmentKey(translatedFragment);
@@ -52633,8 +52797,10 @@ function cacheKey(input2) {
     target: input2.pair.target,
     baseUrl: digest(input2.endpointBaseUrl),
     model: digest(input2.endpointModel),
+    protocol: input2.endpointProtocol,
     effort: input2.reasoningEffort,
     prompt: digest(input2.systemPrompt),
+    ...input2.contextMemory !== void 0 ? { memory: digest(input2.contextMemory) } : {},
     text: digest(input2.text)
   });
 }
@@ -54369,13 +54535,15 @@ async function openSession(input2, context, capabilities) {
   if (context.sessions.has(input2.sessionId)) {
     throw new Error(`Session already exists: ${input2.sessionId}`);
   }
+  const contextKey = resolveTranslationContextKey(input2.config.env, input2.sessionId);
   let translatedSystemPrompt = null;
   if (typeof input2.config.systemPrompt === "string" && input2.config.systemPrompt.trim().length > 0) {
     if ((await context.loadValues()).translatePrompts) {
       try {
         translatedSystemPrompt = await context.translator.translate(
           input2.config.systemPrompt,
-          "user-to-agent"
+          "user-to-agent",
+          { contextKey }
         );
       } catch (error62) {
         context.emit({
@@ -54394,6 +54562,7 @@ async function openSession(input2, context, capabilities) {
   const session = {
     id: input2.sessionId,
     config: input2.config,
+    contextKey,
     translatedSystemPrompt,
     desiredModel: readConfigured(input2.config.model),
     desiredMode: readConfigured(input2.config.mode),
@@ -54646,7 +54815,7 @@ async function promptSession(input2, context) {
   }
   let blocks;
   try {
-    blocks = await buildMessageBlocks(input2.prompt.input.content, context);
+    blocks = await buildMessageBlocks(input2.prompt.input.content, context, session.contextKey);
   } catch (error62) {
     context.emit({
       type: "session.prompt_result",
@@ -54694,7 +54863,9 @@ async function commandSession(input2, context, session) {
   if (args.trim().length > 0) {
     try {
       const values = await context.loadValues();
-      const translated = values.translatePrompts ? await context.translator.translate(args, "user-to-agent") : args;
+      const translated = values.translatePrompts ? await context.translator.translate(args, "user-to-agent", {
+        contextKey: session.contextKey
+      }) : args;
       text += ` ${translated}`;
     } catch (error62) {
       context.emit({
@@ -54750,7 +54921,7 @@ async function steerSession(input2, context, session) {
   }
   let blocks;
   try {
-    blocks = await buildMessageBlocks(input2.prompt.input.content, context);
+    blocks = await buildMessageBlocks(input2.prompt.input.content, context, session.contextKey);
   } catch (error62) {
     context.emit({
       type: "session.prompt_result",
@@ -54794,9 +54965,9 @@ var IMAGE_MIME_TYPES = /* @__PURE__ */ new Set(["image/jpeg", "image/png", "imag
 function isImageMimeType(mimeType) {
   return IMAGE_MIME_TYPES.has(mimeType);
 }
-async function buildMessageBlocks(content, context) {
+async function buildMessageBlocks(content, context, contextKey) {
   const values = await context.loadValues();
-  const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent") : async (text) => text;
+  const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent", { contextKey }) : async (text) => text;
   const blocks = [];
   let hasContent = false;
   for (const block of content) {
@@ -54840,7 +55011,7 @@ async function ensureQuery(session, context) {
   };
   const options = {
     cwd: session.config.cwd,
-    env: { ...process.env, ...session.config.env },
+    env: { ...process.env, ...omitTranslationBridgeEnv(session.config.env) },
     abortController: session.abort,
     // Token-level stream events drive the mid-turn context ring (the timeline
     // itself still renders complete messages).
@@ -55240,7 +55411,7 @@ async function requestQuestionPermission(session, input2, toolOptions, context) 
     if (values.translateResponses) {
       translatedQuestions = await translateQuestionsForDisplay(
         originalQuestions,
-        (text) => context.translator.translate(text, "agent-to-user")
+        (text) => context.translator.translate(text, "agent-to-user", { contextKey: session.contextKey })
       );
     }
   } catch {
@@ -55273,7 +55444,7 @@ async function respondToPermission(session, permissionId, response, context) {
   session.pendingPermissions.delete(permissionId);
   if (response.behavior === "allow") {
     if (pending.question !== void 0) {
-      await resolveQuestionAllow(pending.question, response, pending.resolve, context);
+      await resolveQuestionAllow(pending.question, response, pending.resolve, context, session.contextKey);
     } else {
       if (pending.plan === true) {
         const shouldResumeBypass = response.selectedActionId === "implement_resume" && session.planResumeMode === "bypassPermissions";
@@ -55304,10 +55475,10 @@ async function respondToPermission(session, permissionId, response, context) {
   }
   emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
 }
-async function resolveQuestionAllow(question, response, resolve5, context) {
+async function resolveQuestionAllow(question, response, resolve5, context, contextKey) {
   try {
     const values = await context.loadValues();
-    const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent") : async (text) => text;
+    const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent", { contextKey }) : async (text) => text;
     const answers = await resolveQuestionAnswers(
       question.translatedQuestions,
       Array.isArray(question.requestInput.questions) ? question.requestInput.questions : [],

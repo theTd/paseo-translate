@@ -1,12 +1,17 @@
 /**
- * Minimal OpenAI-compatible chat-completions client for the translation
- * endpoint. One attempt per call; the caller owns the failure policy.
+ * Minimal OpenAI-compatible client for the translation endpoint, speaking
+ * either wire protocol: Responses (`/responses`, the default) or classic
+ * Chat Completions (`/chat/completions`) for gateways without a Responses
+ * route. One attempt per call; the caller owns the failure policy.
  */
 
 export interface ChatMessage {
-  role: "system" | "user";
+  role: "system" | "user" | "assistant";
   content: string;
 }
+
+/** Wire protocol spoken to the endpoint (see translateSettings.endpointProtocol). */
+export type LlmEndpointProtocol = "responses" | "chat-completions";
 
 export interface LlmEndpointConfig {
   baseUrl: string;
@@ -15,6 +20,7 @@ export interface LlmEndpointConfig {
   timeoutMs: number;
   /** OpenAI-compatible reasoning effort; omit or "default" to send none. */
   reasoningEffort?: string;
+  protocol: LlmEndpointProtocol;
 }
 
 export interface LlmClient {
@@ -38,7 +44,8 @@ export function createLlmClient(
     messages: readonly ChatMessage[],
     stream: boolean,
   ): Promise<{ response: Response; url: string; release: () => void }> {
-    const url = `${config.baseUrl.replace(/\/+$/, "")}/chat/completions`;
+    const path = config.protocol === "responses" ? "/responses" : "/chat/completions";
+    const url = `${config.baseUrl.replace(/\/+$/, "")}${path}`;
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (config.apiKey.length > 0) headers.authorization = `Bearer ${config.apiKey}`;
     const controller = new AbortController();
@@ -50,17 +57,11 @@ export function createLlmClient(
       const response = await fetchFn(url, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          model: config.model,
-          messages,
-          temperature: 0,
-          stream,
-          ...(config.reasoningEffort !== undefined &&
-          config.reasoningEffort.length > 0 &&
-          config.reasoningEffort !== "default"
-            ? { reasoning_effort: config.reasoningEffort }
-            : {}),
-        }),
+        body: JSON.stringify(
+          config.protocol === "responses"
+            ? buildResponsesBody(config, messages, stream)
+            : buildChatBody(config, messages, stream),
+        ),
         // The SDK dependency bundles DOM-style globals that clash with the
         // Node declarations; bridge them at this boundary through the
         // fetch-side signal type.
@@ -100,7 +101,7 @@ export function createLlmClient(
       let content: unknown;
       try {
         const parsed: unknown = JSON.parse(body);
-        content = readChoiceContent(parsed);
+        content = readResponseText(config.protocol, parsed);
       } catch (error) {
         throw new Error(`Translation endpoint returned an unexpected response: ${excerpt(body)}`, {
           cause: error,
@@ -124,7 +125,30 @@ export function createLlmClient(
         if (response.body === null) {
           throw new Error("Translation endpoint returned an empty stream");
         }
-        return await readSseDeltas(response.body, onDelta);
+        // Some gateways silently ignore `stream: true` and answer with a
+        // plain JSON completion: accept it as the endpoint's own choice of
+        // non-streaming instead of forcing a second request.
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!contentType.includes("text/event-stream")) {
+          const body = await response.text();
+          let content: unknown;
+          try {
+            content = readResponseText(config.protocol, JSON.parse(body));
+          } catch (error) {
+            throw new Error(
+              `Translation endpoint returned an unexpected response: ${excerpt(body)}`,
+              { cause: error },
+            );
+          }
+          if (typeof content !== "string" || content.length === 0) {
+            throw new Error(`Translation endpoint returned no message text: ${excerpt(body)}`);
+          }
+          onDelta(content);
+          return content;
+        }
+        return await readSseDeltas(response.body, onDelta, (parsed) =>
+          readStreamDelta(config.protocol, parsed),
+        );
       } finally {
         release();
         try {
@@ -137,12 +161,114 @@ export function createLlmClient(
   };
 }
 
+function buildChatBody(
+  config: LlmEndpointConfig,
+  messages: readonly ChatMessage[],
+  stream: boolean,
+): Record<string, unknown> {
+  return {
+    model: config.model,
+    messages,
+    temperature: 0,
+    stream,
+    ...(config.reasoningEffort !== undefined &&
+    config.reasoningEffort.length > 0 &&
+    config.reasoningEffort !== "default"
+      ? { reasoning_effort: config.reasoningEffort }
+      : {}),
+  };
+}
+
+/**
+ * Responses API shape: system messages fold into `instructions`, user/assistant
+ * turns become typed input items. No `temperature`: reasoning models on this
+ * API hard-reject any value but the default, and a 400 is worse than losing
+ * the determinism nudge. `store: false` keeps every request self-contained —
+ * we never chain `previous_response_id`, so server-side state is pure cost.
+ */
+function buildResponsesBody(
+  config: LlmEndpointConfig,
+  messages: readonly ChatMessage[],
+  stream: boolean,
+): Record<string, unknown> {
+  const instructions: string[] = [];
+  const input: unknown[] = [];
+  for (const message of messages) {
+    if (message.role === "system") {
+      instructions.push(message.content);
+    } else if (message.role === "user") {
+      input.push({ role: "user", content: [{ type: "input_text", text: message.content }] });
+    } else {
+      // Assistant history goes in as input_text too: the Responses input
+      // schema only accepts output_text inside a full output item (with
+      // type/id/status), and strictly-validating compatible gateways reject
+      // anything else. Conditioning only needs the text either way.
+      input.push({ role: "assistant", content: [{ type: "input_text", text: message.content }] });
+    }
+  }
+  return {
+    model: config.model,
+    ...(instructions.length > 0 ? { instructions: instructions.join("\n\n") } : {}),
+    input,
+    stream,
+    store: false,
+    ...(config.reasoningEffort !== undefined &&
+    config.reasoningEffort.length > 0 &&
+    config.reasoningEffort !== "default"
+      ? { reasoning: { effort: config.reasoningEffort } }
+      : {}),
+  };
+}
+
 interface ChatCompletionShape {
   choices?: Array<{ message?: { content?: unknown } }>;
 }
 
 interface ChatCompletionChunkShape {
   choices?: Array<{ delta?: { content?: unknown } }>;
+}
+
+interface ResponsesOutputShape {
+  output?: Array<{
+    type?: unknown;
+    content?: Array<{ type?: unknown; text?: unknown }>;
+  }>;
+}
+
+/** Message text out of a non-streamed body, per wire protocol. */
+function readResponseText(protocol: LlmEndpointProtocol, parsed: unknown): unknown {
+  if (protocol === "chat-completions") {
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const completion = parsed as ChatCompletionShape;
+    return completion.choices?.[0]?.message?.content;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const output = (parsed as ResponsesOutputShape).output;
+  if (!Array.isArray(output)) return undefined;
+  // Real responses carry a single message item; if a gateway ever sends
+  // several, their texts join verbatim (no separator invented here).
+  let text = "";
+  for (const item of output) {
+    if (item.type !== "message" || !Array.isArray(item.content)) continue;
+    for (const part of item.content) {
+      if (part.type === "output_text" && typeof part.text === "string") text += part.text;
+    }
+  }
+  return text.length > 0 ? text : undefined;
+}
+
+/** One SSE `data:` payload → text delta, per wire protocol. */
+function readStreamDelta(protocol: LlmEndpointProtocol, parsed: unknown): string | undefined {
+  if (protocol === "chat-completions") {
+    const delta = (parsed as ChatCompletionChunkShape).choices?.[0]?.delta?.content;
+    return typeof delta === "string" && delta.length > 0 ? delta : undefined;
+  }
+  const event = parsed as { type?: unknown; delta?: unknown };
+  return event.type === "response.output_text.delta" &&
+    typeof event.delta === "string" &&
+    event.delta.length > 0
+    ? event.delta
+    : undefined;
 }
 
 /**
@@ -153,6 +279,7 @@ interface ChatCompletionChunkShape {
 async function readSseDeltas(
   body: NonNullable<Response["body"]>,
   onDelta: (delta: string) => void,
+  readDelta: (parsed: unknown) => string | undefined,
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -162,14 +289,14 @@ async function readSseDeltas(
     const { done, value } = await reader.read();
     if (value !== undefined) buffer += decoder.decode(value, { stream: !done });
     if (done) break;
-    buffer = consumeSseEvents(buffer, (data) => {
+    buffer = consumeSseEvents(buffer, readDelta, (data) => {
       accumulated += data;
-      if (data.length > 0) onDelta(data);
+      onDelta(data);
     });
   }
-  buffer = consumeSseEvents(buffer, (data) => {
+  buffer = consumeSseEvents(buffer, readDelta, (data) => {
     accumulated += data;
-    if (data.length > 0) onDelta(data);
+    onDelta(data);
   });
   if (accumulated.length === 0) {
     throw new Error("Translation endpoint streamed no message text");
@@ -178,7 +305,11 @@ async function readSseDeltas(
 }
 
 /** Folds complete `data:` events out of the buffer; returns the remainder. */
-function consumeSseEvents(buffer: string, onData: (data: string) => void): string {
+function consumeSseEvents(
+  buffer: string,
+  readDelta: (parsed: unknown) => string | undefined,
+  onData: (data: string) => void,
+): string {
   let rest = buffer;
   for (;;) {
     const boundary = rest.indexOf("\n\n");
@@ -191,20 +322,13 @@ function consumeSseEvents(buffer: string, onData: (data: string) => void): strin
       const payload = trimmed.slice("data:".length).trim();
       if (payload === "[DONE]") continue;
       try {
-        const parsed: unknown = JSON.parse(payload);
-        const delta = (parsed as ChatCompletionChunkShape).choices?.[0]?.delta?.content;
-        if (typeof delta === "string" && delta.length > 0) onData(delta);
+        const delta = readDelta(JSON.parse(payload));
+        if (delta !== undefined) onData(delta);
       } catch {
         // A gateway heartbeat or comment frame; not translation content.
       }
     }
   }
-}
-
-function readChoiceContent(parsed: unknown): unknown {
-  if (typeof parsed !== "object" || parsed === null) return undefined;
-  const completion = parsed as ChatCompletionShape;
-  return completion.choices?.[0]?.message?.content;
 }
 
 function excerpt(body: string): string {
@@ -214,4 +338,24 @@ function excerpt(body: string): string {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Stream-first completion for paths that can use deltas or face long
+ * generations: asks for SSE first and runs one plain completion inside the
+ * same call only when the stream fails (the stream itself already tolerates
+ * JSON answers to a stream request). Callers with no delta consumer and a
+ * hard latency bound (the fail-closed prompt path) use `client.complete`
+ * directly instead — for them a stream attempt is pure cost.
+ */
+export async function completeStreamFirst(
+  client: LlmClient,
+  messages: readonly ChatMessage[],
+  onDelta: (delta: string) => void = () => undefined,
+): Promise<string> {
+  try {
+    return await client.stream(messages, onDelta);
+  } catch {
+    return client.complete(messages);
+  }
 }

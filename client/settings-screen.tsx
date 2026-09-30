@@ -30,6 +30,7 @@ interface Draft {
   endpointBaseUrl: string;
   endpointApiKey: string;
   endpointModel: string;
+  endpointProtocol: TranslateSettingsValues["endpointProtocol"];
   reasoningEffort: TranslateSettingsValues["translationReasoningEffort"];
   systemPrompt: string;
   domainContext: string;
@@ -39,10 +40,13 @@ interface Draft {
   claudeExecutablePath: string;
   codexExecutablePath: string;
   timeoutText: string;
+  contextIdleText: string;
+  contextMaxCharsText: string;
   translatePrompts: boolean;
   translateResponses: boolean;
   translateReasoning: boolean;
   translateAllTimelines: boolean;
+  translationContextEnabled: boolean;
   uiLanguage: UiLanguageSetting;
   innerAgentEnv: ReadySettings["values"]["innerAgentEnv"];
 }
@@ -54,6 +58,7 @@ function draftFrom(settings: ReadySettings): Draft {
     endpointBaseUrl: values.endpointBaseUrl,
     endpointApiKey: values.endpointApiKey,
     endpointModel: values.endpointModel,
+    endpointProtocol: values.endpointProtocol,
     reasoningEffort: values.translationReasoningEffort,
     systemPrompt: values.translationSystemPrompt,
     domainContext: values.translationDomainContext,
@@ -63,10 +68,13 @@ function draftFrom(settings: ReadySettings): Draft {
     claudeExecutablePath: values.claudeExecutablePath,
     codexExecutablePath: values.codexExecutablePath,
     timeoutText: String(values.translationTimeoutMs),
+    contextIdleText: String(values.translationContextIdleMinutes),
+    contextMaxCharsText: String(values.translationContextMaxChars),
     translatePrompts: values.translatePrompts,
     translateResponses: values.translateResponses,
     translateReasoning: values.translateReasoning,
     translateAllTimelines: values.translateAllTimelines,
+    translationContextEnabled: values.translationContextEnabled,
     uiLanguage: values.uiLanguage,
     innerAgentEnv: values.innerAgentEnv,
   };
@@ -158,6 +166,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
   );
   const changeApiKey = useCallback((endpointApiKey: string) => patch({ endpointApiKey }), [patch]);
   const changeModel = useCallback((endpointModel: string) => patch({ endpointModel }), [patch]);
+  const changeEndpointProtocol = useCallback(
+    (endpointProtocol: Draft["endpointProtocol"]) => patch({ endpointProtocol }),
+    [patch],
+  );
   const changeReasoningEffort = useCallback(
     (reasoningEffort: Draft["reasoningEffort"]) => patch({ reasoningEffort: reasoningEffort }),
     [patch],
@@ -185,6 +197,18 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     [patch],
   );
   const changeTimeout = useCallback((timeoutText: string) => patch({ timeoutText }), [patch]);
+  const changeContextIdle = useCallback(
+    (contextIdleText: string) => patch({ contextIdleText }),
+    [patch],
+  );
+  const changeContextMaxChars = useCallback(
+    (contextMaxCharsText: string) => patch({ contextMaxCharsText }),
+    [patch],
+  );
+  const toggleContext = useCallback(
+    (translationContextEnabled: boolean) => patch({ translationContextEnabled }),
+    [patch],
+  );
   const togglePrompts = useCallback(
     (translatePrompts: boolean) => patch({ translatePrompts }),
     [patch],
@@ -231,6 +255,16 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
       setDraftError(t("timeoutNotANumber"));
       return;
     }
+    const contextIdleMinutes = Number.parseInt(active.contextIdleText.trim(), 10);
+    if (!Number.isFinite(contextIdleMinutes)) {
+      setDraftError(t("contextIdleNotANumber"));
+      return;
+    }
+    const contextMaxChars = Number.parseInt(active.contextMaxCharsText.trim(), 10);
+    if (!Number.isFinite(contextMaxChars)) {
+      setDraftError(t("contextMaxCharsNotANumber"));
+      return;
+    }
     // The inner agent command stays optional: the direct Claude provider does
     // not use it, so only the translation endpoint is globally required.
     const command = active.commandText
@@ -242,6 +276,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         endpointBaseUrl: active.endpointBaseUrl,
         endpointApiKey: active.endpointApiKey,
         endpointModel: active.endpointModel,
+        endpointProtocol: active.endpointProtocol,
         translationReasoningEffort: active.reasoningEffort,
         translationSystemPrompt: active.systemPrompt,
         translationDomainContext: active.domainContext,
@@ -255,6 +290,9 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         translateResponses: active.translateResponses,
         translateReasoning: active.translateReasoning,
         translateAllTimelines: active.translateAllTimelines,
+        translationContextEnabled: active.translationContextEnabled,
+        translationContextIdleMinutes: contextIdleMinutes,
+        translationContextMaxChars: contextMaxChars,
         uiLanguage: active.uiLanguage,
         translationTimeoutMs: timeoutMs,
       },
@@ -356,6 +394,17 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           disabled={settings.saving}
         />
         <SettingsSelect
+          label={t("endpointProtocol")}
+          hint={t("endpointProtocolHint")}
+          value={active.endpointProtocol}
+          options={[
+            { label: t("protocolResponses"), value: "responses" as const },
+            { label: t("protocolChatCompletions"), value: "chat-completions" as const },
+          ]}
+          disabled={settings.saving}
+          onValueChange={changeEndpointProtocol}
+        />
+        <SettingsSelect
           label={t("reasoningEffort")}
           hint={t("reasoningEffortHint")}
           value={active.reasoningEffort}
@@ -437,6 +486,20 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           onChangeText={changeTimeout}
           disabled={settings.saving}
         />
+        <SettingsInput
+          label={t("contextIdleMinutes")}
+          hint={t("contextIdleHint")}
+          initialValue={active.contextIdleText}
+          onChangeText={changeContextIdle}
+          disabled={settings.saving}
+        />
+        <SettingsInput
+          label={t("contextMaxChars")}
+          hint={t("contextMaxCharsHint")}
+          initialValue={active.contextMaxCharsText}
+          onChangeText={changeContextMaxChars}
+          disabled={settings.saving}
+        />
       </SettingsCard>
       <SettingsCard>
         <SettingsSwitch
@@ -465,6 +528,13 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           hint={t("translateAllTimelinesHint")}
           value={active.translateAllTimelines}
           onValueChange={toggleAllTimelines}
+          disabled={settings.saving}
+        />
+        <SettingsSwitch
+          label={t("translationContext")}
+          hint={t("translationContextHint")}
+          value={active.translationContextEnabled}
+          onValueChange={toggleContext}
           disabled={settings.saving}
         />
         <SettingsSelect

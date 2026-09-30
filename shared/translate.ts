@@ -20,6 +20,42 @@ export const TRANSLATE_PROVIDER_IDS = [
   TRANSLATE_CODEX_PROVIDER_ID,
 ] as const;
 
+/**
+ * Env var the plugin injects in `before("agent.session_open")` so a provider
+ * session can recover the paseo agent id. The daemon hands providers a fresh
+ * random session id on every session.open (including resumes), while the
+ * client display path scopes translations by agentId — without this bridge
+ * the prompt path and the display path would land in different transcripts,
+ * and a provider-side transcript would never survive a daemon restart.
+ */
+export const TRANSLATE_AGENT_ID_ENV = "PASEO_TRANSLATE_AGENT_ID";
+
+/**
+ * Translation-context scope for a provider session: the bridged agent id
+ * when present, else the provider session id (agents predating the bridge,
+ * or a daemon that never delivered the env).
+ */
+export function resolveTranslationContextKey(
+  env: Readonly<Record<string, string>>,
+  fallback: string,
+): string {
+  const agentId = env[TRANSLATE_AGENT_ID_ENV]?.trim();
+  return agentId !== undefined && agentId.length > 0 ? agentId : fallback;
+}
+
+/**
+ * Session env minus the agent-id bridge. The bridge exists so the provider
+ * can recover the translation-context scope; it is an internal mechanism and
+ * must not leak into the inner agent's process environment at spawn time.
+ */
+export function omitTranslationBridgeEnv(
+  env: Readonly<Record<string, string>>,
+): Record<string, string> {
+  const rest = { ...env };
+  delete rest[TRANSLATE_AGENT_ID_ENV];
+  return rest;
+}
+
 /** Timeline plugin item kind produced by the client transformer. */
 export const TRANSLATED_MESSAGE_KIND = "translated-message";
 export const TRANSLATED_MESSAGE_VERSION = 1;
@@ -63,6 +99,14 @@ export const translateSettings = defineSettings({
     endpointApiKey: z.string().default(""),
     endpointModel: z.string().trim().default(""),
     /**
+     * Wire protocol spoken to the endpoint. "responses" (default) posts to
+     * /responses — the current OpenAI API, required by some newer models and
+     * gateways. "chat-completions" is the classic /chat/completions shape,
+     * the lowest common denominator for compatible gateways; switch to it
+     * when the endpoint has no /responses route.
+     */
+    endpointProtocol: z.enum(["responses", "chat-completions"]).default("responses"),
+    /**
      * Reasoning effort sent with each translation request (OpenAI-compatible).
      * "default" omits the parameter; "none" sends reasoning_effort "none" to
      * turn thinking off where the endpoint supports it.
@@ -96,6 +140,26 @@ export const translateSettings = defineSettings({
     translatePrompts: z.boolean().default(true),
     translateResponses: z.boolean().default(true),
     translateAllTimelines: z.boolean().default(false),
+    /**
+     * Session-scoped translation context: each agent session keeps its own
+     * transcript of prior translations (plus a compacted terminology memory),
+     * so repeated concepts translate consistently inside one conversation.
+     * Off restores the old every-request-is-independent behavior.
+     */
+    translationContextEnabled: z.boolean().default(true),
+    /**
+     * Idle minutes before a session's transcript is eligible for automatic
+     * compaction. Compaction only runs when the transcript also exceeds
+     * translationContextMaxChars and no new translation arrived meanwhile.
+     */
+    translationContextIdleMinutes: z.number().int().min(1).max(1440).default(30),
+    /**
+     * Transcript size (characters of kept turns) that makes an idle session
+     * eligible for compaction. During active use a deterministic tail-trim
+     * fail-safe engages at twice this bound so a busy session cannot grow
+     * without limit.
+     */
+    translationContextMaxChars: z.number().int().min(10_000).max(1_000_000).default(100_000),
     /**
      * Translate reasoning (thinking) blocks for display, like replies.
      * Off by default: thinking blocks are often long, so translating them
@@ -143,6 +207,12 @@ export const translateTextRpc = defineRpc({
   input: z.object({
     text: z.string().min(1),
     direction: translateDirectionSchema,
+    /**
+     * Agent/session the text belongs to; scopes the session translation
+     * transcript (see translationContextEnabled). Omit for a standalone
+     * context-free translation.
+     */
+    sessionKey: z.string().optional(),
   }),
   output: z.object({
     text: z.string(),
@@ -161,6 +231,8 @@ export const translateStreamStartRpc = defineRpc({
   input: z.object({
     text: z.string().min(1),
     direction: translateDirectionSchema,
+    /** See translateTextRpc.sessionKey. */
+    sessionKey: z.string().optional(),
   }),
   output: z.object({
     jobId: z.string(),

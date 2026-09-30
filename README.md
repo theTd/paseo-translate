@@ -3,6 +3,11 @@
 Converse in your language while the agent works in another. Prompts are translated
 into the agent language before they reach the inner agent; replies stream back in
 the agent's own words and are translated in the app after each stream completes.
+Display-path and compaction calls are stream-first: a stream refusal falls back
+to one plain completion inside the same call, and a JSON answer to a stream
+request (a gateway that ignores `stream: true`) is accepted as-is. The
+fail-closed prompt path instead uses one bounded completion, so the configured
+timeout stays its hard bound.
 
 The agent's context stays purely in the agent language — it never sees the user
 language, and the canonical timeline keeps what each side actually said. The
@@ -21,6 +26,34 @@ Slash-command frames keep their command word verbatim; only the free-text
 remainder is translated. Non-text content blocks (images) pass through
 untouched.
 
+## Session translation context
+
+Each agent session keeps its own translation transcript: recent translation
+pairs (per direction) plus a compacted terminology memory shared by both
+directions. Requests are conditioned on that context, so a recurring concept
+translates the same way throughout one conversation. The direct Claude Code
+and Codex providers scope the transcript by the paseo agent id (bridged into
+the session env at open), so the prompt path and the in-app reply path share
+one transcript that survives resumes and daemon restarts. The ACP proxy
+scopes by the inner ACP session id instead — restart-stable via
+`session/load`, but separate from the display path's transcript. Exact-match
+cache hits still short-circuit without touching the endpoint; cached entries
+are namespaced by the current memory, so a compaction starts a new cache
+epoch and compacted terminology never leaks into another memory. Within one
+memory epoch — fresh sessions whose memory is still empty included — a
+repeated text can be served from the shared cache regardless of which
+session's turns conditioned the first rendering.
+
+When a session's transcript has been idle for **Compaction idle time**
+(default 30 minutes) AND exceeds **History compaction threshold** (default
+100k chars) with no new translations arriving, the plugin asks the endpoint
+to distill a terminology/style memory and keeps only the newest few pairs;
+the memory is persisted and survives daemon restarts. Active sessions are
+bounded too: at twice the threshold the oldest pairs drop out. Compaction is
+fail-soft — a failed compaction retries later and never blocks a translation.
+Turn the whole feature off with **Session translation context** to restore
+independent per-request translation.
+
 ## Install
 
 Requires Paseo >= 0.8.0 with plugins enabled (`pluginsEnabled: true` in the
@@ -34,11 +67,17 @@ paseo plugin install E:\misc\paseo-translate-plugin
 
 Then open the plugin's **Translate** settings screen in the app and configure:
 
-- **Endpoint base URL / API key / model** — any OpenAI-compatible `/chat/completions` endpoint
-- **Reasoning effort** — thinking depth sent with each translation request as the standard `reasoning_effort` parameter (Default/minimal/low/medium/high; Default omits the parameter). Low or minimal keeps prompt translation fast since it sits on the fail-closed path of every turn
+- **Endpoint base URL / API key / model** — any OpenAI-compatible endpoint
+- **Endpoint protocol** — **Responses** (`/v1/responses`, the default; the
+  current OpenAI API) or **Chat Completions** (`/v1/chat/completions`, the
+  lowest common denominator). Switch if your gateway has no Responses route
+- **Reasoning effort** — thinking depth sent with each translation request (Default/minimal/low/medium/high; Default omits the parameter). Low or minimal keeps prompt translation fast since it sits on the fail-closed path of every turn
 - **Your language** and **Agent language** — e.g. `en` and `de`
 - **Inner agent command** — the ACP-speaking command to wrap for **Translate (ACP)**. The settings screen lists the daemon's providers and fills the command automatically where an ACP mode is verified: custom `extends: "acp"` providers use the command configured on the daemon, and CLIs shipping an ACP subcommand (`copilot --acp`, `cursor-agent acp`, `omp acp`, `opencode acp`) use their configured override or the built-in default. Claude Code and Codex still appear as ACP adapter presets (`cmd /c npx …` on Windows) for the ACP wrapper; prefer the direct **Translate (Claude Code)** / **Translate (Codex)** providers when you want native protocol support. Providers marked unknown may still ship an ACP mode the picker cannot detect — if the CLI has one, enter it manually (arguments are split on spaces; on Windows avoid `.cmd` shims or prefix them with `cmd /c`).
 - **Translation timeout** — per-request bound, prompts fail closed past it
+- **Session translation context / Compaction idle time / History compaction
+  threshold** — per-session translation transcripts for consistent
+  terminology, with automatic idle compaction (see below)
 
 Create agents against **Translate (ACP)**, **Translate (Claude Code)**, or
 **Translate (Codex)**. ACP sessions spawn the inner agent through the
@@ -189,5 +228,8 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   translation jobs at once; `busy` refusals back off longer with jitter and
   degrade to direct unary calls. There is no cross-message global throttle.
 - Prompt turns pay one extra translation round trip before the agent starts.
+- Session translation context resends recent translation history with each
+  endpoint call (bounded by the compaction threshold and the twice-size
+  trim); turn it off to minimize endpoint spend.
 - The inner agent command is split on spaces; quoted arguments are not
   supported in the settings UI.

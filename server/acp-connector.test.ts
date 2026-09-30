@@ -23,7 +23,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 const streams: AcpStream[] = [];
 
-function echoStream(translate: (text: string) => Promise<string>): AcpStream {
+function echoStream(translate: (text: string, contextKey?: string) => Promise<string>): AcpStream {
   const stream = createTranslatingAcpStream({
     command: [process.execPath, "-e", ECHO_AGENT],
     translate,
@@ -54,7 +54,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 
 function permissionStream(
   permissionLine: string,
-  display?: (text: string) => Promise<string>,
+  display?: (text: string, contextKey?: string) => Promise<string>,
   restoreOriginal?: (fragment: string) => string | undefined,
 ): AcpStream {
   const stream = createTranslatingAcpStream({
@@ -182,6 +182,55 @@ describe("translating ACP connector", () => {
     expect(echoed[0].params).toEqual({ client: {} });
     expect(promptText(echoed[1].params)).toBe("DE(Hello)");
     expect(promptText(echoed[2].params)).toBe("DE(World)");
+  });
+
+  it("passes the frame's session id to the translator as context key", async () => {
+    const seen: Array<string | undefined> = [];
+    const stream = echoStream(async (text, contextKey) => {
+      seen.push(contextKey);
+      return `DE(${text})`;
+    });
+    const writer = stream.writable.getWriter();
+    await writer.write(promptRequest(2, [{ type: "text", text: "Hello" }]));
+    // session/load names the resumed session; session/new has no id yet, so
+    // a creation-time system prompt translates standalone.
+    await writer.write({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session/load",
+      params: { sessionId: "s-9", _meta: { _paseo: { systemPrompt: "Be terse" } } },
+    } as AcpStreamMessage);
+    await writer.write({
+      jsonrpc: "2.0",
+      id: 4,
+      method: "session/new",
+      params: { _meta: { _paseo: { systemPrompt: "Be terse" } } },
+    } as AcpStreamMessage);
+    writer.releaseLock();
+
+    await readCount(stream, 4);
+    expect(seen).toEqual(["s", "s-9", undefined]);
+  });
+
+  it("scopes permission display translations to the frame's session", async () => {
+    const line = permissionRequestLine({
+      sessionId: "s-perm",
+      toolCall: { toolCallId: "tc-9", title: "Welche Farbe?" },
+      options: [
+        { optionId: "o1", name: "Blau", kind: "allow_once" },
+        { optionId: "o2", name: "Grün", kind: "allow_once" },
+      ],
+    });
+    const seen: Array<string | undefined> = [];
+    const stream = permissionStream(line, async (text, contextKey) => {
+      seen.push(contextKey);
+      return `EN(${text})`;
+    });
+
+    const params = inboundRequest(await readCount(stream, 2));
+    expect((params.toolCall as Record<string, unknown>).title).toBe("EN(Welche Farbe?)");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(new Set(seen)).toEqual(new Set(["s-perm"]));
   });
 
   it("leaves non-text content blocks untouched", async () => {

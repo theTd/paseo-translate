@@ -14,6 +14,11 @@ export interface StreamingTranslationInput {
   text: string;
   languagePair: string | null;
   /**
+   * Agent this text belongs to; scopes the server-side session translation
+   * transcript so consecutive replies translate consistently.
+   */
+  sessionKey: string;
+  /**
    * The endpoint timeout setting; sizes the stream idle timeout. Read
    * when an attempt chain starts, so changing it does not retranslate.
    */
@@ -94,12 +99,20 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
       const outcome = await runDisplayTranslationChain(
         {
           startStream: async () => {
-            const { jobId } = await startStream({ text: input.text, direction: "agent-to-user" });
+            const { jobId } = await startStream({
+              text: input.text,
+              direction: "agent-to-user",
+              sessionKey: input.sessionKey,
+            });
             return jobId;
           },
           pollStream: (jobId: string) => pollStream({ jobId }),
           translateUnary: async () => {
-            const result = await translate({ text: input.text, direction: "agent-to-user" });
+            const result = await translate({
+              text: input.text,
+              direction: "agent-to-user",
+              sessionKey: input.sessionKey,
+            });
             return result.text;
           },
         },
@@ -147,7 +160,7 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
     // instead of showing stale results from the previous pair. retryNonce
     // re-runs the whole attempt chain (manual button or reconnect retry).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input.enabled, input.text, input.languagePair, input.retryNonce]);
+  }, [input.enabled, input.text, input.languagePair, input.retryNonce, input.sessionKey]);
 
   return { text: partial, done, error };
 }

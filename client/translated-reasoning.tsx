@@ -98,6 +98,7 @@ export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedRea
     enabled: eligible,
     text: data.text,
     languagePair,
+    sessionKey: props.agentId,
     translationTimeoutMs:
       settings.status === "ready" ? settings.values.translationTimeoutMs : undefined,
     emptyResultMessage: t("emptyTranslation"),

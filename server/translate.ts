@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { RpcInput } from "@getpaseo/plugin";
-import { createLlmClient } from "./llm-client";
+import { completeStreamFirst, createLlmClient, type ChatMessage } from "./llm-client";
 import {
   createMemoryTranslationCacheStore,
   type TranslationCacheStore,
 } from "./translation-cache-store";
+import type { TranslationContextManager } from "./translation-context";
 import {
   TRANSLATION_TEXT_LIMIT,
   resolveLanguagePair,
@@ -29,10 +30,30 @@ export interface TranslatorDeps {
    * process.
    */
   cacheStore?: TranslationCacheStore;
+  /**
+   * Session translation transcripts (see translation-context.ts). Absent
+   * means every translation is independent, which also keeps tests and
+   * unused paths hermetic; the plugin entry injects one shared manager.
+   */
+  context?: TranslationContextManager;
+}
+
+/** Per-call options for translate/translateStream. */
+export interface TranslateCallOptions {
+  /**
+   * Agent session the text belongs to. With translationContextEnabled, the
+   * request is conditioned on that session's transcript and the result is
+   * recorded into it; omitted means a standalone translation.
+   */
+  contextKey?: string;
 }
 
 export interface Translator {
-  translate(text: string, direction: TranslateDirection): Promise<string>;
+  translate(
+    text: string,
+    direction: TranslateDirection,
+    options?: TranslateCallOptions,
+  ): Promise<string>;
   /**
    * Stream-first translation for display paths. Deltas arrive through
    * `onDelta`; the resolved value is the full text. When the endpoint
@@ -43,6 +64,7 @@ export interface Translator {
     text: string,
     direction: TranslateDirection,
     onDelta: (delta: string) => void,
+    options?: TranslateCallOptions,
   ): Promise<string>;
   /**
    * Exact original fragment for a previously translated user prompt, if the
@@ -107,16 +129,18 @@ export function createTranslator(deps: TranslatorDeps): Translator {
   async function setup(
     text: string,
     direction: TranslateDirection,
+    contextKey?: string,
   ): Promise<
     | { trivial: string }
     | { cached: string }
     | {
         key: string;
         client: ReturnType<typeof createLlmClient>;
-        messages: readonly [
-          { role: "system"; content: string },
-          { role: "user"; content: string },
-        ];
+        messages: ChatMessage[];
+        /** The wrapped user message; recorded verbatim into the transcript. */
+        userContent: string;
+        /** Set when this call should record its result into a transcript. */
+        recordContext?: { scopeKey: string };
       }
   > {
     if (text.trim().length === 0) return { trivial: text } as const;
@@ -132,11 +156,26 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       pair,
       values.translationDomainContext,
     );
+    const context = deps.context;
+    const useContext =
+      context !== undefined && contextKey !== undefined && values.translationContextEnabled;
+    // The hard cap bounds active sessions that outpace the idle compaction
+    // policy: past twice the configured size the oldest pairs drop out.
+    const snapshot = useContext
+      ? context.snapshot(contextKey, direction, {
+          hardCapChars: values.translationContextMaxChars * 2,
+        })
+      : undefined;
     // The key covers everything that changes the output: direction,
-    // language pair, effective system prompt, endpoint (base URL + model,
-    // so switching providers invalidates), reasoning effort, and text.
+    // language pair, effective system prompt, endpoint (base URL + model +
+    // wire protocol, so switching providers invalidates), reasoning effort,
+    // and text.
     // Editing settings invalidates old entries instead of serving stale
-    // translations.
+    // translations. On the context path the current memory digest joins the
+    // key: a memory-conditioned result must not leak into standalone or
+    // other-memory requests, and a compaction (memory changes) starts a new
+    // cache epoch. Turns stay out of the key — within one memory epoch the
+    // first rendering of a text wins, which itself serves consistency.
     const key = cacheKey({
       text,
       direction,
@@ -144,11 +183,18 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       systemPrompt,
       endpointBaseUrl: values.endpointBaseUrl,
       endpointModel: values.endpointModel,
+      endpointProtocol: values.endpointProtocol,
       reasoningEffort: values.translationReasoningEffort,
+      contextMemory: snapshot?.memory,
     });
     const cached = cache.get(key);
     // get() refreshes recency inside the store; a hit skips the endpoint.
-    if (cached !== undefined) return { cached } as const;
+    if (cached !== undefined) {
+      // A cache hit is still translation activity: keep the idle clock from
+      // judging a hot-cache session as idle and compacting it mid-flow.
+      if (useContext) context.touch(contextKey);
+      return { cached } as const;
+    }
     const client = createLlmClient(
       {
         baseUrl: values.endpointBaseUrl,
@@ -156,52 +202,88 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         model: values.endpointModel,
         timeoutMs: values.translationTimeoutMs,
         reasoningEffort: values.translationReasoningEffort,
+        protocol: values.endpointProtocol,
       },
       { fetchFn: deps.fetchFn },
     );
-    const messages = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: wrapTranslationInput(text) },
-    ] as const;
-    return { key, client, messages } as const;
+    const systemContent =
+      snapshot !== undefined && snapshot.memory.length > 0
+        ? `${systemPrompt}\n\nEstablished translation conventions for this session (apply consistently):\n${snapshot.memory}`
+        : systemPrompt;
+    const messages: ChatMessage[] = [{ role: "system", content: systemContent }];
+    if (snapshot !== undefined) {
+      for (const turn of snapshot.turns) {
+        messages.push(
+          { role: "user", content: turn.user },
+          { role: "assistant", content: turn.assistant },
+        );
+      }
+    }
+    const userContent = wrapTranslationInput(text);
+    messages.push({ role: "user", content: userContent });
+    return {
+      key,
+      client,
+      messages,
+      userContent,
+      ...(useContext ? { recordContext: { scopeKey: contextKey } } : {}),
+    } as const;
   }
 
   return {
-    async translate(text, direction) {
-      const prepared = await setup(text, direction);
+    async translate(text, direction, options) {
+      const prepared = await setup(text, direction, options?.contextKey);
       if ("trivial" in prepared) return prepared.trivial;
       if ("cached" in prepared) {
         // A cache hit still records the reverse entry: entries translated
         // before the reverse index existed (or evicted from it while the
-        // forward entry survived) become restorable on next use.
+        // forward entry survived) become restorable on next use. The hit
+        // deliberately does NOT append to the session transcript — the pair
+        // either already sits in it or belongs to another session.
         if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
         return prepared.cached;
       }
-      const translated = await prepared.client.complete([...prepared.messages]);
+      // One bounded completion, no stream attempt: nobody consumes deltas on
+      // this fail-closed path, so stream-first would only double the worst
+      // case past translationTimeoutMs and tax SSE-refusing endpoints a
+      // refused request on every call.
+      const translated = await prepared.client.complete(prepared.messages);
       cache.set(prepared.key, translated);
       if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
+      if (prepared.recordContext !== undefined) {
+        deps.context?.record(
+          prepared.recordContext.scopeKey,
+          direction,
+          prepared.userContent,
+          translated,
+        );
+      }
       return translated;
     },
-    async translateStream(text, direction, onDelta) {
-      const prepared = await setup(text, direction);
+    async translateStream(text, direction, onDelta, options) {
+      const prepared = await setup(text, direction, options?.contextKey);
       if ("trivial" in prepared) return prepared.trivial;
       if ("cached" in prepared) {
         if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
         return prepared.cached;
       }
-      try {
-        const translated = await prepared.client.stream([...prepared.messages], onDelta);
+      const recordSuccess = (translated: string) => {
         cache.set(prepared.key, translated);
         if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
-        return translated;
-      } catch {
-        // The stream is an optimization, not a requirement: one ordinary
-        // completion runs instead, so endpoints without SSE stay usable.
-        const translated = await prepared.client.complete([...prepared.messages]);
-        cache.set(prepared.key, translated);
-        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
-        return translated;
-      }
+        if (prepared.recordContext !== undefined) {
+          deps.context?.record(
+            prepared.recordContext.scopeKey,
+            direction,
+            prepared.userContent,
+            translated,
+          );
+        }
+      };
+      // Stream-first: one ordinary completion runs inside the same call when
+      // the endpoint refuses the stream, so endpoints without SSE stay usable.
+      const translated = await completeStreamFirst(prepared.client, prepared.messages, onDelta);
+      recordSuccess(translated);
+      return translated;
     },
     restoreOriginalFragment(translatedFragment) {
       const key = originalFragmentKey(translatedFragment);
@@ -222,7 +304,9 @@ export function createTranslateHandler(deps: TranslatorDeps) {
       // Response translation disabled: the renderer keeps the original text.
       return { text: input.text };
     }
-    const text = await translator.translate(input.text, input.direction);
+    const text = await translator.translate(input.text, input.direction, {
+      contextKey: input.sessionKey,
+    });
     return { text };
   };
 }
@@ -260,14 +344,24 @@ export function createTranslateStreamManager(deps: TranslatorDeps) {
     }
   }
 
-  async function run(job: StreamJob, text: string, direction: TranslateDirection): Promise<void> {
+  async function run(
+    job: StreamJob,
+    text: string,
+    direction: TranslateDirection,
+    contextKey?: string,
+  ): Promise<void> {
     try {
       // translateStream is stream-first with an internal non-stream
       // fallback, so whatever it resolves is the complete text.
-      const full = await translator.translateStream(text, direction, (delta) => {
-        job.text += delta;
-        job.updatedAt = Date.now();
-      });
+      const full = await translator.translateStream(
+        text,
+        direction,
+        (delta) => {
+          job.text += delta;
+          job.updatedAt = Date.now();
+        },
+        { contextKey },
+      );
       job.text = full;
       job.done = true;
     } catch (error) {
@@ -306,7 +400,7 @@ export function createTranslateStreamManager(deps: TranslatorDeps) {
       // Detached by design: progress is observed through poll(). run()
       // captures every failure into the job, and the trailing catch guards
       // against a future refactor leaking a rejection.
-      void run(job, input.text, input.direction).catch((error: unknown) => {
+      void run(job, input.text, input.direction, input.sessionKey).catch((error: unknown) => {
         job.error = describeJobError(error);
         job.updatedAt = Date.now();
       });
@@ -352,7 +446,14 @@ interface CacheKeyInput {
   systemPrompt: string;
   endpointBaseUrl: string;
   endpointModel: string;
+  endpointProtocol: string;
   reasoningEffort: string;
+  /**
+   * Compacted memory of the session transcript when the request runs on the
+   * context path; undefined (field omitted) keeps the standalone key shape
+   * compatible with cache files written before transcripts existed.
+   */
+  contextMemory?: string;
 }
 
 /**
@@ -367,8 +468,10 @@ function cacheKey(input: CacheKeyInput): string {
     target: input.pair.target,
     baseUrl: digest(input.endpointBaseUrl),
     model: digest(input.endpointModel),
+    protocol: input.endpointProtocol,
     effort: input.reasoningEffort,
     prompt: digest(input.systemPrompt),
+    ...(input.contextMemory !== undefined ? { memory: digest(input.contextMemory) } : {}),
     text: digest(input.text),
   });
 }

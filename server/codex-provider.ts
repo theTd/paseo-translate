@@ -53,6 +53,8 @@ import {
   TRANSLATE_CODEX_PROVIDER_ID,
   TRANSLATE_CODEX_PROVIDER_LABEL,
   TRANSLATION_TEXT_LIMIT,
+  omitTranslationBridgeEnv,
+  resolveTranslationContextKey,
   type TranslateSettingsValues,
 } from "../shared/translate";
 
@@ -138,6 +140,8 @@ interface PendingPermission {
 interface CodexSession {
   id: string;
   config: ProviderSessionConfig;
+  /** Translation-context scope: the bridged paseo agent id, else the provider session id. */
+  contextKey: string;
   translatedSystemPrompt: string | null;
   desiredModel: string | null;
   desiredMode: string | null;
@@ -436,6 +440,7 @@ async function openSession(
   if (context.sessions.has(input.sessionId)) {
     throw new Error(`Session already exists: ${input.sessionId}`);
   }
+  const contextKey = resolveTranslationContextKey(input.config.env, input.sessionId);
   let translatedSystemPrompt: string | null = null;
   if (typeof input.config.systemPrompt === "string" && input.config.systemPrompt.trim().length > 0) {
     if ((await context.loadValues()).translatePrompts) {
@@ -443,6 +448,7 @@ async function openSession(
         translatedSystemPrompt = await context.translator.translate(
           input.config.systemPrompt,
           "user-to-agent",
+          { contextKey },
         );
       } catch (error) {
         context.emit({
@@ -462,6 +468,7 @@ async function openSession(
   const session: CodexSession = {
     id: input.sessionId,
     config: input.config,
+    contextKey,
     translatedSystemPrompt,
     desiredModel: readConfigured(input.config.model),
     desiredMode: readConfigured(input.config.mode) ?? DEFAULT_MODE_ID,
@@ -529,7 +536,7 @@ async function ensureClient(session: CodexSession, context: DispatchContext): Pr
     command,
     args: ["app-server"],
     cwd: session.config.cwd,
-    env: { ...process.env, ...session.config.env },
+    env: { ...process.env, ...omitTranslationBridgeEnv(session.config.env) },
   });
   session.client = client;
   client.setUnexpectedTerminationHandler((error) => {
@@ -713,7 +720,7 @@ async function promptSession(
   }
   let userInput: unknown[];
   try {
-    userInput = await buildTurnInput(input.prompt.input.content, context);
+    userInput = await buildTurnInput(input.prompt.input.content, context, session.contextKey);
   } catch (error) {
     context.emit({
       type: "session.prompt_result",
@@ -748,7 +755,9 @@ async function commandSession(
     try {
       const values = await context.loadValues();
       translatedArgs = values.translatePrompts
-        ? await context.translator.translate(args, "user-to-agent")
+        ? await context.translator.translate(args, "user-to-agent", {
+            contextKey: session.contextKey,
+          })
         : args;
     } catch (error) {
       context.emit({
@@ -867,7 +876,7 @@ async function steerSession(
   }
   let userInput: unknown[];
   try {
-    userInput = await buildTurnInput(input.prompt.input.content, context);
+    userInput = await buildTurnInput(input.prompt.input.content, context, session.contextKey);
   } catch (error) {
     context.emit({
       type: "session.prompt_result",
@@ -1305,7 +1314,7 @@ async function handleQuestionApproval(
     const values = await context.loadValues();
     if (values.translateResponses) {
       translatedQuestions = await translateQuestionsForDisplay(questions, (text) =>
-        context.translator.translate(text, "agent-to-user"),
+        context.translator.translate(text, "agent-to-user", { contextKey: session.contextKey }),
       );
     }
   } catch (error) {
@@ -1463,7 +1472,8 @@ async function resolveQuestionResponse(
   try {
     const values = await context.loadValues();
     const translateBack = values.translatePrompts
-      ? (text: string) => context.translator.translate(text, "user-to-agent")
+      ? (text: string) =>
+          context.translator.translate(text, "user-to-agent", { contextKey: session.contextKey })
       : async (text: string) => text;
     for (let index = 0; index < questions.length; index += 1) {
       const original = questions[index];
@@ -1780,10 +1790,12 @@ async function buildReplayRestore(
 async function buildTurnInput(
   content: ReadonlyArray<{ type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown } | unknown>,
   context: DispatchContext,
+  contextKey: string,
 ): Promise<unknown[]> {
   const values = await context.loadValues();
   const translate = values.translatePrompts
-    ? (text: string) => context.translator.translate(text, "user-to-agent")
+    ? (text: string) =>
+        context.translator.translate(text, "user-to-agent", { contextKey })
     : async (text: string) => text;
   const blocks: unknown[] = [];
   let hasContent = false;
