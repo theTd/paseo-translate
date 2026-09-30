@@ -82,6 +82,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(translateProvidersRpc, createProvidersHandler());
   return () => {
     offSessionOpen();
+    streamManager.dispose();
     context.dispose();
   };
 }

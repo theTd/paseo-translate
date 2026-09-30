@@ -25,7 +25,7 @@ export type TranslationErrorKind = "busy" | "fatal" | "retryable";
 
 /**
  * Classifies a translation RPC failure. `busy` gets a longer backoff so a
- * reopened long session does not retry-storm the 20-job server window;
+ * reopened long session does not retry-storm the pending-job server window;
  * `fatal` (oversized text, unconfigured endpoint) fails immediately;
  * everything else (unknown job, network, timeout, HTTP 5xx, malformed
  * responses) is treated as transient.

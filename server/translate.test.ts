@@ -17,11 +17,15 @@ import {
 } from "./translation-context";
 import {
   resolveLanguagePair,
+  TRANSLATION_BATCH_ADDENDUM,
+  translationItemClose,
+  translationItemOpen,
   translationSystemPrompt,
   unwrapTranslationInput,
   wrapTranslationInput,
   type TranslateSettingsValues,
 } from "../shared/translate";
+import { parseTranslationBatch } from "./translate-batch";
 
 const tempRoots: string[] = [];
 
@@ -624,5 +628,186 @@ describe("session translation context", () => {
     });
     await noKey.translate("World", "user-to-agent");
     expect(calls[1].body?.messages).toHaveLength(2);
+  });
+});
+
+interface DisplayCall {
+  stream: boolean;
+  user: string;
+  system: string;
+}
+
+/**
+ * Stream-capable fetch that maps either a single unwrap or a tagged batch
+ * (re-emitting the same item tags so parseTranslationBatch can split).
+ */
+function displayFetch(
+  calls: DisplayCall[],
+  map: (text: string) => string,
+  mode: "ok" | "unparseable" = "ok",
+): typeof fetch {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as {
+      stream?: boolean;
+      messages: Array<{ role: string; content: string }>;
+    };
+    const lastUser = body.messages.filter((message) => message.role === "user").at(-1)?.content ?? "";
+    const system = body.messages.find((message) => message.role === "system")?.content ?? "";
+    calls.push({ stream: body.stream === true, user: lastUser, system });
+    const inner = unwrapTranslationInput(lastUser);
+    const nonceMatch = /<ti n="([0-9a-f]+)" i="0">/.exec(inner);
+    let text: string;
+    if (nonceMatch !== null && mode === "unparseable") {
+      text = "I refuse to use the tags.";
+    } else if (nonceMatch !== null) {
+      const nonce = nonceMatch[1] ?? "";
+      let count = 0;
+      while (inner.includes(translationItemOpen(nonce, count))) count += 1;
+      const parsed = parseTranslationBatch(inner, count, nonce);
+      if (parsed === null) throw new Error("test fixture could not parse batch input");
+      text = parsed
+        .map(
+          (item, index) =>
+            `${translationItemOpen(nonce, index)}\n${map(item)}\n${translationItemClose(nonce, index)}`,
+        )
+        .join("\n");
+    } else {
+      text = map(inner);
+    }
+    if (body.stream === true) {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(sseData(text) + "data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream as unknown as ConstructorParameters<typeof Response>[0], {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), {
+      status: 200,
+    });
+  }) as typeof fetch;
+}
+
+describe("display translation batching", () => {
+  it("packs concurrent same-session stream jobs into one endpoint call", async () => {
+    const calls: DisplayCall[] = [];
+    const manager = createTranslateStreamManager(
+      {
+        loadConfig: async () => values,
+        fetchFn: displayFetch(calls, (text) => `DE:${text}`),
+      },
+      { coalesceDelayMs: 20 },
+    );
+    const [first, second] = await Promise.all([
+      manager.start({ text: "Hello", direction: "agent-to-user", sessionKey: "s" }),
+      manager.start({ text: "World", direction: "agent-to-user", sessionKey: "s" }),
+    ]);
+    const [hello, world] = await Promise.all([
+      waitForPoll(manager, first.jobId, true),
+      waitForPoll(manager, second.jobId, true),
+    ]);
+    expect(hello.text).toBe("DE:Hello");
+    expect(world.text).toBe("DE:World");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.stream).toBe(true);
+    expect(calls[0]?.system).toContain(TRANSLATION_BATCH_ADDENDUM);
+    expect(calls[0]?.user).toContain("<ti n=");
+  });
+
+  it("does not coalesce jobs from different sessions", async () => {
+    const calls: DisplayCall[] = [];
+    const manager = createTranslateStreamManager(
+      {
+        loadConfig: async () => values,
+        fetchFn: displayFetch(calls, (text) => `DE:${text}`),
+      },
+      { coalesceDelayMs: 20 },
+    );
+    const [first, second] = await Promise.all([
+      manager.start({ text: "Hello", direction: "agent-to-user", sessionKey: "a" }),
+      manager.start({ text: "World", direction: "agent-to-user", sessionKey: "b" }),
+    ]);
+    await Promise.all([
+      waitForPoll(manager, first.jobId, true),
+      waitForPoll(manager, second.jobId, true),
+    ]);
+    expect(calls).toHaveLength(2);
+    expect(calls.every((call) => !call.user.includes("<ti n="))).toBe(true);
+  });
+
+  it("caches each batched item under the single-item key", async () => {
+    const calls: DisplayCall[] = [];
+    const cacheStore = createMemoryTranslationCacheStore();
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: displayFetch(calls, (text) => `DE:${text}`),
+      cacheStore,
+    });
+    await expect(
+      translator.translateMany(["Hello", "World"], "agent-to-user"),
+    ).resolves.toEqual(["DE:Hello", "DE:World"]);
+    expect(calls).toHaveLength(1);
+    await expect(translator.translate("Hello", "agent-to-user")).resolves.toBe("DE:Hello");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("streams a lone remaining miss instead of tagging a one-item batch", async () => {
+    const calls: DisplayCall[] = [];
+    const cacheStore = createMemoryTranslationCacheStore();
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: displayFetch(calls, (text) => `DE:${text}`),
+      cacheStore,
+    });
+    await translator.translate("Hello", "agent-to-user");
+    const before = calls.length;
+    await expect(
+      translator.translateMany(["Hello", "World"], "agent-to-user"),
+    ).resolves.toEqual(["DE:Hello", "DE:World"]);
+    expect(calls).toHaveLength(before + 1);
+    expect(calls[before]?.user).toBe(wrapTranslationInput("World"));
+  });
+
+  it("falls back to per-item streaming when the batch cannot be parsed", async () => {
+    const calls: DisplayCall[] = [];
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: displayFetch(calls, (text) => `DE:${text}`, "unparseable"),
+    });
+    await expect(
+      translator.translateMany(["Hello", "World"], "agent-to-user"),
+    ).resolves.toEqual(["DE:Hello", "DE:World"]);
+    expect(calls).toHaveLength(3);
+    expect(calls[0]?.user).toContain("<ti n=");
+    expect(calls[1]?.user).toBe(wrapTranslationInput("Hello"));
+    expect(calls[2]?.user).toBe(wrapTranslationInput("World"));
+  });
+
+  it("records each batched pair into the session transcript", async () => {
+    const calls: DisplayCall[] = [];
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: displayFetch(calls, (text) => `T:${text}`),
+      context,
+    });
+    await translator.translateMany(["Hello", "World"], "agent-to-user", { contextKey: "s" });
+    const snap = context.snapshot("s", "agent-to-user", { hardCapChars: 100_000 });
+    expect(snap.turns.map((turn) => turn.user)).toEqual([
+      wrapTranslationInput("Hello"),
+      wrapTranslationInput("World"),
+    ]);
+    expect(snap.turns.map((turn) => turn.assistant)).toEqual(["T:Hello", "T:World"]);
+    await translator.translate("Next", "agent-to-user", { contextKey: "s" });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.user).toBe(wrapTranslationInput("Next"));
   });
 });

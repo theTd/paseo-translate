@@ -14,7 +14,11 @@ import {
   knownAcpCommand,
   omitTranslationBridgeEnv,
   resolveTranslationContextKey,
+  resolveTranslationBatchSystemPrompt,
   resolveTranslationSystemPrompt,
+  TRANSLATION_BATCH_ADDENDUM,
+  translationItemClose,
+  translationItemOpen,
   translateProvidersRpc,
   translateSettings,
   translationSystemPrompt,
@@ -168,6 +172,16 @@ describe("translate settings schema", () => {
     // unwrap is the exact inverse and tolerates unwrapped text.
     expect(unwrapTranslationInput(wrapTranslationInput("Hello\nworld"))).toBe("Hello\nworld");
     expect(unwrapTranslationInput("plain")).toBe("plain");
+  });
+
+  it("appends the batch addendum without rewriting the single-item prompt", () => {
+    const pair = { source: "en", target: "de" };
+    const single = resolveTranslationSystemPrompt("", pair);
+    const batched = resolveTranslationBatchSystemPrompt("", pair);
+    expect(batched.startsWith(`${single} `)).toBe(true);
+    expect(batched).toContain(TRANSLATION_BATCH_ADDENDUM);
+    expect(translationItemOpen("n", 0)).toBe('<ti n="n" i="0">');
+    expect(translationItemClose("n", 0)).toBe('</ti n="n" i="0">');
   });
 
   it("shapes the providers list RPC contract", () => {

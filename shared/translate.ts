@@ -520,3 +520,34 @@ export function resolveTranslationSystemPrompt(
     .replaceAll("{target}", pair.target)
     .replaceAll("{context}", domainContext.trim());
 }
+
+/**
+ * Per-item wrappers inside a batched display translation. `n` is a nonce
+ * that cannot appear in any source text; `i` is the 0-based item index.
+ * Matching close tags carry the same attributes so a source that happens
+ * to contain `</ti>` cannot close an item early.
+ */
+export function translationItemOpen(nonce: string, index: number): string {
+  return `<ti n="${nonce}" i="${index}">`;
+}
+export function translationItemClose(nonce: string, index: number): string {
+  return `</ti n="${nonce}" i="${index}">`;
+}
+
+/**
+ * Appended when several display texts share one endpoint call. The single-item
+ * prompt still says "output ONLY the translation"; this carves out the tagged
+ * multi-item shape without changing the cache key (cache keys stay on the
+ * single-item prompt so a later unary hit serves the batched result).
+ */
+export const TRANSLATION_BATCH_ADDENDUM =
+  'When the input contains one or more <ti n="..." i="..."> items, translate each item independently. Output ONLY those items, using the exact same n and i attribute values in the same order. Do not merge, omit, or add items. Everything between a matching pair of tags is the translation of that item; keep the tags themselves unchanged.';
+
+/** System prompt for a batched display translation (single-item prompt + addendum). */
+export function resolveTranslationBatchSystemPrompt(
+  template: string,
+  pair: LanguagePair,
+  domainContext = "",
+): string {
+  return `${resolveTranslationSystemPrompt(template, pair, domainContext)} ${TRANSLATION_BATCH_ADDENDUM}`;
+}

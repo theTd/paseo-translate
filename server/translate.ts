@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { RpcInput } from "@getpaseo/plugin";
-import { completeStreamFirst, createLlmClient, type ChatMessage } from "./llm-client";
+import { completeStreamFirst, createLlmClient, type ChatMessage, type LlmClient } from "./llm-client";
 import {
   createMemoryTranslationCacheStore,
   type TranslationCacheStore,
@@ -9,6 +9,7 @@ import type { TranslationContextManager } from "./translation-context";
 import {
   TRANSLATION_TEXT_LIMIT,
   resolveLanguagePair,
+  resolveTranslationBatchSystemPrompt,
   resolveTranslationSystemPrompt,
   translateStreamPollRpc,
   translateStreamStartRpc,
@@ -19,6 +20,13 @@ import {
   type TranslateSettingsValues,
 } from "../shared/translate";
 import { TRANSLATION_BUSY_MESSAGE } from "../shared/translation-retry";
+import {
+  STREAM_COALESCE_DELAY_MS,
+  packTranslationBatches,
+  parseTranslationBatch,
+  pickBatchNonce,
+  wrapTranslationBatch,
+} from "./translate-batch";
 
 export interface TranslatorDeps {
   loadConfig(): Promise<TranslateSettingsValues>;
@@ -46,6 +54,12 @@ export interface TranslateCallOptions {
    * recorded into it; omitted means a standalone translation.
    */
   contextKey?: string;
+  /**
+   * Progress for one index of translateMany: cache hits fire once with
+   * `done: true`; a lone miss streams deltas; a batch fires once per item
+   * when that item's text is final.
+   */
+  onItem?: (index: number, update: { text: string; done: boolean }) => void;
 }
 
 export interface Translator {
@@ -66,6 +80,17 @@ export interface Translator {
     onDelta: (delta: string) => void,
     options?: TranslateCallOptions,
   ): Promise<string>;
+  /**
+   * Display-path helper: cache/trivial items resolve immediately; a single
+   * miss streams; two or more misses share tagged endpoint calls (packed
+   * by item/char caps). Parse failure falls back to per-item streaming.
+   * Results stay cached under the single-item key.
+   */
+  translateMany(
+    texts: readonly string[],
+    direction: TranslateDirection,
+    options?: TranslateCallOptions,
+  ): Promise<string[]>;
   /**
    * Exact original fragment for a previously translated user prompt, if the
    * reverse entry is still cached. Settings-independent (keyed by the
@@ -126,23 +151,21 @@ function rememberOriginalFragment(
 export function createTranslator(deps: TranslatorDeps): Translator {
   const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
 
+  type PreparedMiss = {
+    key: string;
+    client: LlmClient;
+    prefixMessages: ChatMessage[];
+    systemPrompt: string;
+    userContent: string;
+    recordContext?: { scopeKey: string };
+  };
+  type SetupResult = { trivial: string } | { cached: string } | PreparedMiss;
+
   async function setup(
     text: string,
     direction: TranslateDirection,
     contextKey?: string,
-  ): Promise<
-    | { trivial: string }
-    | { cached: string }
-    | {
-        key: string;
-        client: ReturnType<typeof createLlmClient>;
-        messages: ChatMessage[];
-        /** The wrapped user message; recorded verbatim into the transcript. */
-        userContent: string;
-        /** Set when this call should record its result into a transcript. */
-        recordContext?: { scopeKey: string };
-      }
-  > {
+  ): Promise<SetupResult> {
     if (text.trim().length === 0) return { trivial: text } as const;
     if (text.length > TRANSLATION_TEXT_LIMIT) {
       throw new Error(
@@ -220,14 +243,59 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       }
     }
     const userContent = wrapTranslationInput(text);
-    messages.push({ role: "user", content: userContent });
     return {
       key,
       client,
-      messages,
+      prefixMessages: messages,
+      systemPrompt,
       userContent,
       ...(useContext ? { recordContext: { scopeKey: contextKey } } : {}),
     } as const;
+  }
+
+
+  function requestMessages(prepared: {
+    prefixMessages: ChatMessage[];
+    userContent: string;
+  }): ChatMessage[] {
+    return [...prepared.prefixMessages, { role: "user", content: prepared.userContent }];
+  }
+
+  function commitTranslation(
+    prepared: {
+      key: string;
+      userContent: string;
+      recordContext?: { scopeKey: string };
+    },
+    source: string,
+    translated: string,
+    direction: TranslateDirection,
+  ): void {
+    cache.set(prepared.key, translated);
+    if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, source);
+    if (prepared.recordContext !== undefined) {
+      deps.context?.record(
+        prepared.recordContext.scopeKey,
+        direction,
+        prepared.userContent,
+        translated,
+      );
+    }
+  }
+
+  async function streamPrepared(
+    prepared: PreparedMiss,
+    source: string,
+    direction: TranslateDirection,
+    onDelta: (delta: string) => void,
+  ): Promise<string> {
+    const translated = await completeStreamFirst(
+      prepared.client,
+      requestMessages(prepared),
+      onDelta,
+    );
+    commitTranslation(prepared, source, translated, direction);
+    return translated;
   }
 
   return {
@@ -247,17 +315,8 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       // this fail-closed path, so stream-first would only double the worst
       // case past translationTimeoutMs and tax SSE-refusing endpoints a
       // refused request on every call.
-      const translated = await prepared.client.complete(prepared.messages);
-      cache.set(prepared.key, translated);
-      if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
-      if (prepared.recordContext !== undefined) {
-        deps.context?.record(
-          prepared.recordContext.scopeKey,
-          direction,
-          prepared.userContent,
-          translated,
-        );
-      }
+      const translated = await prepared.client.complete(requestMessages(prepared));
+      commitTranslation(prepared, text, translated, direction);
       return translated;
     },
     async translateStream(text, direction, onDelta, options) {
@@ -267,23 +326,135 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
         return prepared.cached;
       }
-      const recordSuccess = (translated: string) => {
-        cache.set(prepared.key, translated);
-        if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, text);
-        if (prepared.recordContext !== undefined) {
-          deps.context?.record(
-            prepared.recordContext.scopeKey,
-            direction,
-            prepared.userContent,
-            translated,
-          );
+      return streamPrepared(prepared, text, direction, onDelta);
+    },
+    async translateMany(texts, direction, options) {
+      const onItem = options?.onItem;
+      if (texts.length === 0) return [];
+      const preparedList: SetupResult[] = [];
+      for (const text of texts) {
+        preparedList.push(await setup(text, direction, options?.contextKey));
+      }
+      const results: string[] = texts.map(() => "");
+      const pending: number[] = [];
+      for (let index = 0; index < preparedList.length; index += 1) {
+        const prepared = preparedList[index];
+        const source = texts[index] ?? "";
+        if (prepared === undefined) continue;
+        if ("trivial" in prepared) {
+          results[index] = prepared.trivial;
+          onItem?.(index, { text: prepared.trivial, done: true });
+          continue;
+        }
+        if ("cached" in prepared) {
+          if (direction === "user-to-agent") {
+            rememberOriginalFragment(cache, prepared.cached, source);
+          }
+          results[index] = prepared.cached;
+          onItem?.(index, { text: prepared.cached, done: true });
+          continue;
+        }
+        pending.push(index);
+      }
+
+      const streamOne = async (index: number): Promise<void> => {
+        const prepared = preparedList[index];
+        const source = texts[index];
+        if (prepared === undefined || source === undefined || !("prefixMessages" in prepared)) {
+          return;
+        }
+        let acc = "";
+        const translated = await streamPrepared(prepared, source, direction, (delta) => {
+          acc += delta;
+          onItem?.(index, { text: acc, done: false });
+        });
+        results[index] = translated;
+        onItem?.(index, { text: translated, done: true });
+      };
+
+      const runPack = async (packIndexes: readonly number[]): Promise<void> => {
+        if (packIndexes.length <= 1) {
+          const index = packIndexes[0];
+          if (index !== undefined) await streamOne(index);
+          return;
+        }
+        const packTexts: string[] = [];
+        const packPrepared: Array<(typeof preparedList)[number] & { prefixMessages: ChatMessage[] }> =
+          [];
+        for (const index of packIndexes) {
+          const text = texts[index];
+          const prepared = preparedList[index];
+          if (text === undefined || prepared === undefined || !("prefixMessages" in prepared)) {
+            throw new Error("Invariant: batch pack item was not an endpoint miss");
+          }
+          packTexts.push(text);
+          packPrepared.push(prepared);
+        }
+        const nonce = pickBatchNonce(packTexts);
+        const values = await deps.loadConfig();
+        const first = packPrepared[0];
+        if (first === undefined || !("prefixMessages" in first) || !("systemPrompt" in first)) {
+          throw new Error("Invariant: empty translation pack");
+        }
+        const pair = resolveLanguagePair(values, direction);
+        const batchPrompt = resolveTranslationBatchSystemPrompt(
+          values.translationSystemPrompt,
+          pair,
+          values.translationDomainContext,
+        );
+        const prefix = first.prefixMessages;
+        const system = prefix[0];
+        const withBatchSystem: ChatMessage[] =
+          system !== undefined && system.role === "system"
+            ? [
+                {
+                  role: "system",
+                  content: system.content.startsWith(first.systemPrompt)
+                    ? batchPrompt + system.content.slice(first.systemPrompt.length)
+                    : batchPrompt,
+                },
+                ...prefix.slice(1),
+              ]
+            : [{ role: "system", content: batchPrompt }, ...prefix];
+        const messages: ChatMessage[] = [
+          ...withBatchSystem,
+          { role: "user", content: wrapTranslationBatch(packTexts, nonce) },
+        ];
+        const output = await completeStreamFirst(first.client, messages, () => undefined);
+        const parsed = parseTranslationBatch(output, packTexts.length, nonce);
+        if (parsed === null) {
+          for (const index of packIndexes) await streamOne(index);
+          return;
+        }
+        for (let offset = 0; offset < packIndexes.length; offset += 1) {
+          const index = packIndexes[offset];
+          const translated = parsed[offset];
+          const prepared = packPrepared[offset];
+          const source = packTexts[offset];
+          if (
+            index === undefined ||
+            translated === undefined ||
+            prepared === undefined ||
+            source === undefined ||
+            !("key" in prepared)
+          ) {
+            continue;
+          }
+          commitTranslation(prepared, source, translated, direction);
+          results[index] = translated;
+          onItem?.(index, { text: translated, done: true });
         }
       };
-      // Stream-first: one ordinary completion runs inside the same call when
-      // the endpoint refuses the stream, so endpoints without SSE stay usable.
-      const translated = await completeStreamFirst(prepared.client, prepared.messages, onDelta);
-      recordSuccess(translated);
-      return translated;
+
+      const pendingTexts = pending.map((index) => texts[index] ?? "");
+      const packs = packTranslationBatches(pendingTexts);
+      let offset = 0;
+      for (const pack of packs) {
+        const packIndexes = pending.slice(offset, offset + pack.length);
+        offset += pack.length;
+        await runPack(packIndexes);
+      }
+      return results;
     },
     restoreOriginalFragment(translatedFragment) {
       const key = originalFragmentKey(translatedFragment);
@@ -316,14 +487,31 @@ export type TranslateStreamPollInput = RpcInput<typeof translateStreamPollRpc>;
 
 /** Jobs idle longer than this are reaped on the next start. */
 const STREAM_JOB_TTL_MS = 5 * 60 * 1000;
-/** Concurrent in-flight translations; beyond this start() fails fast. */
-const MAX_ACTIVE_STREAM_JOBS = 20;
+/**
+ * Pending + in-flight stream jobs (coalesced or running). A session open
+ * parks many jobs behind one endpoint call, so this is a client-DoS bound
+ * rather than an in-flight LLM cap.
+ */
+const MAX_PENDING_STREAM_JOBS = 200;
 
 interface StreamJob {
   text: string;
   done: boolean;
   error?: string;
   updatedAt: number;
+}
+
+interface CoalesceItem {
+  jobId: string;
+  job: StreamJob;
+  text: string;
+}
+
+interface CoalesceGroup {
+  direction: TranslateDirection;
+  contextKey?: string;
+  items: CoalesceItem[];
+  timer?: NodeJS.Timeout;
 }
 
 function describeJobError(error: unknown): string {
@@ -333,10 +521,17 @@ function describeJobError(error: unknown): string {
 /**
  * Streaming translation jobs for the display path. One manager per plugin
  * process, shared by both stream RPC handlers registered in the entry.
+ * Starts for the same session+direction that land inside `coalesceDelayMs`
+ * share one tagged endpoint call; a lone job still streams.
  */
-export function createTranslateStreamManager(deps: TranslatorDeps) {
+export function createTranslateStreamManager(
+  deps: TranslatorDeps,
+  options?: { coalesceDelayMs?: number },
+) {
   const translator = createTranslator(deps);
   const jobs = new Map<string, StreamJob>();
+  const groups = new Map<string, CoalesceGroup>();
+  const coalesceDelayMs = options?.coalesceDelayMs ?? STREAM_COALESCE_DELAY_MS;
 
   function sweep(now: number): void {
     for (const [jobId, job] of jobs) {
@@ -344,31 +539,70 @@ export function createTranslateStreamManager(deps: TranslatorDeps) {
     }
   }
 
-  async function run(
-    job: StreamJob,
-    text: string,
+  async function flush(
+    items: readonly CoalesceItem[],
     direction: TranslateDirection,
     contextKey?: string,
   ): Promise<void> {
+    if (items.length === 0) return;
     try {
-      // translateStream is stream-first with an internal non-stream
-      // fallback, so whatever it resolves is the complete text.
-      const full = await translator.translateStream(
-        text,
+      await translator.translateMany(
+        items.map((item) => item.text),
         direction,
-        (delta) => {
-          job.text += delta;
-          job.updatedAt = Date.now();
+        {
+          contextKey,
+          onItem: (index, update) => {
+            const item = items[index];
+            if (item === undefined) return;
+            item.job.text = update.text;
+            item.job.done = update.done;
+            item.job.updatedAt = Date.now();
+          },
         },
-        { contextKey },
       );
-      job.text = full;
-      job.done = true;
+      for (const item of items) {
+        if (item.job.error !== undefined) continue;
+        item.job.done = true;
+        item.job.updatedAt = Date.now();
+      }
     } catch (error) {
-      job.error = describeJobError(error);
-    } finally {
-      job.updatedAt = Date.now();
+      const message = describeJobError(error);
+      for (const item of items) {
+        if (item.job.done) continue;
+        item.job.error = message;
+        item.job.updatedAt = Date.now();
+      }
     }
+  }
+
+  function enqueue(
+    item: CoalesceItem,
+    direction: TranslateDirection,
+    contextKey?: string,
+  ): void {
+    const key = `${direction}\0${contextKey ?? ""}`;
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = { direction, contextKey, items: [] };
+      groups.set(key, group);
+    }
+    group.items.push(item);
+    if (group.timer !== undefined) return;
+    group.timer = setTimeout(() => {
+      const current = groups.get(key);
+      if (current === undefined) return;
+      groups.delete(key);
+      current.timer = undefined;
+      const batch = current.items;
+      void flush(batch, current.direction, current.contextKey).catch((error: unknown) => {
+        const message = describeJobError(error);
+        for (const queued of batch) {
+          if (queued.job.done) continue;
+          queued.job.error = message;
+          queued.job.updatedAt = Date.now();
+        }
+      });
+    }, coalesceDelayMs);
   }
 
   return {
@@ -388,22 +622,16 @@ export function createTranslateStreamManager(deps: TranslatorDeps) {
         );
       }
       sweep(Date.now());
-      let active = 0;
-      for (const job of jobs.values()) {
-        if (!job.done && job.error === undefined) active += 1;
+      let open = 0;
+      for (const existing of jobs.values()) {
+        if (!existing.done && existing.error === undefined) open += 1;
       }
-      if (active >= MAX_ACTIVE_STREAM_JOBS) {
+      if (open >= MAX_PENDING_STREAM_JOBS) {
         throw new Error(TRANSLATION_BUSY_MESSAGE);
       }
       const job: StreamJob = { text: "", done: false, updatedAt: Date.now() };
       jobs.set(jobId, job);
-      // Detached by design: progress is observed through poll(). run()
-      // captures every failure into the job, and the trailing catch guards
-      // against a future refactor leaking a rejection.
-      void run(job, input.text, input.direction, input.sessionKey).catch((error: unknown) => {
-        job.error = describeJobError(error);
-        job.updatedAt = Date.now();
-      });
+      enqueue({ jobId, job, text: input.text }, input.direction, input.sessionKey);
       return { jobId };
     },
 
@@ -418,6 +646,13 @@ export function createTranslateStreamManager(deps: TranslatorDeps) {
       }
       if (job.done) jobs.delete(input.jobId);
       return { text: job.text, done: job.done };
+    },
+
+    dispose(): void {
+      for (const group of groups.values()) {
+        clearTimeout(group.timer);
+      }
+      groups.clear();
     },
   };
 }

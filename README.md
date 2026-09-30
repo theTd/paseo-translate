@@ -26,6 +26,12 @@ Slash-command frames keep their command word verbatim; only the free-text
 remainder is translated. Non-text content blocks (images) pass through
 untouched.
 
+Display jobs that start within 80ms for the same session share one tagged
+endpoint call (up to 40 items / 80k source chars). A lone live reply still
+streams. If the model does not return the item tags, that batch falls back
+to per-item streaming. Each result is cached under the single-item key, so
+a later unary hit does not retranslate.
+
 ## Session translation context
 
 Each agent session keeps its own translation transcript: recent translation
@@ -225,8 +231,10 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   older scrollback may be missing, but the newest messages — including the
   final response — always come back.
 - Restart fan-out: after a daemon restart, many replayed messages open
-  translation jobs at once; `busy` refusals back off longer with jitter and
-  degrade to direct unary calls. There is no cross-message global throttle.
+  translation jobs at once. Same-session starts that land within 80ms share
+  one tagged endpoint call (parse failure falls back to per-item). `busy`
+  refusals still back off longer with jitter if the pending-job cap is hit,
+  then degrade to direct unary calls.
 - Prompt turns pay one extra translation round trip before the agent starts.
 - Session translation context resends recent translation history with each
   endpoint call (bounded by the compaction threshold and the twice-size
