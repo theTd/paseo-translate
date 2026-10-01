@@ -18,6 +18,7 @@ user-language rendering of replies exists only in the app's plugin view.
 | Direction | Where | Failure policy |
 | --- | --- | --- |
 | Prompt (you → agent) | The plugin's `translate-acp` provider proxies the inner ACP agent and translates `session/prompt` text blocks and the per-agent system prompt on the wire | Fail closed: a failed translation blocks that request with an error instead of leaking your language to the agent |
+| Prompt display (you → you) | A client timeline transformer + renderer (`translated-user-message`) keeps the original as plain text and starts a `user-to-agent` display job only when **Show translation** is tapped. The job uses the same slash-command remainder split as the prompt path, so a cache-hot turn is served from the forward cache with no extra endpoint call | Display only; requires **Translate prompts**, a Translate provider, and a root agent (subagent `user_message` rows are task prompts already in the agent language). Failures leave the original. Matching language pairs hide the button |
 | Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message is settled — `phase` is `complete`, the agent is no longer running, or the live-head text has been unchanged for 800ms — and renders each poll as Markdown | Display only: stream-first against the endpoint's SSE with bounded retries from a fresh job (exponential backoff, longer for `busy`; fatal errors such as oversized text or an unconfigured endpoint fail fast), then a retried `translate.text` fallback. No total time limit: a stream attempt is dropped only when its text stops growing for 2 × `translationTimeoutMs` + 15s of awake time (device sleep does not count). On failure the original text stays, with an error hint and a manual Retry translation button; non-fatal failures also retry by themselves when a host comes back online or the app returns to the foreground |
 | Reasoning (agent thinking → you) | A separate client timeline transformer + renderer (`translated-reasoning`) with the same streaming job machinery, rendering muted so thoughts never look like replies | Opt-in via the **Translate thinking** setting (default off — thinking blocks are often long, so translating them doubles endpoint spend on auxiliary text) and additionally requires **Translate replies** (the server display path shares that gate). Same display-only failure policy as replies, plus a Show original / Show translation toggle |
 | Session titles (agent → you) | History-list titles render in your language: the direct providers translate Claude transcript titles and Codex thread names/previews, and the ACP proxy translates `session/list` result titles inbound. Exact prompt-time originals always restore from cache first (no endpoint call, even with display translation off or matching languages); anything else goes through display translation, sequentially, with over-long titles and ACP entries past 100 per frame left verbatim | Display only; per-title fail soft (a failed title keeps its original text, the listing never fails for this) |
@@ -207,17 +208,21 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
 
 ## Limitations
 
-- **Installing this plugin replaces the assistant-message and reasoning
+- **Installing this plugin replaces the assistant-message, user-message, and reasoning
   rendering for every agent on the daemon** with this plugin's translated views (timeline
   transformers are app-wide), not just agents using the Translate provider.
   Reasoning keeps a muted style so it never looks like a reply; when thinking
   translation is off (the default) the muted view shows the original text.
   Reasoning also keeps the host's collapse behavior: expanded while the
   block streams, collapsed under a Thinking header once complete.
-  Both the translation and the original render as Markdown through the
+  Assistant originals and translations render as Markdown through the
   plugin's own dependency-free renderer (the daemon's client compiler
   rejects Node builtins anywhere in the client import graph, which rules
-  out the usual markdown packages).
+  out the usual markdown packages). User prompts that have nothing to
+  translate (blank, serialized attachments, arg-less slash commands,
+  provider images) stay on the host renderer; other user prompts render as
+  plain text, with Show translation only on this plugin's root agents when
+  Translate prompts is on.
 - Structured attachments (forge issues, reviews, uploaded files) reach the
   agent as serialized JSON and are passed through untranslated; free text
   inside them stays in your language.

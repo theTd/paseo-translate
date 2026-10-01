@@ -97,6 +97,7 @@ export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedRea
   const stream = useStreamingTranslation({
     enabled: eligible,
     text: data.text,
+    direction: "agent-to-user",
     languagePair,
     sessionKey: props.agentId,
     translationTimeoutMs:

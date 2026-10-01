@@ -4,6 +4,7 @@ import {
   translateStreamPollRpc,
   translateStreamStartRpc,
   translateTextRpc,
+  type TranslateDirection,
 } from "../shared/translate";
 import { runDisplayTranslationChain, hasVisibleTranslation } from "../shared/display-translation-chain";
 import { displayStreamIdleTimeoutMs } from "../shared/translation-retry";
@@ -13,6 +14,8 @@ export interface StreamingTranslationInput {
   enabled: boolean;
   text: string;
   languagePair: string | null;
+  /** Prompt display uses user-to-agent; replies and thinking use agent-to-user. */
+  direction: TranslateDirection;
   /**
    * Agent this text belongs to; scopes the server-side session translation
    * transcript so consecutive replies translate consistently.
@@ -48,11 +51,11 @@ export interface StreamingTranslation {
  * only the React adapter: it binds the RPCs, maps the chain outcome onto
  * component state, and owns cancellation. A final failure discards any
  * partial stream so the original text stays, and surfaces an error hint
- * with a manual retry button that re-runs the whole chain via `retryNonce`.
+ * with a manual retry button that re-runs the whole attempt chain via
+ * `retryNonce`.
  *
- * Shared by the assistant-message renderer and the reasoning renderer: both
- * translate `agent-to-user` display text with identical retry semantics and
- * differ only in presentation and eligibility gating.
+ * Shared by the assistant, reasoning, and user-prompt renderers: they pass
+ * the direction and differ in presentation and eligibility gating.
  */
 export function useStreamingTranslation(input: StreamingTranslationInput): StreamingTranslation {
   const startStream = useRpc(translateStreamStartRpc);
@@ -101,7 +104,7 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
           startStream: async () => {
             const { jobId } = await startStream({
               text: input.text,
-              direction: "agent-to-user",
+              direction: input.direction,
               sessionKey: input.sessionKey,
             });
             return jobId;
@@ -110,7 +113,7 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
           translateUnary: async () => {
             const result = await translate({
               text: input.text,
-              direction: "agent-to-user",
+              direction: input.direction,
               sessionKey: input.sessionKey,
             });
             return result.text;
@@ -160,7 +163,7 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
     // instead of showing stale results from the previous pair. retryNonce
     // re-runs the whole attempt chain (manual button or reconnect retry).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [input.enabled, input.text, input.languagePair, input.retryNonce, input.sessionKey]);
+  }, [input.enabled, input.text, input.languagePair, input.retryNonce, input.sessionKey, input.direction]);
 
   return { text: partial, done, error };
 }

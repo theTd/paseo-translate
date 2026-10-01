@@ -1,5 +1,6 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { promptTranslationParts } from "./prompt-text";
 
 /** Provider id registered by this plugin's server entry. */
 export const TRANSLATE_PROVIDER_ID = "translate-acp";
@@ -68,6 +69,14 @@ export const TRANSLATED_MESSAGE_VERSION = 1;
  */
 export const TRANSLATED_REASONING_KIND = "translated-reasoning";
 export const TRANSLATED_REASONING_VERSION = 1;
+
+/**
+ * Timeline plugin item kind for user prompts. Separate from assistant
+ * messages: default view is the original as plain text, and translation is
+ * user-to-agent on demand rather than agent-to-user after settle.
+ */
+export const TRANSLATED_USER_MESSAGE_KIND = "translated-user-message";
+export const TRANSLATED_USER_MESSAGE_VERSION = 1;
 
 /** Hard cap on translated text so one giant message cannot stall a prompt turn. */
 export const TRANSLATION_TEXT_LIMIT = 100_000;
@@ -349,6 +358,17 @@ export const translatedReasoningDataSchema = z.object({
 export type TranslatedReasoningData = z.output<typeof translatedReasoningDataSchema>;
 
 /**
+ * Data shape for translated user prompts. Identical to the assistant-message
+ * shape; kept separate so the two kinds can evolve independently.
+ */
+export const translatedUserMessageDataSchema = z.object({
+  text: z.string(),
+  phase: z.enum(["streaming", "complete"]),
+  messageId: z.string().nullable(),
+});
+export type TranslatedUserMessageData = z.output<typeof translatedUserMessageDataSchema>;
+
+/**
  * Matches one Markdown image whose target is a data URI
  * (`![alt](data:<mime>;base64,<payload>)`). Base64 has no `)` in its
  * alphabet, so the first `)` always ends the target.
@@ -444,6 +464,50 @@ export function isReasoningTranslationEligible(input: {
     input.translateReasoning &&
     input.translateResponses &&
     (input.ownedByTranslateProvider || input.translateAllTimelines)
+  );
+}
+
+/**
+ * Whether the display RPC should translate this direction. Prompt-path
+ * display (`user-to-agent`) follows Translate prompts; reply/thinking
+ * display follows Translate replies. Returning the original when the
+ * matching switch is off is how the renderer keeps untranslated text.
+ */
+export function displayTranslationDirectionEnabled(
+  values: { translatePrompts: boolean; translateResponses: boolean },
+  direction: TranslateDirection,
+): boolean {
+  return direction === "user-to-agent" ? values.translatePrompts : values.translateResponses;
+}
+
+/**
+ * Display eligibility for one user prompt. Pure so the gating matrix is
+ * unit-testable: Translate prompts must be on, only this plugin's root
+ * agents (subagent `user_message` rows are task prompts already in the
+ * agent language), languages must differ, and the fragment must have a
+ * translatable body (slash remainder / non-attachment prose). Image-only
+ * and provider-image markdown are skipped like replies. Unlike replies,
+ * `translateAllTimelines` does not apply — a foreign agent's prompt was
+ * never translated on the wire.
+ */
+export function isUserPromptTranslationEligible(input: {
+  text: string;
+  translatePrompts: boolean;
+  ownedByTranslateProvider: boolean;
+  isRootAgent: boolean;
+  userLanguage: string | null;
+  agentLanguage: string | null;
+}): boolean {
+  return (
+    input.translatePrompts &&
+    input.ownedByTranslateProvider &&
+    input.isRootAgent &&
+    input.userLanguage !== null &&
+    input.agentLanguage !== null &&
+    input.userLanguage !== input.agentLanguage &&
+    !isDataUriImageOnlyText(input.text) &&
+    !isProviderImageMarkdown(input.text) &&
+    promptTranslationParts(input.text) !== null
   );
 }
 

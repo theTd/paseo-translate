@@ -11,6 +11,8 @@ import {
   isDisplayTranslationSettled,
   isProviderImageMarkdown,
   isReasoningTranslationEligible,
+  isUserPromptTranslationEligible,
+  displayTranslationDirectionEnabled,
   knownAcpCommand,
   omitTranslationBridgeEnv,
   resolveTranslationContextKey,
@@ -359,6 +361,85 @@ describe("reasoning translation eligibility", () => {
         translateAllTimelines: true,
       }),
     ).toBe(true);
+  });
+});
+
+describe("display translation direction gate", () => {
+  it("follows Translate prompts for user-to-agent and Translate replies for agent-to-user", () => {
+    expect(
+      displayTranslationDirectionEnabled(
+        { translatePrompts: true, translateResponses: false },
+        "user-to-agent",
+      ),
+    ).toBe(true);
+    expect(
+      displayTranslationDirectionEnabled(
+        { translatePrompts: true, translateResponses: false },
+        "agent-to-user",
+      ),
+    ).toBe(false);
+    expect(
+      displayTranslationDirectionEnabled(
+        { translatePrompts: false, translateResponses: true },
+        "user-to-agent",
+      ),
+    ).toBe(false);
+    expect(
+      displayTranslationDirectionEnabled(
+        { translatePrompts: false, translateResponses: true },
+        "agent-to-user",
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("user prompt translation eligibility", () => {
+  const base = {
+    text: "Hallo Welt",
+    translatePrompts: true,
+    ownedByTranslateProvider: true,
+    isRootAgent: true,
+    userLanguage: "de",
+    agentLanguage: "en",
+  };
+
+  it("translates a root prompt for an owned provider when Translate prompts is on", () => {
+    expect(isUserPromptTranslationEligible(base)).toBe(true);
+  });
+
+  it("stays off when Translate prompts is off", () => {
+    expect(isUserPromptTranslationEligible({ ...base, translatePrompts: false })).toBe(false);
+  });
+
+  it("never covers foreign providers, even when every timeline translates replies", () => {
+    expect(isUserPromptTranslationEligible({ ...base, ownedByTranslateProvider: false })).toBe(false);
+  });
+
+  it("skips subagent timelines whose user_message rows are task prompts", () => {
+    expect(isUserPromptTranslationEligible({ ...base, isRootAgent: false })).toBe(false);
+  });
+
+  it("stays off when languages match or settings have not loaded", () => {
+    expect(isUserPromptTranslationEligible({ ...base, userLanguage: "en", agentLanguage: "en" })).toBe(
+      false,
+    );
+    expect(isUserPromptTranslationEligible({ ...base, userLanguage: null })).toBe(false);
+    expect(isUserPromptTranslationEligible({ ...base, agentLanguage: null })).toBe(false);
+  });
+
+  it("skips blanks, attachments, and arg-less slash commands", () => {
+    expect(isUserPromptTranslationEligible({ ...base, text: "   " })).toBe(false);
+    expect(isUserPromptTranslationEligible({ ...base, text: "/compact" })).toBe(false);
+    expect(
+      isUserPromptTranslationEligible({
+        ...base,
+        text: JSON.stringify({ type: "x", mimeType: "text/plain" }),
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps slash commands with a free-text remainder", () => {
+    expect(isUserPromptTranslationEligible({ ...base, text: "/model switch engines" })).toBe(true);
   });
 });
 

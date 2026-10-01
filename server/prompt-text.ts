@@ -4,23 +4,9 @@
  * command word so only the free-text remainder is translated.
  */
 
-/**
- * Detects text fragments that carry a serialized structured attachment. The
- * daemon flattens non-text attachments (forge issues, reviews, uploaded
- * files) into JSON text; translating that JSON would corrupt it, so the
- * fragment passes through verbatim. Free text inside such attachments is
- * documented as untranslated.
- */
-export function isSerializedAttachment(text: string): boolean {
-  if (!text.startsWith("{")) return false;
-  try {
-    const parsed: unknown = JSON.parse(text);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return false;
-    return typeof (parsed as { mimeType?: unknown }).mimeType === "string";
-  } catch {
-    return false;
-  }
-}
+import { isSerializedAttachment, promptTranslationParts } from "../shared/prompt-text";
+
+export { isSerializedAttachment, promptTranslationParts } from "../shared/prompt-text";
 
 /**
  * Translates one user-language fragment. Slash-command prompts reach the wire
@@ -31,12 +17,9 @@ export async function translatePromptFragment(
   text: string,
   translate: (text: string) => Promise<string>,
 ): Promise<string> {
-  if (text.trim().length === 0) return text;
-  if (isSerializedAttachment(text)) return text;
-  if (!text.startsWith("/")) return translate(text);
-  const match = /^(\S+\s*)([\s\S]*)$/.exec(text);
-  if (match === null || match[2].trim().length === 0) return text;
-  return `${match[1]}${await translate(match[2])}`;
+  const parts = promptTranslationParts(text);
+  if (parts === null) return text;
+  return `${parts.prefix}${await translate(parts.body)}`;
 }
 
 /**
@@ -56,7 +39,9 @@ export function restorePromptFragment(
   if (isSerializedAttachment(translated)) return translated;
   if (!translated.startsWith("/")) return lookup(translated) ?? translated;
   const match = /^(\S+\s*)([\s\S]*)$/.exec(translated);
-  if (match === null || match[2].trim().length === 0) return translated;
-  const restored = lookup(match[2]);
-  return restored === undefined ? translated : `${match[1]}${restored}`;
+  const prefix = match?.[1];
+  const body = match?.[2];
+  if (prefix === undefined || body === undefined || body.trim().length === 0) return translated;
+  const restored = lookup(body);
+  return restored === undefined ? translated : `${prefix}${restored}`;
 }

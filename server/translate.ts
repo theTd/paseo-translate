@@ -8,6 +8,7 @@ import {
 import type { TranslationContextManager } from "./translation-context";
 import {
   TRANSLATION_TEXT_LIMIT,
+  displayTranslationDirectionEnabled,
   resolveLanguagePair,
   resolveTranslationBatchSystemPrompt,
   resolveTranslationSystemPrompt,
@@ -466,13 +467,13 @@ export function createTranslator(deps: TranslatorDeps): Translator {
 
 export type TranslateHandlerInput = RpcInput<typeof translateTextRpc>;
 
-/** Plugin RPC handler: used by the client renderer for agent-to-user text. */
+/** Plugin RPC handler: used by the client renderer for display translation. */
 export function createTranslateHandler(deps: TranslatorDeps) {
   const translator = createTranslator(deps);
   return async function handleTranslate(input: TranslateHandlerInput) {
     const values = await deps.loadConfig();
-    if (!values.translateResponses) {
-      // Response translation disabled: the renderer keeps the original text.
+    if (!displayTranslationDirectionEnabled(values, input.direction)) {
+      // Matching display switch off: the renderer keeps the original text.
       return { text: input.text };
     }
     const text = await translator.translate(input.text, input.direction, {
@@ -609,7 +610,7 @@ export function createTranslateStreamManager(
     async start(input: TranslateStreamStartInput): Promise<{ jobId: string }> {
       const values = await deps.loadConfig();
       const jobId = randomUUID();
-      if (!values.translateResponses) {
+      if (!displayTranslationDirectionEnabled(values, input.direction)) {
         // Parity with the unary handler: the renderer keeps the original.
         jobs.set(jobId, { text: input.text, done: true, updatedAt: Date.now() });
         return { jobId };

@@ -1,11 +1,15 @@
 import type { PluginTimelineTransformResult } from "@getpaseo/plugin";
 import {
+  isDataUriImageOnlyText,
   isProviderImageMarkdown,
   TRANSLATED_MESSAGE_KIND,
   TRANSLATED_MESSAGE_VERSION,
   TRANSLATED_REASONING_KIND,
   TRANSLATED_REASONING_VERSION,
+  TRANSLATED_USER_MESSAGE_KIND,
+  TRANSLATED_USER_MESSAGE_VERSION,
 } from "../shared/translate";
+import { promptTranslationParts } from "../shared/prompt-text";
 
 /**
  * Passthrough mapping from a canonical assistant message to the plugin item
@@ -57,6 +61,37 @@ export function transformReasoningMessage(input: {
           text: input.item.text,
           phase: input.phase,
           messageId: null,
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * Passthrough for a canonical user prompt. The row keeps the user's original
+ * language; the renderer can project the agent-language translation on
+ * demand. Fragments with nothing to translate (blank, serialized
+ * attachments, arg-less slash commands, materialized provider images,
+ * data-URI image-only prompts) return
+ * undefined so the host keeps its native user-message chrome.
+ */
+export function transformUserMessage(input: {
+  item: { text: string; messageId?: string };
+  phase: "streaming" | "complete";
+}): PluginTimelineTransformResult | undefined {
+  if (isProviderImageMarkdown(input.item.text)) return undefined;
+  if (isDataUriImageOnlyText(input.item.text)) return undefined;
+  if (promptTranslationParts(input.item.text) === null) return undefined;
+  return {
+    items: [
+      {
+        type: "plugin",
+        kind: TRANSLATED_USER_MESSAGE_KIND,
+        version: TRANSLATED_USER_MESSAGE_VERSION,
+        data: {
+          text: input.item.text,
+          phase: input.phase,
+          messageId: input.item.messageId ?? null,
         },
       },
     ],

@@ -290,6 +290,30 @@ describe("translate service", () => {
       text: "Guten Tag",
     });
   });
+
+  it("still translates user-to-agent when response translation is disabled", async () => {
+    const calls: Captured[] = [];
+    const handler = createTranslateHandler({
+      loadConfig: async () => ({ ...values, translateResponses: false }),
+      fetchFn: translatingFetch(calls, (text) => `DE:${text}`),
+    });
+    await expect(handler({ text: "Hello", direction: "user-to-agent" })).resolves.toEqual({
+      text: "DE:Hello",
+    });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("returns the original text when prompt translation is disabled for user-to-agent", async () => {
+    const calls: Captured[] = [];
+    const handler = createTranslateHandler({
+      loadConfig: async () => ({ ...values, translatePrompts: false }),
+      fetchFn: translatingFetch(calls, () => "SHOULD NOT RUN"),
+    });
+    await expect(handler({ text: "Hello", direction: "user-to-agent" })).resolves.toEqual({
+      text: "Hello",
+    });
+    expect(calls).toHaveLength(0);
+  });
 });
 
 function sseData(content: string): string {
@@ -441,6 +465,27 @@ describe("streaming translation jobs", () => {
     });
     const { jobId } = await manager.start({ text: "Guten Tag", direction: "agent-to-user" });
     await expect(manager.poll({ jobId })).resolves.toEqual({ text: "Guten Tag", done: true });
+  });
+
+  it("still streams user-to-agent when response translation is disabled", async () => {
+    const manager = createTranslateStreamManager({
+      loadConfig: async () => ({ ...values, translateResponses: false }),
+      fetchFn: streamingFetch([], (text) => `DE:${text}`),
+    });
+    const { jobId } = await manager.start({ text: "Hello", direction: "user-to-agent" });
+    await expect(waitForPoll(manager, jobId, true)).resolves.toMatchObject({
+      text: "DE:Hello",
+      done: true,
+    });
+  });
+
+  it("returns the original text when prompt translation is disabled for user-to-agent", async () => {
+    const manager = createTranslateStreamManager({
+      loadConfig: async () => ({ ...values, translatePrompts: false }),
+      fetchFn: streamingFetch([], () => "SHOULD NOT RUN"),
+    });
+    const { jobId } = await manager.start({ text: "Hello", direction: "user-to-agent" });
+    await expect(manager.poll({ jobId })).resolves.toEqual({ text: "Hello", done: true });
   });
 });
 

@@ -1,7 +1,12 @@
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { TranslatedMessage } from "./client/translated-message";
 import { TranslatedReasoning } from "./client/translated-reasoning";
-import { transformAssistantMessage, transformReasoningMessage } from "./client/transformer";
+import { TranslatedUserMessage } from "./client/translated-user-message";
+import {
+  transformAssistantMessage,
+  transformReasoningMessage,
+  transformUserMessage,
+} from "./client/transformer";
 import { TranslateSettingsScreen } from "./client/settings-screen";
 import { detectSystemLocale, translate } from "./client/i18n";
 import {
@@ -9,8 +14,11 @@ import {
   TRANSLATED_MESSAGE_VERSION,
   TRANSLATED_REASONING_KIND,
   TRANSLATED_REASONING_VERSION,
+  TRANSLATED_USER_MESSAGE_KIND,
+  TRANSLATED_USER_MESSAGE_VERSION,
   translatedMessageDataSchema,
   translatedReasoningDataSchema,
+  translatedUserMessageDataSchema,
 } from "./shared/translate";
 
 export default function contribute(client: PluginClientContext) {
@@ -24,6 +32,11 @@ export default function contribute(client: PluginClientContext) {
     query: { itemType: "reasoning" },
     transform: transformReasoningMessage,
   });
+  client.addTimelineTransformer({
+    id: "translate-user",
+    query: { itemType: "user_message" },
+    transform: transformUserMessage,
+  });
   client.addTimelineRenderer({
     kind: TRANSLATED_MESSAGE_KIND,
     version: TRANSLATED_MESSAGE_VERSION,
@@ -35,6 +48,12 @@ export default function contribute(client: PluginClientContext) {
     version: TRANSLATED_REASONING_VERSION,
     schema: translatedReasoningDataSchema,
     Component: TranslatedReasoning,
+  });
+  client.addTimelineRenderer({
+    kind: TRANSLATED_USER_MESSAGE_KIND,
+    version: TRANSLATED_USER_MESSAGE_VERSION,
+    schema: translatedUserMessageDataSchema,
+    Component: TranslatedUserMessage,
   });
   client.addSettingsScreen({
     id: "translate",
