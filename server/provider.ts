@@ -30,6 +30,9 @@ export function createTranslateProvider(deps: TranslatorDeps): ProviderRegistrat
         translate: values.translatePrompts
           ? (text, contextKey) => translator.translate(text, "user-to-agent", { contextKey })
           : passThrough,
+        rememberPromptDisplay: values.translatePrompts
+          ? (fragments, contextKey) => translator.rememberPromptDisplay(fragments, { contextKey })
+          : undefined,
         // Question-like permission requests and session-list titles inbound
         // from the inner agent render in the app untranslated (the timeline
         // renderer only owns assistant messages), so they are translated here

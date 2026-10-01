@@ -22,6 +22,12 @@ import {
 } from "../shared/translate";
 import { TRANSLATION_BUSY_MESSAGE } from "../shared/translation-retry";
 import {
+  isSerializedAttachment,
+  promptTranslationParts,
+  type PromptTranslationFragment,
+} from "../shared/prompt-text";
+import { translatePromptDisplay } from "./prompt-text";
+import {
   STREAM_COALESCE_DELAY_MS,
   packTranslationBatches,
   parseTranslationBatch,
@@ -64,6 +70,8 @@ export interface TranslateCallOptions {
 }
 
 export interface Translator {
+  rememberPromptDisplay(fragments: readonly PromptTranslationFragment[], options?: TranslateCallOptions): Promise<void>;
+  restorePromptDisplay(text: string, options?: TranslateCallOptions): Promise<string | undefined>;
   translate(
     text: string,
     direction: TranslateDirection,
@@ -299,7 +307,34 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     return translated;
   }
 
+  function promptDisplayMemory(values: TranslateSettingsValues, contextKey?: string): string | undefined {
+    if (deps.context === undefined || contextKey === undefined || !values.translationContextEnabled) {
+      return undefined;
+    }
+    return deps.context.snapshot(contextKey, "user-to-agent", {
+      hardCapChars: values.translationContextMaxChars * 2,
+    }).memory;
+  }
+
   return {
+    async rememberPromptDisplay(fragments, options) {
+      const values = await deps.loadConfig();
+      const memory = promptDisplayMemory(values, options?.contextKey);
+      // Live rows may omit attachment JSON that replayed rows retain.
+      const prose = fragments.filter((fragment) => !isSerializedAttachment(fragment.original));
+      const variants = prose.length === fragments.length ? [fragments] : [fragments, prose];
+      for (const variant of variants) {
+        const original = variant.map((fragment) => fragment.original).join("\n").trim();
+        const translated = variant.map((fragment) => fragment.translated).join("\n").trim();
+        const parts = promptTranslationParts(original);
+        if (parts === null) continue;
+        cache.set(promptDisplayKey(values, parts.body, memory), translated.slice(parts.prefix.length));
+      }
+    },
+    async restorePromptDisplay(text, options) {
+      const values = await deps.loadConfig();
+      return cache.get(promptDisplayKey(values, text, promptDisplayMemory(values, options?.contextKey)));
+    },
     async translate(text, direction, options) {
       const prepared = await setup(text, direction, options?.contextKey);
       if ("trivial" in prepared) return prepared.trivial;
@@ -476,9 +511,15 @@ export function createTranslateHandler(deps: TranslatorDeps) {
       // Matching display switch off: the renderer keeps the original text.
       return { text: input.text };
     }
-    const text = await translator.translate(input.text, input.direction, {
-      contextKey: input.sessionKey,
-    });
+    const options = { contextKey: input.sessionKey };
+    let text: string;
+    if (input.direction === "user-to-agent") {
+      text = await translator.restorePromptDisplay(input.text, options) ?? await translatePromptDisplay(
+        input.text, (fragment) => translator.translate(fragment, input.direction, options),
+      );
+    } else {
+      text = await translator.translate(input.text, input.direction, options);
+    }
     return { text };
   };
 }
@@ -547,6 +588,21 @@ export function createTranslateStreamManager(
   ): Promise<void> {
     if (items.length === 0) return;
     try {
+      if (direction === "user-to-agent") {
+        for (const item of items) {
+          item.job.text = await translatePromptDisplay(
+            item.text,
+            (fragment, onDelta) => translator.translateStream(fragment, direction, onDelta, { contextKey }),
+            (text) => {
+              item.job.text = text;
+              item.job.updatedAt = Date.now();
+            },
+          );
+          item.job.done = true;
+          item.job.updatedAt = Date.now();
+        }
+        return;
+      }
       await translator.translateMany(
         items.map((item) => item.text),
         direction,
@@ -623,6 +679,13 @@ export function createTranslateStreamManager(
         );
       }
       sweep(Date.now());
+      if (input.direction === "user-to-agent") {
+        const cached = await translator.restorePromptDisplay(input.text, { contextKey: input.sessionKey });
+        if (cached !== undefined) {
+          jobs.set(jobId, { text: cached, done: true, updatedAt: Date.now() });
+          return { jobId };
+        }
+      }
       let open = 0;
       for (const existing of jobs.values()) {
         if (!existing.done && existing.error === undefined) open += 1;
@@ -714,4 +777,19 @@ function cacheKey(input: CacheKeyInput): string {
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function promptDisplayKey(values: TranslateSettingsValues, text: string, contextMemory?: string): string {
+  const pair = resolveLanguagePair(values, "user-to-agent");
+  return `prompt-display:v1:${cacheKey({
+    text,
+    direction: "user-to-agent",
+    pair,
+    systemPrompt: resolveTranslationSystemPrompt(values.translationSystemPrompt, pair, values.translationDomainContext),
+    endpointBaseUrl: values.endpointBaseUrl,
+    endpointModel: values.endpointModel,
+    endpointProtocol: values.endpointProtocol,
+    reasoningEffort: values.translationReasoningEffort,
+    contextMemory,
+  })}`;
 }

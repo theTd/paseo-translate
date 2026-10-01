@@ -13,6 +13,11 @@ export interface PromptTranslationParts {
   body: string;
 }
 
+export interface PromptTranslationFragment {
+  original: string;
+  translated: string;
+}
+
 /**
  * Detects text fragments that carry a serialized structured attachment. The
  * daemon flattens non-text attachments (forge issues, reviews, uploaded

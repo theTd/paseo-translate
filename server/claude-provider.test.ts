@@ -6,6 +6,8 @@ import {
   type ProviderInput,
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateClaudeProvider } from "./claude-provider";
+import { createTranslateHandler } from "./translate";
+import { createMemoryTranslationCacheStore } from "./translation-cache-store";
 import { translatePromptFragment } from "./prompt-text";
 import { createTranslationContextManager } from "./translation-context";
 import {
@@ -262,6 +264,21 @@ describe("translate claude provider", () => {
     expect(events.some((event) => event.type === "session.ready")).toBe(true);
     // The second open with an existing session id fails (duplicate), which
     // proves the first registration held; restore is covered below instead.
+  });
+
+  it("records a multi-fragment prompt for display without translating it again", async () => {
+    const cacheStore = createMemoryTranslationCacheStore();
+    const { fake, events, send, registration } = await createHarness(undefined, cacheStore);
+    await send(openInput);
+    fake.use(async function* () { yield resultSuccess("cs-display", "ok"); });
+    const prompt = promptInput("Hello");
+    if (prompt.prompt.input.type !== "message") throw new Error("Expected message input");
+    prompt.prompt.input.content.push({ type: "text", text: "World" });
+    await send(prompt);
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const display = createTranslateHandler({ loadConfig: async () => values, cacheStore, fetchFn: async () => { throw new Error("Display must use the prompt cache"); } });
+    await expect(display({ text: "Hello\nWorld", direction: "user-to-agent" })).resolves.toEqual({ text: "DE(Hello)\nDE(World)" });
+    await registration.close();
   });
 
   it("translates the prompt before Claude sees it and streams the turn lifecycle", async () => {

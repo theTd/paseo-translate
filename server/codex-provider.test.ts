@@ -5,6 +5,8 @@ import {
   type ProviderInput,
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateCodexProvider, type CodexClientFactory } from "./codex-provider";
+import { createTranslateHandler } from "./translate";
+import { createMemoryTranslationCacheStore, type TranslationCacheStore } from "./translation-cache-store";
 import type { CodexClientLike, CodexRequestHandler } from "./codex-app-server";
 import { createTranslationContextManager } from "./translation-context";
 import {
@@ -147,6 +149,7 @@ function createFakeClient() {
 async function createHarness(
   overrides?: Partial<TranslateSettingsValues>,
   context?: import("./translation-context").TranslationContextManager,
+  cacheStore?: TranslationCacheStore,
 ) {
   const fake = createFakeClient();
   const provider = createTranslateCodexProvider({
@@ -154,6 +157,7 @@ async function createHarness(
     fetchFn: translatingFetch(),
     createClient: fake.factory,
     ...(context !== undefined ? { context } : {}),
+    ...(cacheStore !== undefined ? { cacheStore } : {}),
   });
   const registration = await provider.connect({
     versions: [1],
@@ -240,6 +244,21 @@ describe("translate Codex provider", () => {
     expect(config).toMatchObject({
       config: { modes: [{ id: "auto" }, { id: "auto-review" }, { id: "full-access" }] },
     });
+    await registration.close();
+  });
+
+  it("records a multi-fragment prompt for display without translating it again", async () => {
+    const cacheStore = createMemoryTranslationCacheStore();
+    const { events, send, registration } = await createHarness(undefined, undefined, cacheStore);
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    const prompt = promptInput("Hello");
+    if (prompt.prompt.input.type !== "message") throw new Error("Expected message input");
+    prompt.prompt.input.content.push({ type: "text", text: "World" });
+    await send(prompt);
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "started");
+    const display = createTranslateHandler({ loadConfig: async () => values, cacheStore, fetchFn: async () => { throw new Error("Display must use the prompt cache"); } });
+    await expect(display({ text: "Hello\nWorld", direction: "user-to-agent" })).resolves.toEqual({ text: "DE(Hello)\nDE(World)" });
     await registration.close();
   });
 

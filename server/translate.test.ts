@@ -375,6 +375,60 @@ async function waitForPoll(
 }
 
 describe("streaming translation jobs", () => {
+  it("keeps joined prompt displays inside their translation memory epoch", async () => {
+    const memoryStore = createMemoryTranslationCacheStore();
+    memoryStore.set(CONTEXT_MEMORY_KEY_PREFIX + "agent-a", "Use financial terminology");
+    memoryStore.set(CONTEXT_MEMORY_KEY_PREFIX + "agent-b", "Use river terminology");
+    const context = createTranslationContextManager({ loadConfig: async () => values, memoryStore, sweepIntervalMs: 0 });
+    const deps = { loadConfig: async () => values, context, cacheStore: createMemoryTranslationCacheStore(), fetchFn: async () => { throw new Error("Display must use its own prompt cache"); } };
+    const translator = createTranslator(deps);
+    await translator.rememberPromptDisplay([{ original: "bank", translated: "financial bank" }], { contextKey: "agent-a" });
+    await translator.rememberPromptDisplay([{ original: "bank", translated: "river bank" }], { contextKey: "agent-b" });
+    const handler = createTranslateHandler(deps);
+    await expect(handler({ text: "bank", direction: "user-to-agent", sessionKey: "agent-a" })).resolves.toEqual({ text: "financial bank" });
+    await expect(handler({ text: "bank", direction: "user-to-agent", sessionKey: "agent-b" })).resolves.toEqual({ text: "river bank" });
+    context.dispose();
+  });
+
+  it("reuses combined prompt-time translations, including slash commands and attachments", async () => {
+    const calls: Array<{ stream: boolean }> = [];
+    const deps = { loadConfig: async () => values, cacheStore: createMemoryTranslationCacheStore(), fetchFn: streamingFetch(calls, (text) => `DE:${text}`) };
+    const translator = createTranslator(deps);
+    const attachment = JSON.stringify({ type: "file", mimeType: "text/plain", name: "notes.txt" });
+    const fragments = [
+      { original: "/ask Hello", translated: "/ask DE:Hello" },
+      { original: attachment, translated: attachment },
+      { original: "World", translated: "DE:World" },
+    ];
+    await translator.rememberPromptDisplay(fragments);
+    const manager = createTranslateStreamManager(deps);
+    const full = await manager.start({ text: `Hello\n${attachment}\nWorld`, direction: "user-to-agent", sessionKey: "agent-1" });
+    await expect(manager.poll(full)).resolves.toEqual({ text: `DE:Hello\n${attachment}\nDE:World`, done: true });
+    const plain = await manager.start({ text: "Hello\nWorld", direction: "user-to-agent", sessionKey: "agent-1" });
+    await expect(manager.poll(plain)).resolves.toEqual({ text: "DE:Hello\nDE:World", done: true });
+    await expect(createTranslateHandler(deps)({ text: "Hello\nWorld", direction: "user-to-agent" })).resolves.toEqual({ text: "DE:Hello\nDE:World" });
+    expect(calls).toEqual([]);
+    manager.dispose();
+  });
+
+  it("preserves embedded attachment JSON on a cold display cache", async () => {
+    const calls: Captured[] = [];
+    const attachment = JSON.stringify({ type: "file", mimeType: "text/plain", name: "notes.txt" });
+    const handler = createTranslateHandler({ loadConfig: async () => values, fetchFn: translatingFetch(calls, (text) => `DE:${text}`) });
+    await expect(handler({ text: `Hello\n${attachment}\nWorld`, direction: "user-to-agent" })).resolves.toEqual({ text: `DE:Hello\n${attachment}\nDE:World` });
+    expect(calls.map((call) => unwrapTranslationInput(call.body?.messages.at(-1)?.content ?? ""))).toEqual(["Hello", "World"]);
+  });
+
+  it("preserves embedded attachments while streaming from a cold display cache", async () => {
+    const calls: Array<{ stream: boolean }> = [];
+    const attachment = JSON.stringify({ type: "file", mimeType: "text/plain", name: "notes.txt" });
+    const manager = createTranslateStreamManager({ loadConfig: async () => values, fetchFn: streamingFetch(calls, (text) => `DE:${text}`) }, { coalesceDelayMs: 0 });
+    const { jobId } = await manager.start({ text: `Hello\n${attachment}\nWorld`, direction: "user-to-agent" });
+    await expect(waitForPoll(manager, jobId, true)).resolves.toEqual({ text: `DE:Hello\n${attachment}\nDE:World`, done: true });
+    expect(calls).toEqual([{ stream: true }, { stream: true }]);
+    manager.dispose();
+  });
+
   it("translates the unary path with one bounded plain completion, no stream attempt", async () => {
     const calls: Array<{ stream: boolean }> = [];
     const translator = createTranslator({

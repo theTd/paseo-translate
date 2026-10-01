@@ -34,6 +34,7 @@ import {
   restorePromptFragment,
   translatePromptFragment,
 } from "./prompt-text";
+import type { PromptTranslationFragment } from "../shared/prompt-text";
 import {
   ASK_USER_QUESTION_TOOL,
   isAskUserQuestionRequest,
@@ -1227,6 +1228,7 @@ async function buildMessageBlocks(
         context.translator.translate(text, "user-to-agent", { contextKey })
     : async (text: string) => text;
   const blocks: SdkContentBlock[] = [];
+  const displayFragments: PromptTranslationFragment[] = [];
   let hasContent = false;
   for (const block of content) {
     if (
@@ -1236,6 +1238,7 @@ async function buildMessageBlocks(
       typeof (block as { text?: unknown }).text === "string"
     ) {
       const translated = await translatePromptFragment((block as { text: string }).text, translate);
+      displayFragments.push({ original: (block as { text: string }).text, translated });
       if (translated.trim().length > 0) hasContent = true;
       blocks.push({ type: "text", text: translated });
     } else if (
@@ -1264,6 +1267,7 @@ async function buildMessageBlocks(
   if (!hasContent) {
     throw new Error("Refusing to send an empty prompt");
   }
+  if (values.translatePrompts) await context.translator.rememberPromptDisplay(displayFragments, { contextKey });
   return blocks;
 }
 

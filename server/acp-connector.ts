@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
 import { isSerializedAttachment, restorePromptFragment, translatePromptFragment } from "./prompt-text";
+import type { PromptTranslationFragment } from "../shared/prompt-text";
 import {
   MAX_SESSION_LIST_TITLES_PER_FRAME,
   SESSION_TITLE_DISPLAY_LIMIT,
@@ -16,6 +17,7 @@ export interface TranslatingConnectorConfig {
    * scoping the session translation transcript; absent means standalone.
    */
   translate(text: string, contextKey?: string): Promise<string>;
+  rememberPromptDisplay?: (fragments: readonly PromptTranslationFragment[], contextKey?: string) => Promise<void>;
   /**
    * Translates one agent-language text fragment into the user language for
    * display. Used for question-like `session/request_permission` requests
@@ -384,6 +386,23 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
       const translated: unknown[] = [];
       for (const block of blocks) {
         translated.push(await translateBlock(block, config, contextKey));
+      }
+      if (config.rememberPromptDisplay) {
+        const fragments: PromptTranslationFragment[] = [];
+        for (let index = 0; index < blocks.length; index += 1) {
+          const original = blocks[index];
+          const result = translated[index];
+          if (
+            typeof original === "object" && original !== null &&
+            "type" in original && original.type === "text" &&
+            "text" in original && typeof original.text === "string" &&
+            typeof result === "object" && result !== null &&
+            "text" in result && typeof result.text === "string"
+          ) {
+            fragments.push({ original: original.text, translated: result.text });
+          }
+        }
+        await config.rememberPromptDisplay(fragments, contextKey);
       }
       const params = (message.params ?? {}) as Record<string, unknown>;
       return {

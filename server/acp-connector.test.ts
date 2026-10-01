@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
 import { createTranslatingAcpStream } from "./acp-connector";
+import type { PromptTranslationFragment } from "../shared/prompt-text";
 
 /**
  * Minimal ACP-shaped echo agent: announces itself with one notification, then
@@ -157,6 +158,21 @@ afterEach(async () => {
 });
 
 describe("translating ACP connector", () => {
+  it("records the exact translated prompt fragments before forwarding the frame", async () => {
+    const remembered: Array<readonly PromptTranslationFragment[]> = [];
+    const stream = createTranslatingAcpStream({
+      command: [process.execPath, "-e", ECHO_AGENT],
+      translate: async (text) => `DE(${text})`,
+      rememberPromptDisplay: async (fragments) => { remembered.push(fragments); },
+    });
+    streams.push(stream);
+    const writer = stream.writable.getWriter();
+    await writer.write(promptRequest(1, [{ type: "text", text: "Hello" }, { type: "text", text: "World" }]));
+    writer.releaseLock();
+    await readCount(stream, 2);
+    expect(remembered).toEqual([[{ original: "Hello", translated: "DE(Hello)" }, { original: "World", translated: "DE(World)" }]]);
+  });
+
   it("translates prompt text, preserves frame order, and passes other frames through", async () => {
     const stream = echoStream(async (text) => `DE(${text})`);
     const writer = stream.writable.getWriter();

@@ -22,6 +22,41 @@ export async function translatePromptFragment(
   return `${parts.prefix}${await translate(parts.body)}`;
 }
 
+/** Replayed rows can contain serialized attachment blocks joined with prose. */
+export async function translatePromptDisplay(
+  text: string,
+  translate: (text: string, onDelta: (delta: string) => void) => Promise<string>,
+  onPartial?: (text: string) => void,
+): Promise<string> {
+  const fragments: string[] = [];
+  let prose: string[] = [];
+  for (const line of text.split("\n")) {
+    if (isSerializedAttachment(line.trim())) {
+      if (prose.length > 0) fragments.push(prose.join("\n"));
+      prose = [];
+      fragments.push(line);
+    } else {
+      prose.push(line);
+    }
+  }
+  if (prose.length > 0) fragments.push(prose.join("\n"));
+  const translated: string[] = [];
+  for (const fragment of fragments) {
+    if (isSerializedAttachment(fragment.trim()) || fragment.trim().length === 0) {
+      translated.push(fragment);
+    } else {
+      let partial = "";
+      const result = await translate(fragment, (delta) => {
+        partial += delta;
+        onPartial?.([...translated, partial].join("\n"));
+      });
+      translated.push(result);
+    }
+    onPartial?.(translated.join("\n"));
+  }
+  return translated.join("\n");
+}
+
 /**
  * Reverse of {@link translatePromptFragment} for history replay: maps one
  * agent-language block back to the exact user-language fragment recorded at
