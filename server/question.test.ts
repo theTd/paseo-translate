@@ -57,30 +57,54 @@ describe("question helpers", () => {
     expect(summarizeQuestions({})).toEqual({});
   });
 
-  it("translates display strings and keeps structure", async () => {
+  it("shows translation and original side by side and keeps structure", async () => {
     const translated = await translateQuestionsForDisplay([colorQuestion], de);
     expect(translated).toEqual([
       {
-        header: "EN(Farbe)",
-        question: "EN(Welche Farbe?)",
+        header: "EN(Farbe) (Farbe)",
+        question: "EN(Welche Farbe?)\nWelche Farbe?",
         options: [
-          { label: "EN(Blau)", description: "EN(Ruhig)" },
-          { label: "EN(Grün)", description: "EN(Frisch)" },
+          { label: "EN(Blau) (Blau)", description: "EN(Ruhig)\nRuhig" },
+          { label: "EN(Grün) (Grün)", description: "EN(Frisch)\nFrisch" },
         ],
         multiSelect: false,
       },
     ]);
   });
 
-  it("maps translated-header answers back to question text and translates values", async () => {
+  it("collapses identical translations to a single line", async () => {
+    const translated = await translateQuestionsForDisplay(
+      [{ header: "OK", question: "Go?", options: ["OK"] }],
+      (text) => Promise.resolve(text),
+    );
+    expect(translated).toEqual([{ header: "OK", question: "Go?", options: ["OK"] }]);
+  });
+
+  it("maps bilingual answers back without retranslating picked labels", async () => {
+    const translated = await translateQuestionsForDisplay([colorQuestion], de);
+    const seen: string[] = [];
+    const resolved = await resolveQuestionAnswers(
+      translated,
+      [colorQuestion],
+      { answers: { "EN(Farbe) (Farbe)": "EN(Grün) (Grün)" } },
+      (text) => {
+        seen.push(text);
+        return Promise.resolve(`DE(${text})`);
+      },
+    );
+    expect(resolved).toEqual({ "Welche Farbe?": "Grün" });
+    expect(seen).toEqual([]);
+  });
+
+  it("resolves comma-joined bilingual picks piece-wise for multi-select", async () => {
     const translated = await translateQuestionsForDisplay([colorQuestion], de);
     const resolved = await resolveQuestionAnswers(
       translated,
       [colorQuestion],
-      { answers: { "EN(Farbe)": "EN(Grün)" } },
-      (text) => Promise.resolve(`DE(${text})`),
+      { answers: { "EN(Farbe) (Farbe)": "EN(Blau) (Blau), EN(Grün) (Grün)" } },
+      () => Promise.reject(new Error("must not translate picked labels")),
     );
-    expect(resolved).toEqual({ "Welche Farbe?": "DE(EN(Grün))" });
+    expect(resolved).toEqual({ "Welche Farbe?": "Blau, Grün" });
   });
 
   it("falls back to translated question text keys and keeps empty values untranslated", async () => {
@@ -89,7 +113,7 @@ describe("question helpers", () => {
     const resolved = await resolveQuestionAnswers(
       translated,
       [colorQuestion],
-      { answers: { "EN(Welche Farbe?)": "  " } },
+      { answers: { "EN(Welche Farbe?)\nWelche Farbe?": "  " } },
       (text) => {
         seen.push(text);
         return Promise.resolve(`DE(${text})`);
@@ -105,7 +129,11 @@ describe("question helpers", () => {
       de,
     );
     expect(translated).toEqual([
-      { header: "EN(Farbe)", question: "EN(Welche Farbe?)", options: ["EN(Blau)", 7, null] },
+      {
+        header: "EN(Farbe) (Farbe)",
+        question: "EN(Welche Farbe?)\nWelche Farbe?",
+        options: ["EN(Blau) (Blau)", 7, null],
+      },
     ]);
   });
 
@@ -125,7 +153,7 @@ describe("question helpers", () => {
     const resolved = await resolveQuestionAnswers(
       translated,
       [colorQuestion],
-      { answers: { "EN(Farbe)": 2, mystery: true } },
+      { answers: { "EN(Farbe) (Farbe)": 2, mystery: true } },
       () => Promise.reject(new Error("must not translate non-strings")),
     );
     expect(resolved).toEqual({ "Welche Farbe?": 2, mystery: true });
@@ -134,7 +162,7 @@ describe("question helpers", () => {
   it("rejects when an answer translation fails so the caller denies", async () => {
     const translated = await translateQuestionsForDisplay([colorQuestion], de);
     await expect(
-      resolveQuestionAnswers(translated, [colorQuestion], { answers: { "EN(Farbe)": "ja" } }, () =>
+      resolveQuestionAnswers(translated, [colorQuestion], { answers: { "EN(Farbe) (Farbe)": "ja" } }, () =>
         Promise.reject(new Error("endpoint down")),
       ),
     ).rejects.toThrow("endpoint down");
@@ -151,11 +179,13 @@ describe("question helpers", () => {
       [{ header: "Farbe", question: shot, options: [{ label: shot }] }],
       spy,
     );
-    expect(translated).toEqual([{ header: "EN(Farbe)", question: shot, options: [{ label: shot }] }]);
+    expect(translated).toEqual([
+      { header: "EN(Farbe) (Farbe)", question: shot, options: [{ label: shot }] },
+    ]);
     const resolved = await resolveQuestionAnswers(
       translated,
       [{ header: "Farbe", question: shot }],
-      { answers: { "EN(Farbe)": shot } },
+      { answers: { "EN(Farbe) (Farbe)": shot } },
       spy,
     );
     // Only the header round-tripped; the payload never reached the endpoint.

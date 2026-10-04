@@ -70,7 +70,7 @@ export function transformReasoningMessage(input: {
 /**
  * Passthrough for a canonical user prompt. The row keeps the user's original
  * language; the renderer can project the agent-language translation on
- * demand. Fragments with nothing to translate (blank, serialized
+ * alongside the original. Fragments with nothing to translate (blank, serialized
  * attachments, arg-less slash commands, materialized provider images,
  * data-URI image-only prompts) return
  * undefined so the host keeps its native user-message chrome.

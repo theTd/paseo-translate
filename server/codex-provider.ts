@@ -1484,12 +1484,28 @@ async function resolveQuestionResponse(
         answersRecord?.[original.header] ??
         answersRecord?.[original.id];
       if (typeof raw !== "string" || raw.trim().length === 0) continue;
+      // Display labels are bilingual (`译文 (原文)`); a picked label maps
+      // straight back to the original without an endpoint round trip that
+      // would garble the combined string. Only free text goes through MT.
+      const displayedLabelToOriginal = new Map<string, string>();
+      const optionsField: unknown =
+        typeof shown === "object" && shown !== null && "options" in shown ? shown.options : [];
+      const shownOptions: unknown[] = Array.isArray(optionsField) ? optionsField : [];
+      for (let optionIndex = 0; optionIndex < shownOptions.length; optionIndex += 1) {
+        const shownOption = toObjectRecord(shownOptions[optionIndex]);
+        const sourceOption = original.options[optionIndex];
+        const displayed = shownOption !== null ? nonEmptyString(shownOption.label) : null;
+        const source = sourceOption !== undefined ? nonEmptyString(sourceOption.label) : null;
+        if (displayed !== null && source !== null && !displayedLabelToOriginal.has(displayed)) {
+          displayedLabelToOriginal.set(displayed, source);
+        }
+      }
       const pieces = original.multiSelect
         ? raw.split(",").map((part) => part.trim()).filter((part) => part.length > 0)
         : [raw.trim()];
       const translatedPieces: string[] = [];
       for (const piece of pieces) {
-        translatedPieces.push(await translateBack(piece));
+        translatedPieces.push(displayedLabelToOriginal.get(piece) ?? (await translateBack(piece)));
       }
       answers[original.id] = { answers: translatedPieces };
     }

@@ -559,7 +559,7 @@ describe("translate Codex provider", () => {
       request: {
         kind: "question",
         input: {
-          questions: [{ header: "DE(Choice)", question: "DE(Which file?)" }],
+          questions: [{ header: "DE(Choice) (Choice)", question: "DE(Which file?)\nWhich file?" }],
         },
       },
     });
@@ -569,7 +569,7 @@ describe("translate Codex provider", () => {
       permissionId: (permission as Extract<ProviderEvent, { type: "session.permission" }>).request.id,
       response: {
         behavior: "allow",
-        updatedInput: { answers: { "DE(Choice)": "the src one" } },
+        updatedInput: { answers: { "DE(Choice) (Choice)": "the src one" } },
       },
     });
     await expect(approval).resolves.toEqual({
@@ -699,7 +699,7 @@ describe("translate Codex provider", () => {
       type: "session.permission",
       sessionId: "s",
       permissionId: (permission as Extract<ProviderEvent, { type: "session.permission" }>).request.id,
-      response: { behavior: "allow", updatedInput: { answers: { "DE(Choice)": "A" } } },
+      response: { behavior: "allow", updatedInput: { answers: { "DE(Choice) (Choice)": "DE(A) (A)" } } },
     });
     await approval;
     const cards = events.filter(
@@ -726,7 +726,7 @@ describe("translate Codex provider", () => {
       type: "session.permission",
       sessionId: "s",
       permissionId: (permission as Extract<ProviderEvent, { type: "session.permission" }>).request.id,
-      response: { behavior: "allow", updatedInput: { answers: { "DE(Choice)": "please FAIL now" } } },
+      response: { behavior: "allow", updatedInput: { answers: { "DE(Choice) (Choice)": "please FAIL now" } } },
     });
     await expect(approval).resolves.toEqual({ answers: {} });
     const cards = events.filter(

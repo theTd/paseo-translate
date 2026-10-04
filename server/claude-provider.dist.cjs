@@ -53409,16 +53409,40 @@ function summarizeQuestions(input2) {
 function isTranslatable(value) {
   return typeof value === "string" && value.trim().length > 0 && !isDataUriImageOnlyText(value);
 }
+function bilingualInline(translated, original) {
+  if (translated.trim() === original.trim()) return translated;
+  return `${translated} (${original})`;
+}
 async function translateQuestionItem(item, translate) {
   if (!isRecord(item)) return item;
   const copy = { ...item };
-  if (isTranslatable(item.question)) copy.question = await translate(item.question);
-  if (isTranslatable(item.header)) copy.header = await translate(item.header);
+  if (isTranslatable(item.question)) {
+    const original = item.question;
+    const translated = await translate(original);
+    if (translated.trim().length === 0) {
+      copy.question = original;
+    } else if (translated.trim() === original.trim()) {
+      copy.question = translated;
+    } else {
+      copy.question = `${translated}
+${original}`;
+    }
+  }
+  if (isTranslatable(item.header)) {
+    const original = item.header;
+    const translated = await translate(original);
+    copy.header = translated.trim().length > 0 ? bilingualInline(translated, original) : original;
+  }
   if (Array.isArray(item.options)) {
     const options = [];
     for (const option of item.options) {
       if (typeof option === "string") {
-        options.push(isTranslatable(option) ? await translate(option) : option);
+        if (!isTranslatable(option)) {
+          options.push(option);
+          continue;
+        }
+        const translated = await translate(option);
+        options.push(translated.trim().length > 0 ? bilingualInline(translated, option) : option);
         continue;
       }
       if (!isRecord(option)) {
@@ -53426,9 +53450,22 @@ async function translateQuestionItem(item, translate) {
         continue;
       }
       const optionCopy = { ...option };
-      if (isTranslatable(option.label)) optionCopy.label = await translate(option.label);
+      if (isTranslatable(option.label)) {
+        const original = option.label;
+        const translated = await translate(original);
+        optionCopy.label = translated.trim().length > 0 ? bilingualInline(translated, original) : original;
+      }
       if (isTranslatable(option.description)) {
-        optionCopy.description = await translate(option.description);
+        const original = option.description;
+        const translated = await translate(original);
+        if (translated.trim().length === 0) {
+          optionCopy.description = original;
+        } else if (translated.trim() === original.trim()) {
+          optionCopy.description = translated;
+        } else {
+          optionCopy.description = `${translated}
+${original}`;
+        }
       }
       options.push(optionCopy);
     }
@@ -53453,8 +53490,17 @@ async function resolveQuestionAnswers(translatedQuestions, originalQuestions, up
   if (answers === null) return {};
   const headerToQuestion = /* @__PURE__ */ new Map();
   const questionToQuestion = /* @__PURE__ */ new Map();
+  const displayedLabelToOriginal = /* @__PURE__ */ new Map();
   const remember = (key, originalText, map2) => {
     if (key !== null && !map2.has(key)) map2.set(key, originalText);
+  };
+  const rememberLabel = (displayed, original) => {
+    const displayedText = readNonEmptyString(displayed);
+    const originalText = readNonEmptyString(original);
+    if (displayedText === null || originalText === null) return;
+    if (!displayedLabelToOriginal.has(displayedText)) {
+      displayedLabelToOriginal.set(displayedText, originalText);
+    }
   };
   for (let index = 0; index < translatedQuestions.length; index += 1) {
     const translated = translatedQuestions[index];
@@ -53466,7 +53512,30 @@ async function resolveQuestionAnswers(translatedQuestions, originalQuestions, up
     remember(readNonEmptyString(translated.question), originalText, questionToQuestion);
     remember(readNonEmptyString(original.header), originalText, headerToQuestion);
     remember(originalText, originalText, questionToQuestion);
+    if (!Array.isArray(translated.options) || !Array.isArray(original.options)) continue;
+    const shownOptions = translated.options;
+    const sourceOptions = original.options.slice(0, shownOptions.length);
+    for (let optionIndex = 0; optionIndex < shownOptions.length; optionIndex += 1) {
+      const shown = shownOptions[optionIndex];
+      const source = sourceOptions[optionIndex];
+      if (typeof shown === "string" || typeof source === "string") {
+        rememberLabel(shown, source);
+        continue;
+      }
+      if (!isRecord(shown) || !isRecord(source)) continue;
+      rememberLabel(shown.label, source.label);
+    }
   }
+  const resolveValue = async (value) => {
+    if (value.trim().length === 0 || isDataUriImageOnlyText(value)) return value;
+    const exact = displayedLabelToOriginal.get(value);
+    if (exact !== void 0) return exact;
+    const pieces = value.split(",").map((part) => part.trim());
+    if (pieces.length > 1 && pieces.every((part) => part.length > 0 && displayedLabelToOriginal.has(part))) {
+      return pieces.map((part) => displayedLabelToOriginal.get(part)).join(", ");
+    }
+    return translate(value);
+  };
   const resolved = {};
   for (const [key, value] of Object.entries(answers)) {
     if (typeof value !== "string") {
@@ -53474,7 +53543,7 @@ async function resolveQuestionAnswers(translatedQuestions, originalQuestions, up
       continue;
     }
     const questionText = headerToQuestion.get(key) ?? questionToQuestion.get(key) ?? key;
-    resolved[questionText] = value.trim().length === 0 || isDataUriImageOnlyText(value) ? value : await translate(value);
+    resolved[questionText] = await resolveValue(value);
   }
   return resolved;
 }

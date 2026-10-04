@@ -455,23 +455,23 @@ describe("translate claude provider", () => {
         id: "perm-q",
         name: "AskUserQuestion",
         kind: "question",
-        title: "DE(Welche Farbe?)",
-        description: "DE(Blau) / DE(Grün)",
+        title: "DE(Welche Farbe?)\nWelche Farbe?",
+        description: "DE(Blau) (Blau) / DE(Grün) (Grün)",
       },
     });
     const emittedInput = (
       permission as Extract<ProviderEvent, { type: "session.permission" }>
     ).request.input as { questions: Array<Record<string, unknown>> };
     expect(emittedInput.questions[0]).toMatchObject({
-      header: "DE(Farbe)",
-      question: "DE(Welche Farbe?)",
+      header: "DE(Farbe) (Farbe)",
+      question: "DE(Welche Farbe?)\nWelche Farbe?",
       allowOther: true,
     });
     expect(
       (emittedInput.questions[0].options as Array<Record<string, unknown>>).map(
         (option) => option.label,
       ),
-    ).toEqual(["DE(Blau)", "DE(Grün)"]);
+    ).toEqual(["DE(Blau) (Blau)", "DE(Grün) (Grün)"]);
     expect(
       (permission as Extract<ProviderEvent, { type: "session.permission" }>).request.actions,
     ).toBeUndefined();
@@ -483,15 +483,16 @@ describe("translate claude provider", () => {
       response: {
         behavior: "allow",
         updatedInput: JSON.parse(
-          JSON.stringify({ ...emittedInput, answers: { "DE(Farbe)": "Grün" } }),
+          JSON.stringify({ ...emittedInput, answers: { "DE(Farbe) (Farbe)": "DE(Grün) (Grün)" } }),
         ),
       },
     });
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
     // Claude receives agent-language keys and values; the UI-only flag is stripped.
+    // The picked bilingual label maps back to the original without retranslating.
     expect(decision).toMatchObject({
       behavior: "allow",
-      updatedInput: { answers: { "Welche Farbe?": "DE(Grün)" } },
+      updatedInput: { answers: { "Welche Farbe?": "Grün" } },
     });
     const resolvedQuestions = (decision as { updatedInput: { questions: Array<Record<string, unknown>> } })
       .updatedInput.questions;
@@ -525,7 +526,7 @@ describe("translate claude provider", () => {
       response: {
         behavior: "allow",
         updatedInput: JSON.parse(
-          JSON.stringify({ ...emittedInput, answers: { "DE(Farbe)": "FAIL bitte" } }),
+          JSON.stringify({ ...emittedInput, answers: { "DE(Farbe) (Farbe)": "FAIL bitte" } }),
         ),
       },
     });
