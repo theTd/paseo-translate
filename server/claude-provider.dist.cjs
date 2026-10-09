@@ -52506,6 +52506,8 @@ var translateSettings = (0, import_plugin.defineSettings)({
     codexExecutablePath: external_exports.string().trim().default(""),
     translatePrompts: external_exports.boolean().default(true),
     translateResponses: external_exports.boolean().default(true),
+    /** Translate provider notification previews on the daemon, independently of timeline display. */
+    translateNotifications: external_exports.boolean().default(false),
     translateAllTimelines: external_exports.boolean().default(false),
     /**
      * Session-scoped translation context: each agent session keeps its own
@@ -52811,7 +52813,7 @@ function createTranslator(deps) {
       endpointModel: values.endpointModel,
       endpointProtocol: values.endpointProtocol,
       reasoningEffort: values.translationReasoningEffort,
-      contextMemory: snapshot?.memory
+      ...useContext ? { scopeKey: contextKey } : {}
     });
     const cached2 = cache.get(key);
     if (cached2 !== void 0) {
@@ -52876,18 +52878,13 @@ ${snapshot.memory}` : systemPrompt;
     commitTranslation(prepared, source, translated, direction);
     return translated;
   }
-  function promptDisplayMemory(values, contextKey) {
-    if (deps.context === void 0 || contextKey === void 0 || !values.translationContextEnabled) {
-      return void 0;
-    }
-    return deps.context.snapshot(contextKey, "user-to-agent", {
-      hardCapChars: values.translationContextMaxChars * 2
-    }).memory;
+  function promptDisplayScope(values, contextKey) {
+    return deps.context !== void 0 && contextKey !== void 0 && values.translationContextEnabled ? contextKey : void 0;
   }
   return {
     async rememberPromptDisplay(fragments, options) {
       const values = await deps.loadConfig();
-      const memory = promptDisplayMemory(values, options?.contextKey);
+      const scope = promptDisplayScope(values, options?.contextKey);
       const prose = fragments.filter((fragment) => !isSerializedAttachment(fragment.original));
       const variants = prose.length === fragments.length ? [fragments] : [fragments, prose];
       for (const variant of variants) {
@@ -52895,12 +52892,19 @@ ${snapshot.memory}` : systemPrompt;
         const translated = variant.map((fragment) => fragment.translated).join("\n").trim();
         const parts = promptTranslationParts(original);
         if (parts === null) continue;
-        cache.set(promptDisplayKey(values, parts.body, memory), translated.slice(parts.prefix.length));
+        const display = translated.slice(parts.prefix.length);
+        cache.set(promptDisplayKey(values, parts.body, scope), display);
+        if (scope !== void 0) {
+          cache.set(promptDisplayKey(values, parts.body), display);
+        }
       }
     },
     async restorePromptDisplay(text, options) {
       const values = await deps.loadConfig();
-      return cache.get(promptDisplayKey(values, text, promptDisplayMemory(values, options?.contextKey)));
+      const scope = promptDisplayScope(values, options?.contextKey);
+      const own2 = cache.get(promptDisplayKey(values, text, scope));
+      if (own2 !== void 0 || scope === void 0) return own2;
+      return cache.get(promptDisplayKey(values, text));
     },
     async translate(text, direction, options) {
       const prepared = await setup(text, direction, options?.contextKey);
@@ -53025,13 +53029,36 @@ ${snapshot.memory}` : systemPrompt;
           onItem?.(index, { text: translated, done: true });
         }
       };
-      const pendingTexts = pending.map((index) => texts[index] ?? "");
+      const unique = [];
+      const duplicates = [];
+      const positionByText = /* @__PURE__ */ new Map();
+      for (const index of pending) {
+        const text = texts[index] ?? "";
+        const position = positionByText.get(text);
+        if (position === void 0) {
+          positionByText.set(text, unique.length);
+          unique.push(index);
+          duplicates.push([]);
+        } else {
+          duplicates[position]?.push(index);
+        }
+      }
+      const pendingTexts = unique.map((index) => texts[index] ?? "");
       const packs = packTranslationBatches(pendingTexts);
       let offset = 0;
       for (const pack of packs) {
-        const packIndexes = pending.slice(offset, offset + pack.length);
+        const packIndexes = unique.slice(offset, offset + pack.length);
         offset += pack.length;
         await runPack(packIndexes);
+      }
+      for (let position = 0; position < unique.length; position += 1) {
+        const source = unique[position];
+        if (source === void 0) continue;
+        const translated = results[source];
+        for (const duplicate of duplicates[position] ?? []) {
+          results[duplicate] = translated;
+          onItem?.(duplicate, { text: translated, done: true });
+        }
       }
       return results;
     },
@@ -53053,14 +53080,14 @@ function cacheKey(input2) {
     protocol: input2.endpointProtocol,
     effort: input2.reasoningEffort,
     prompt: digest(input2.systemPrompt),
-    ...input2.contextMemory !== void 0 ? { memory: digest(input2.contextMemory) } : {},
+    ...input2.scopeKey !== void 0 ? { scope: input2.scopeKey } : {},
     text: digest(input2.text)
   });
 }
 function digest(value) {
   return (0, import_node_crypto3.createHash)("sha256").update(value, "utf8").digest("hex");
 }
-function promptDisplayKey(values, text, contextMemory) {
+function promptDisplayKey(values, text, scopeKey) {
   const pair = resolveLanguagePair(values, "user-to-agent");
   return `prompt-display:v1:${cacheKey({
     text,
@@ -53071,7 +53098,7 @@ function promptDisplayKey(values, text, contextMemory) {
     endpointModel: values.endpointModel,
     endpointProtocol: values.endpointProtocol,
     reasoningEffort: values.translationReasoningEffort,
-    contextMemory
+    scopeKey
   })}`;
 }
 

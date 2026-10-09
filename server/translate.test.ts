@@ -52,6 +52,7 @@ const values: TranslateSettingsValues = {
   codexExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
+  translateNotifications: false,
   translateReasoning: false,
   translateAllTimelines: false,
   translationContextEnabled: true,
@@ -607,6 +608,14 @@ describe("user original restoration", () => {
   });
 });
 
+/** Fixed-memory answer for the idle-compaction endpoint call. */
+function compactionFetch(memory: string): typeof fetch {
+  return (async () =>
+    new Response(JSON.stringify({ choices: [{ message: { content: memory } }] }), {
+      status: 200,
+    })) as typeof fetch;
+}
+
 /** Maps over the LAST user message, so transcript turns don't confuse it. */
 function contextFetch(calls: Captured[]): typeof fetch {
   return (async (_input: string | URL | Request, init?: RequestInit) => {
@@ -677,7 +686,7 @@ describe("session translation context", () => {
     expect(context.snapshot("s", "user-to-agent", { hardCapChars: 100_000 }).turns).toHaveLength(1);
   });
 
-  it("folds the compacted memory into both the system prompt and the cache key", async () => {
+  it("folds the compacted memory into the request and scopes the cache by session", async () => {
     const calls: Captured[] = [];
     const memoryStore = createMemoryTranslationCacheStore();
     memoryStore.set(`${CONTEXT_MEMORY_KEY_PREFIX}s-mem`, "cloud = Wolke");
@@ -689,6 +698,7 @@ describe("session translation context", () => {
     const translator = createTranslator({
       loadConfig: async () => values,
       fetchFn: contextFetch(calls),
+      cacheStore: createMemoryTranslationCacheStore(),
       context,
     });
     await translator.translate("Hello", "user-to-agent", { contextKey: "s-mem" });
@@ -696,13 +706,154 @@ describe("session translation context", () => {
     // Same session, same memory: served from cache.
     await translator.translate("Hello", "user-to-agent", { contextKey: "s-mem" });
     expect(calls).toHaveLength(1);
-    // A session with a different (empty) memory must not inherit the
-    // memory-conditioned result: it gets its own cache namespace.
+    // Another session must not inherit this session's memory-conditioned
+    // result: the session scope keeps its own cache namespace. The scope —
+    // not the (volatile) memory digest — provides that namespace, so a later
+    // compaction of this session does not evict what it already cached.
     await translator.translate("Hello", "user-to-agent", { contextKey: "fresh" });
     expect(calls).toHaveLength(2);
     // Standalone translations live in a third namespace.
     await translator.translate("Hello", "user-to-agent");
     expect(calls).toHaveLength(3);
+  });
+
+  it("keeps serving cached display translations after compaction rewrites the memory", async () => {
+    const calls: Captured[] = [];
+    const compactable: TranslateSettingsValues = {
+      ...values,
+      translationContextIdleMinutes: 1,
+      translationContextMaxChars: 100,
+    };
+    const memoryStore = createMemoryTranslationCacheStore();
+    const clock = { at: 1_000_000 };
+    const context = createTranslationContextManager({
+      loadConfig: async () => compactable,
+      memoryStore,
+      now: () => clock.at,
+      sweepIntervalMs: 0,
+      fetchFn: compactionFetch("MEM: distilled glossary"),
+    });
+    const translator = createTranslator({
+      loadConfig: async () => compactable,
+      fetchFn: contextFetch(calls),
+      cacheStore: createMemoryTranslationCacheStore(),
+      context,
+    });
+
+    await expect(
+      translator.translate("Same reply", "agent-to-user", { contextKey: "agent-1" }),
+    ).resolves.toBe("T:Same reply");
+    // Hot cache while the memory is unchanged.
+    await expect(
+      translator.translate("Same reply", "agent-to-user", { contextKey: "agent-1" }),
+    ).resolves.toBe("T:Same reply");
+    expect(calls).toHaveLength(1);
+
+    // The session outgrows the compaction threshold, then idles out.
+    for (let index = 0; index < 20; index += 1) {
+      context.record(
+        "agent-1",
+        "agent-to-user",
+        `source-${index}`.padEnd(50, "x"),
+        `target-${index}`.padEnd(50, "y"),
+      );
+    }
+    clock.at += 10 * 60_000;
+    await context.sweep();
+    expect(memoryStore.get(`${CONTEXT_MEMORY_KEY_PREFIX}agent-1`)).toBe("MEM: distilled glossary");
+
+    // Reopening the session must not re-bill text that was already
+    // translated once: the session scope keeps the entry addressable even
+    // though the memory digest behind it changed.
+    await expect(
+      translator.translate("Same reply", "agent-to-user", { contextKey: "agent-1" }),
+    ).resolves.toBe("T:Same reply");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("keeps restoring joined prompt displays after compaction rewrites the memory", async () => {
+    const compactable: TranslateSettingsValues = {
+      ...values,
+      translationContextIdleMinutes: 1,
+      translationContextMaxChars: 100,
+    };
+    const memoryStore = createMemoryTranslationCacheStore();
+    const clock = { at: 1_000_000 };
+    const context = createTranslationContextManager({
+      loadConfig: async () => compactable,
+      memoryStore,
+      now: () => clock.at,
+      sweepIntervalMs: 0,
+      fetchFn: compactionFetch("MEM: distilled glossary"),
+    });
+    const translator = createTranslator({
+      loadConfig: async () => compactable,
+      fetchFn: async () => {
+        throw new Error("prompt display must come from its own cache");
+      },
+      cacheStore: createMemoryTranslationCacheStore(),
+      context,
+    });
+
+    await translator.rememberPromptDisplay(
+      [{ original: "Same prompt", translated: "T:Same prompt" }],
+      { contextKey: "agent-1" },
+    );
+    await expect(
+      translator.restorePromptDisplay("Same prompt", { contextKey: "agent-1" }),
+    ).resolves.toBe("T:Same prompt");
+
+    for (let index = 0; index < 20; index += 1) {
+      context.record(
+        "agent-1",
+        "user-to-agent",
+        `source-${index}`.padEnd(50, "x"),
+        `target-${index}`.padEnd(50, "y"),
+      );
+    }
+    clock.at += 10 * 60_000;
+    await context.sweep();
+    expect(memoryStore.get(`${CONTEXT_MEMORY_KEY_PREFIX}agent-1`)).toBe("MEM: distilled glossary");
+
+    await expect(
+      translator.restorePromptDisplay("Same prompt", { contextKey: "agent-1" }),
+    ).resolves.toBe("T:Same prompt");
+  });
+
+  it("restores a prompt display written under a different session scope", async () => {
+    // The ACP proxy keys the prompt path by its inner ACP session id (its
+    // connector cannot see the paseo agent id) while the client display path
+    // keys by the agent id. The scope-free mirror keeps such a prompt's
+    // translation restorable instead of re-translating it on every open.
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const deps = {
+      loadConfig: async () => values,
+      context,
+      cacheStore: createMemoryTranslationCacheStore(),
+      fetchFn: async () => {
+        throw new Error("a restorable prompt must not be re-translated");
+      },
+    };
+    const translator = createTranslator(deps);
+    await translator.rememberPromptDisplay(
+      [{ original: "Same prompt", translated: "T:Same prompt" }],
+      { contextKey: "inner-acp-session" },
+    );
+    const handler = createTranslateHandler(deps);
+    await expect(
+      handler({ text: "Same prompt", direction: "user-to-agent", sessionKey: "agent-1" }),
+    ).resolves.toEqual({ text: "T:Same prompt" });
+    // The session's own scope still wins when it is addressable.
+    await translator.rememberPromptDisplay(
+      [{ original: "Same prompt", translated: "T:own prompt" }],
+      { contextKey: "agent-1" },
+    );
+    await expect(
+      handler({ text: "Same prompt", direction: "user-to-agent", sessionKey: "agent-1" }),
+    ).resolves.toEqual({ text: "T:own prompt" });
   });
 
   it("stays standalone when the setting is off or no context key is passed", async () => {
@@ -837,6 +988,30 @@ describe("display translation batching", () => {
     ]);
     expect(calls).toHaveLength(2);
     expect(calls.every((call) => !call.user.includes("<ti n="))).toBe(true);
+  });
+
+  it("translates identical texts once inside a batched call", async () => {
+    const calls: DisplayCall[] = [];
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: displayFetch(calls, (text) => `DE:${text}`),
+    });
+    const events: Array<{ index: number; text: string; done: boolean }> = [];
+    await expect(
+      translator.translateMany(["Same reply", "Other", "Same reply"], "agent-to-user", {
+        onItem: (index, update) => {
+          events.push({ index, text: update.text, done: update.done });
+        },
+      }),
+    ).resolves.toEqual(["DE:Same reply", "DE:Other", "DE:Same reply"]);
+    expect(calls).toHaveLength(1);
+    // The duplicate text was packed once, not twice.
+    expect(calls[0]?.user.match(/<ti n=/g) ?? []).toHaveLength(2);
+    // Every occurrence, the duplicate included, reports one completion.
+    expect(events.filter((event) => event.done).map((event) => event.index)).toEqual([0, 1, 2]);
+    // A later single-item request for the same text is a cache hit.
+    await expect(translator.translate("Same reply", "agent-to-user")).resolves.toBe("DE:Same reply");
+    expect(calls).toHaveLength(1);
   });
 
   it("caches each batched item under the single-item key", async () => {

@@ -203,11 +203,14 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     // wire protocol, so switching providers invalidates), reasoning effort,
     // and text.
     // Editing settings invalidates old entries instead of serving stale
-    // translations. On the context path the current memory digest joins the
-    // key: a memory-conditioned result must not leak into standalone or
-    // other-memory requests, and a compaction (memory changes) starts a new
-    // cache epoch. Turns stay out of the key — within one memory epoch the
-    // first rendering of a text wins, which itself serves consistency.
+    // translations. On the context path the session's scope key joins the
+    // key: a translation conditioned on one session's transcript must not
+    // leak into another session's (or a standalone) request. The memory
+    // digest deliberately stays OUT: compaction rewrites the memory, and a
+    // memory-bearing key would invalidate every cached translation of that
+    // session the moment it compacted — re-billing the whole session on its
+    // next open. Turns stay out of the key too; within one session the first
+    // rendering of a text wins, which itself serves consistency.
     const key = cacheKey({
       text,
       direction,
@@ -217,7 +220,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       endpointModel: values.endpointModel,
       endpointProtocol: values.endpointProtocol,
       reasoningEffort: values.translationReasoningEffort,
-      contextMemory: snapshot?.memory,
+      ...(useContext ? { scopeKey: contextKey } : {}),
     });
     const cached = cache.get(key);
     // get() refreshes recency inside the store; a hit skips the endpoint.
@@ -307,19 +310,28 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     return translated;
   }
 
-  function promptDisplayMemory(values: TranslateSettingsValues, contextKey?: string): string | undefined {
-    if (deps.context === undefined || contextKey === undefined || !values.translationContextEnabled) {
-      return undefined;
-    }
-    return deps.context.snapshot(contextKey, "user-to-agent", {
-      hardCapChars: values.translationContextMaxChars * 2,
-    }).memory;
+  /**
+   * Cache scope for one user→agent display translation: the session key when
+   * the context path is active, undefined for standalone translations. The
+   * memory digest deliberately stays out of the key (see cacheKey's
+   * scopeKey): compaction rewrites the memory, so a memory-bearing key would
+   * re-bill every prompt display of a compacted session on its next open.
+   */
+  function promptDisplayScope(
+    values: TranslateSettingsValues,
+    contextKey?: string,
+  ): string | undefined {
+    return deps.context !== undefined &&
+      contextKey !== undefined &&
+      values.translationContextEnabled
+      ? contextKey
+      : undefined;
   }
 
   return {
     async rememberPromptDisplay(fragments, options) {
       const values = await deps.loadConfig();
-      const memory = promptDisplayMemory(values, options?.contextKey);
+      const scope = promptDisplayScope(values, options?.contextKey);
       // Live rows may omit attachment JSON that replayed rows retain.
       const prose = fragments.filter((fragment) => !isSerializedAttachment(fragment.original));
       const variants = prose.length === fragments.length ? [fragments] : [fragments, prose];
@@ -328,12 +340,28 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         const translated = variant.map((fragment) => fragment.translated).join("\n").trim();
         const parts = promptTranslationParts(original);
         if (parts === null) continue;
-        cache.set(promptDisplayKey(values, parts.body, memory), translated.slice(parts.prefix.length));
+        const display = translated.slice(parts.prefix.length);
+        cache.set(promptDisplayKey(values, parts.body, scope), display);
+        if (scope !== undefined) {
+          // Scope-free mirror. The prompt path and the display path do not
+          // always agree on a session identity: the ACP proxy keys by its
+          // inner ACP session id (the connector cannot see the paseo agent
+          // id), while the client display path keys by the agent id. Without
+          // the mirror, an ACP prompt's own-scope entry is unreadable from
+          // the display path and the prompt would be translated a second
+          // time. Read only after this session's own entry misses (see
+          // restorePromptDisplay), so per-session terminology still wins
+          // whenever it is addressable.
+          cache.set(promptDisplayKey(values, parts.body), display);
+        }
       }
     },
     async restorePromptDisplay(text, options) {
       const values = await deps.loadConfig();
-      return cache.get(promptDisplayKey(values, text, promptDisplayMemory(values, options?.contextKey)));
+      const scope = promptDisplayScope(values, options?.contextKey);
+      const own = cache.get(promptDisplayKey(values, text, scope));
+      if (own !== undefined || scope === undefined) return own;
+      return cache.get(promptDisplayKey(values, text));
     },
     async translate(text, direction, options) {
       const prepared = await setup(text, direction, options?.contextKey);
@@ -482,13 +510,46 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         }
       };
 
-      const pendingTexts = pending.map((index) => texts[index] ?? "");
+      // Identical source texts must be translated once, not once per
+      // occurrence: a session open or a repeated agent line parks the same
+      // text in several jobs, and packing duplicates would bill the endpoint
+      // twice for byte-identical content. Deduped here — before packing — so
+      // each unique miss is one translation (or one batch item) and every
+      // duplicate copies its result. Cache hits already resolved above, so
+      // duplicates of a miss are always misses too.
+      const unique: number[] = [];
+      const duplicates: number[][] = [];
+      const positionByText = new Map<string, number>();
+      for (const index of pending) {
+        const text = texts[index] ?? "";
+        const position = positionByText.get(text);
+        if (position === undefined) {
+          positionByText.set(text, unique.length);
+          unique.push(index);
+          duplicates.push([]);
+        } else {
+          duplicates[position]?.push(index);
+        }
+      }
+
+      const pendingTexts = unique.map((index) => texts[index] ?? "");
       const packs = packTranslationBatches(pendingTexts);
       let offset = 0;
       for (const pack of packs) {
-        const packIndexes = pending.slice(offset, offset + pack.length);
+        const packIndexes = unique.slice(offset, offset + pack.length);
         offset += pack.length;
         await runPack(packIndexes);
+      }
+      // Fan each unique translation out to its duplicates: same result, one
+      // completion event each, no second endpoint call.
+      for (let position = 0; position < unique.length; position += 1) {
+        const source = unique[position];
+        if (source === undefined) continue;
+        const translated = results[source];
+        for (const duplicate of duplicates[position] ?? []) {
+          results[duplicate] = translated;
+          onItem?.(duplicate, { text: translated, done: true });
+        }
       }
       return results;
     },
@@ -748,11 +809,17 @@ interface CacheKeyInput {
   endpointProtocol: string;
   reasoningEffort: string;
   /**
-   * Compacted memory of the session transcript when the request runs on the
-   * context path; undefined (field omitted) keeps the standalone key shape
-   * compatible with cache files written before transcripts existed.
+   * Session scope (agent id for the direct providers and the client display
+   * path; the inner ACP session id for the ACP proxy) when the request runs
+   * on the context path. Keeps one session's translations out of another
+   * session's namespace. The compacted memory digest deliberately does NOT
+   * join the key: compaction rewrites the memory mid-session's-life, and a
+   * memory-bearing key would drop every cached translation of that session —
+   * re-billing the whole conversation on its next open. undefined (field
+   * omitted) keeps the standalone key shape compatible with cache files
+   * written before transcripts existed.
    */
-  contextMemory?: string;
+  scopeKey?: string;
 }
 
 /**
@@ -770,7 +837,7 @@ function cacheKey(input: CacheKeyInput): string {
     protocol: input.endpointProtocol,
     effort: input.reasoningEffort,
     prompt: digest(input.systemPrompt),
-    ...(input.contextMemory !== undefined ? { memory: digest(input.contextMemory) } : {}),
+    ...(input.scopeKey !== undefined ? { scope: input.scopeKey } : {}),
     text: digest(input.text),
   });
 }
@@ -779,7 +846,11 @@ function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function promptDisplayKey(values: TranslateSettingsValues, text: string, contextMemory?: string): string {
+function promptDisplayKey(
+  values: TranslateSettingsValues,
+  text: string,
+  scopeKey?: string,
+): string {
   const pair = resolveLanguagePair(values, "user-to-agent");
   return `prompt-display:v1:${cacheKey({
     text,
@@ -790,6 +861,6 @@ function promptDisplayKey(values: TranslateSettingsValues, text: string, context
     endpointModel: values.endpointModel,
     endpointProtocol: values.endpointProtocol,
     reasoningEffort: values.translationReasoningEffort,
-    contextMemory,
+    scopeKey,
   })}`;
 }

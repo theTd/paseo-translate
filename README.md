@@ -31,7 +31,40 @@ Display jobs that start within 80ms for the same session share one tagged
 endpoint call (up to 40 items / 80k source chars). A lone live reply still
 streams. If the model does not return the item tags, that batch falls back
 to per-item streaming. Each result is cached under the single-item key, so
-a later unary hit does not retranslate.
+a later unary hit does not retranslate. Identical source texts are translated
+once per batch and shared, so a repeated line or a re-rendered item never
+bills the endpoint twice.
+
+## Notification previews
+
+Enable **Translate notification previews** in the plugin settings (off by default)
+to translate completion and permission notification bodies for all three Translate
+providers. This runs on the daemon, including when the app is closed, and does not
+require platform changes. It is independent of **Translate replies**.
+
+Permission summaries are translated before the request is emitted; the underlying
+input and actions are preserved. Completion waits for one bounded translation of
+at most 2000 source characters before emitting a hidden preview and ending the
+turn. Original replies and native agent transcripts stay intact. The separator
+and synthetic assistant preview are hidden in the app, but appear in timeline API
+results; APIs that read the last assistant message will receive the preview.
+Native transcript replay does not regenerate notification previews.
+
+Failed or empty translations use a generic message in the configured user language
+for supported language tags (`ar`, `de`, `en`, `es`, `fr`, `ja`, `ko`, `pt`, `ru`,
+`zh`, including regional variants); other languages use `...` rather than exposing
+the original. Interrupting or closing a session discards pending previews.
+
+Paseo still owns delivery and its fixed notification titles. This setting cannot
+translate those titles or suppress a notification on translation failure. Agents
+using other providers are unaffected, including when **Translate every agent's
+timeline** is enabled. The host must support the `timeline.plugin` capability.
+
+For an optional integration check against a local Paseo source checkout:
+
+```bash
+node scripts/verify-notification-host.mjs <paseo-checkout>
+```
 
 ## Session translation context
 
@@ -44,12 +77,16 @@ the session env at open), so the prompt path and the in-app reply path share
 one transcript that survives resumes and daemon restarts. The ACP proxy
 scopes by the inner ACP session id instead — restart-stable via
 `session/load`, but separate from the display path's transcript. Exact-match
-cache hits still short-circuit without touching the endpoint; cached entries
-are namespaced by the current memory, so a compaction starts a new cache
-epoch and compacted terminology never leaks into another memory. Within one
-memory epoch — fresh sessions whose memory is still empty included — a
-repeated text can be served from the shared cache regardless of which
-session's turns conditioned the first rendering.
+cache hits still short-circuit without touching the endpoint. Cached entries
+are namespaced by the session scope (plus every output-affecting setting),
+never by the memory digest: the compacted memory is rewritten as a session
+ages, and a memory-bearing key would drop every cached translation of that
+session — re-billing the whole conversation the next time it is opened. So
+each text is translated once per session; a compaction changes only how later
+*misses* are conditioned, never the addressability of what was already
+translated. Terminology still cannot leak between sessions: the scope in the
+key keeps each session's namespace separate (standalone translations and
+sessions with context off live in their own scope-free namespace).
 
 When a session's transcript has been idle for **Compaction idle time**
 (default 30 minutes) AND exceeds **History compaction threshold** (default
