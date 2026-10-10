@@ -54716,6 +54716,7 @@ async function dispatch(input2, context, capabilities) {
       const session = context.sessions.get(input2.sessionId);
       if (session !== void 0 && session.query !== null) {
         session.interrupted = true;
+        settleAutonomousTurn(session, context.emit, "completed");
         session.sink.discardPendingSteers();
         await session.query.interrupt().catch(() => void 0);
         session.subagents?.cancelRunningForegroundTasks();
@@ -54864,6 +54865,7 @@ async function resetQuery(session, emit) {
   if (active !== null) {
     emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
   }
+  settleAutonomousTurn(session, emit, "canceled");
 }
 async function openSession(input2, context, capabilities) {
   if (context.sessions.has(input2.sessionId)) {
@@ -54907,6 +54909,7 @@ async function openSession(input2, context, capabilities) {
     pump: null,
     claudeSessionId: readStoredSessionId(input2.persistence),
     active: null,
+    autonomous: null,
     interrupted: false,
     closed: false,
     detached: false,
@@ -55163,6 +55166,7 @@ async function promptSession(input2, context) {
   const turnId = (0, import_node_crypto6.randomUUID)();
   session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
   session.interrupted = false;
+  settleAutonomousTurn(session, context.emit, "completed");
   context.emit({
     type: "session.prompt_result",
     sessionId: input2.sessionId,
@@ -55215,6 +55219,7 @@ async function commandSession(input2, context, session) {
   const turnId = (0, import_node_crypto6.randomUUID)();
   session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
   session.interrupted = false;
+  settleAutonomousTurn(session, context.emit, "completed");
   context.emit({
     type: "session.prompt_result",
     sessionId: input2.sessionId,
@@ -55877,6 +55882,9 @@ function finishDeadQuery(session, message, emit) {
       });
     }
   }
+  if (session.autonomous !== null) {
+    settleAutonomousTurn(session, emit, wasInterrupted ? "canceled" : "failed", wasInterrupted ? void 0 : message);
+  }
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
   else session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
@@ -55894,8 +55902,32 @@ function finishDeadQuery(session, message, emit) {
     });
   }
 }
+function isAssistantishSdkMessage(message) {
+  return message.type === "assistant" || message.type === "stream_event" || message.type === "tool_progress" || message.type === "system" && message.subtype === "task_notification";
+}
+function startAutonomousTurn(session, emit) {
+  if (session.autonomous !== null) return;
+  const turnId = (0, import_node_crypto6.randomUUID)();
+  session.autonomous = { turnId };
+  emit({ type: "session.turn", sessionId: session.id, turnId, state: "started" });
+}
+function settleAutonomousTurn(session, emit, state, error62) {
+  const autonomous = session.autonomous;
+  if (autonomous === null) return;
+  session.autonomous = null;
+  emit({
+    type: "session.turn",
+    sessionId: session.id,
+    turnId: autonomous.turnId,
+    state,
+    ...error62 !== void 0 ? { error: { message: error62 } } : {}
+  });
+}
 function handleSdkMessage(session, message, context) {
   const emit = (event) => context.emit(event);
+  if (session.active === null && !session.interrupted && isAssistantishSdkMessage(message)) {
+    startAutonomousTurn(session, emit);
+  }
   if (session.subagents?.observeSystemMessage(message) === true) return;
   if (message.type === "system") {
     if (message.subtype === "init") void publishCommands(session, context);
@@ -56038,6 +56070,8 @@ function handleSdkMessage(session, message, context) {
           error: { message: missingConversation }
         });
       }
+      settleAutonomousTurn(session, emit, "failed", missingConversation);
+      session.interrupted = false;
       session.detached = true;
       session.abort.abort();
       session.abort = new AbortController();
@@ -56059,7 +56093,19 @@ function handleSdkMessage(session, message, context) {
     session.streamInputTokens = null;
     session.streamOutputTokens = null;
     const active = session.active;
-    if (active === null) return;
+    const wasInterrupted = session.interrupted;
+    session.interrupted = false;
+    if (active === null) {
+      if (wasInterrupted) {
+        settleAutonomousTurn(session, emit, "canceled");
+      } else if (message.subtype === "success" && !message.is_error) {
+        settleAutonomousTurn(session, emit, "completed");
+      } else {
+        const reason = message.subtype === "success" ? message.result : message.errors[0] ?? "Claude turn failed";
+        settleAutonomousTurn(session, emit, "failed", reason);
+      }
+      return;
+    }
     const usage = buildResultUsage(session, message);
     if (usage !== void 0) {
       emit({
@@ -56070,8 +56116,6 @@ function handleSdkMessage(session, message, context) {
       });
     }
     session.active = null;
-    const wasInterrupted = session.interrupted;
-    session.interrupted = false;
     if (wasInterrupted) {
       emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
     } else if (message.subtype === "success" && !message.is_error) {

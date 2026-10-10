@@ -156,6 +156,11 @@ the app after each turn.
   restarts). Permissions pass through to you with Allow/Deny; interrupt maps
   to Claude's interrupt. "Always allow" style permission upgrades from the
   CLI's suggestions are not offered — every request is a plain Allow/Deny.
+- Session-list status tracks background work like the native provider:
+  a backgrounded Task subagent or a background job that outlives its turn
+  keeps the session reporting as running (the provider opens a synthetic
+  autonomous turn the daemon tracks), until the work settles, the next
+  prompt, or an interrupt.
 - Full surface: message/command/image prompts, active-turn steering, slash
   commands reported by the CLI, streaming text and thinking, structured
   tool-call cards (shell/read/write/edit/search/fetch/plan/sub-agent),

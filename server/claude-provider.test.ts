@@ -1232,6 +1232,146 @@ describe("translate claude provider subagents", () => {
   });
 });
 
+describe("translate claude provider background work", () => {
+  /** A backgrounded tool heartbeat, the SDK signal of work outside a turn. */
+  function toolProgress(toolUseId: string): SDKMessage {
+    return {
+      type: "tool_progress",
+      tool_use_id: toolUseId,
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 3,
+      uuid: `tp-${toolUseId}`,
+      session_id: "cs-1",
+    } as unknown as SDKMessage;
+  }
+
+  function rootTurns(events: ProviderEvent[], state: string) {
+    return events.filter(
+      (event): event is Extract<ProviderEvent, { type: "session.turn" }> =>
+        event.type === "session.turn" && event.sessionId === "s" && event.state === state,
+    );
+  }
+
+  it("re-opens a root turn while background work outlives the completed one", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "done");
+      // The turn settled, but a backgrounded job keeps heartbeating.
+      yield toolProgress("tu-job");
+    });
+    await send(promptInput("Start the job"));
+    await waitFor(events, () => rootTurns(events, "started").length === 2);
+    const [foreground, autonomous] = rootTurns(events, "started");
+    expect(autonomous.turnId).not.toBe(foreground.turnId);
+
+    // The next prompt supersedes the autonomous turn before its own starts.
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Check the job", "m-2"));
+    await waitFor(
+      events,
+      (event) => event.type === "session.turn" && event.state === "completed" && event.turnId === autonomous.turnId,
+    );
+    const settledAt = events.findIndex(
+      (event) => event.type === "session.turn" && event.state === "completed" && event.turnId === autonomous.turnId,
+    );
+    const nextStartedAt = events.findIndex(
+      (event) =>
+        event.type === "session.turn" &&
+        event.state === "started" &&
+        event.turnId !== foreground.turnId &&
+        event.turnId !== autonomous.turnId,
+    );
+    expect(nextStartedAt).toBeGreaterThan(settledAt);
+  });
+
+  it("settles the autonomous turn when a later result arrives", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "done");
+      yield taskNotification("t-job", "completed");
+      // A trailing result (background work settling its own request) ends
+      // the autonomous turn instead of leaving the session running forever.
+      yield resultSuccess("cs-1", "background settled");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, () => rootTurns(events, "started").length === 2);
+    const autonomous = rootTurns(events, "started")[1];
+    await waitFor(
+      events,
+      (event) => event.type === "session.turn" && event.state === "completed" && event.turnId === autonomous.turnId,
+    );
+    expect(rootTurns(events, "completed").map((event) => event.turnId)).toContain(autonomous.turnId);
+  });
+
+  it("does not open an autonomous turn while the foreground turn runs", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield toolProgress("tu-fg");
+      yield assistantText("a-1", "arbeite");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(rootTurns(events, "started")).toHaveLength(1);
+    expect(rootTurns(events, "completed")).toHaveLength(1);
+  });
+
+  it("ends the autonomous turn on interrupt without reporting a runtime failure", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "done");
+      yield toolProgress("tu-job");
+      await gate;
+      return END_ITERATOR;
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, () => rootTurns(events, "started").length === 2);
+    const autonomous = rootTurns(events, "started")[1];
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    await waitFor(
+      events,
+      (event) => event.type === "session.turn" && event.state === "completed" && event.turnId === autonomous.turnId,
+    );
+    expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+    (release as unknown as () => void)();
+  });
+
+  it("ignores the trailing activity of a killed request until its result arrives", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fake.use(async function* () {
+      yield assistantText("a-1", "arbeite");
+      await gate;
+      // Notifications for the work the interrupt just stopped must not open
+      // a turn nothing would ever close, wedging the status at running.
+      yield toolProgress("tu-killed");
+      yield resultSuccess("cs-1", "aborted");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "timeline.item");
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    await waitFor(events, (_event) => fake.state.interrupted > 0);
+    (release as unknown as () => void)();
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "canceled");
+    expect(rootTurns(events, "started")).toHaveLength(1);
+  });
+});
+
 describe("translate claude provider extended protocol", () => {
   it("steers the active turn with next priority and reports unavailable when idle", async () => {
     const { fake, events, send } = await createHarness();

@@ -211,6 +211,15 @@ interface ClaudeSession {
   pump: Promise<void> | null;
   claudeSessionId: string | null;
   active: { clientMessageId: string; turnId: string } | null;
+  /**
+   * Native-parity autonomous turn: SDK activity arriving with no open
+   * foreground turn is live work (a backgrounded subagent or job that
+   * outlived its turn, or trailing output), so it re-opens a synthetic
+   * root turn. The daemon tracks it as an autonomous run and keeps the
+   * session listed as running until the work settles, the next prompt,
+   * or an interrupt — mirroring the native provider's wake behavior.
+   */
+  autonomous: { turnId: string } | null;
   interrupted: boolean;
   closed: boolean;
   /** Set while the live query is being swapped out (rewind); the pump then settles silently. */
@@ -436,6 +445,10 @@ async function dispatch(
       const session = context.sessions.get(input.sessionId);
       if (session !== undefined && session.query !== null) {
         session.interrupted = true;
+        // Native parity: interrupt settles an open autonomous turn as
+        // completed; the interrupted flag then blocks the killed request's
+        // trailing notifications until its result arrives.
+        settleAutonomousTurn(session, context.emit, "completed");
         // Discard steers Claude never read first: the SDK would otherwise
         // dequeue one and resume the turn just stopped.
         session.sink.discardPendingSteers();
@@ -637,6 +650,9 @@ async function resetQuery(
   if (active !== null) {
     emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
   }
+  // The torn-down query owns the autonomous turn; the rebuilt one cannot
+  // close it, so settle it here like the foreground turn above.
+  settleAutonomousTurn(session, emit, "canceled");
 }
 
 async function openSession(
@@ -685,6 +701,7 @@ async function openSession(
     pump: null,
     claudeSessionId: readStoredSessionId(input.persistence),
     active: null,
+    autonomous: null,
     interrupted: false,
     closed: false,
     detached: false,
@@ -1034,6 +1051,9 @@ async function promptSession(
   const turnId = randomUUID();
   session.active = { clientMessageId: input.prompt.clientMessageId, turnId };
   session.interrupted = false;
+  // Native parity: a new foreground turn supersedes an open autonomous one
+  // (background work that outlived the previous turn).
+  settleAutonomousTurn(session, context.emit, "completed");
   context.emit({
     type: "session.prompt_result",
     sessionId: input.sessionId,
@@ -1100,6 +1120,9 @@ async function commandSession(
   const turnId = randomUUID();
   session.active = { clientMessageId: input.prompt.clientMessageId, turnId };
   session.interrupted = false;
+  // Native parity: a new foreground turn supersedes an open autonomous one
+  // (background work that outlived the previous turn).
+  settleAutonomousTurn(session, context.emit, "completed");
   context.emit({
     type: "session.prompt_result",
     sessionId: input.sessionId,
@@ -2039,6 +2062,11 @@ function finishDeadQuery(
       });
     }
   }
+  // A dead process ends backgrounded work too: its autonomous turn settles
+  // alongside the foreground one (canceled when the user interrupted).
+  if (session.autonomous !== null) {
+    settleAutonomousTurn(session, emit, wasInterrupted ? "canceled" : "failed", wasInterrupted ? undefined : message);
+  }
   // An interrupt ends foreground children; a dead process fails everything
   // still running, including backgrounded work that outlived its turn.
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
@@ -2059,12 +2087,70 @@ function finishDeadQuery(
   }
 }
 
+/**
+ * Native parity for the SDK messages that mark live work outside a turn
+ * (the native provider's isAssistantishMessage): a backgrounded subagent
+ * or job heartbeats through tool_progress and settles with a
+ * task_notification; trailing assistant output and stream events count
+ * too. task_started/task_updated/task_progress carry no such signal.
+ */
+function isAssistantishSdkMessage(message: SDKMessage): boolean {
+  return (
+    message.type === "assistant" ||
+    message.type === "stream_event" ||
+    message.type === "tool_progress" ||
+    (message.type === "system" && message.subtype === "task_notification")
+  );
+}
+
+/**
+ * Mirrors the native provider's autonomous turn. Without it, a background
+ * subagent or job that outlives its turn updates only timelines and
+ * subagent tracks, so the daemon-side agent settles to idle and the
+ * session list shows a still-working session as stopped. Opening a
+ * synthetic root turn makes the daemon track an autonomous run and keep
+ * the session's status "running" until the turn settles.
+ */
+function startAutonomousTurn(session: ClaudeSession, emit: (event: ProviderEvent) => void): void {
+  if (session.autonomous !== null) return;
+  const turnId = randomUUID();
+  session.autonomous = { turnId };
+  emit({ type: "session.turn", sessionId: session.id, turnId, state: "started" });
+}
+
+/** Ends the open autonomous turn, if any, with the given terminal state. */
+function settleAutonomousTurn(
+  session: ClaudeSession,
+  emit: (event: ProviderEvent) => void,
+  state: "completed" | "failed" | "canceled",
+  error?: string,
+): void {
+  const autonomous = session.autonomous;
+  if (autonomous === null) return;
+  session.autonomous = null;
+  emit({
+    type: "session.turn",
+    sessionId: session.id,
+    turnId: autonomous.turnId,
+    state,
+    ...(error !== undefined ? { error: { message: error } } : {}),
+  });
+}
+
 function handleSdkMessage(
   session: ClaudeSession,
   message: SDKMessage,
   context: DispatchContext,
 ): void {
   const emit = (event: ProviderEvent) => context.emit(event);
+  // Native parity: SDK activity with no open foreground turn is live work —
+  // a backgrounded subagent or job that outlived its turn, or trailing
+  // output. Open an autonomous turn so the daemon keeps the session listed
+  // as running; the trailing garbage of a killed request (session.interrupted)
+  // must not wake it, or a turn nothing closes wedges the status at running.
+  if (session.active === null && !session.interrupted && isAssistantishSdkMessage(message)) {
+    startAutonomousTurn(session, emit);
+  }
   // The Task protocol owns subagent identity and status; sidechain frames
   // only feed the timelines of children it declared.
   if (session.subagents?.observeSystemMessage(message) === true) return;
@@ -2254,6 +2340,10 @@ function handleSdkMessage(
           error: { message: missingConversation },
         });
       }
+      // The rebuilt query starts from scratch: an autonomous turn from the
+      // dead conversation cannot be closed by it, so settle it here.
+      settleAutonomousTurn(session, emit, "failed", missingConversation);
+      session.interrupted = false;
       // Detach so the iterator ending does not emit runtime_failed and
       // kill the daemon session. The next prompt rebuilds without resume.
       session.detached = true;
@@ -2280,7 +2370,24 @@ function handleSdkMessage(
     session.streamInputTokens = null;
     session.streamOutputTokens = null;
     const active = session.active;
-    if (active === null) return;
+    // Native parity: the interrupt flag is consumed by ANY result, and a
+    // result arriving with only an autonomous turn open settles it.
+    const wasInterrupted = session.interrupted;
+    session.interrupted = false;
+    if (active === null) {
+      if (wasInterrupted) {
+        settleAutonomousTurn(session, emit, "canceled");
+      } else if (message.subtype === "success" && !message.is_error) {
+        settleAutonomousTurn(session, emit, "completed");
+      } else {
+        const reason =
+          message.subtype === "success"
+            ? message.result
+            : (message.errors[0] ?? "Claude turn failed");
+        settleAutonomousTurn(session, emit, "failed", reason);
+      }
+      return;
+    }
     const usage = buildResultUsage(session, message);
     if (usage !== undefined) {
       emit({
@@ -2291,8 +2398,6 @@ function handleSdkMessage(
       });
     }
     session.active = null;
-    const wasInterrupted = session.interrupted;
-    session.interrupted = false;
     if (wasInterrupted) {
       emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
     } else if (message.subtype === "success" && !message.is_error) {
