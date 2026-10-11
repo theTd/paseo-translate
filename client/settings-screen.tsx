@@ -44,6 +44,7 @@ interface Draft {
   contextMaxCharsText: string;
   translatePrompts: boolean;
   translateResponses: boolean;
+  translateNotifications: boolean;
   translateReasoning: boolean;
   translateAllTimelines: boolean;
   translationContextEnabled: boolean;
@@ -72,6 +73,7 @@ function draftFrom(settings: ReadySettings): Draft {
     contextMaxCharsText: String(values.translationContextMaxChars),
     translatePrompts: values.translatePrompts,
     translateResponses: values.translateResponses,
+    translateNotifications: values.translateNotifications,
     translateReasoning: values.translateReasoning,
     translateAllTimelines: values.translateAllTimelines,
     translationContextEnabled: values.translationContextEnabled,
@@ -221,6 +223,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     (translateReasoning: boolean) => patch({ translateReasoning }),
     [patch],
   );
+  const toggleNotifications = useCallback(
+    (translateNotifications: boolean) => patch({ translateNotifications }),
+    [patch],
+  );
   const toggleAllTimelines = useCallback(
     (translateAllTimelines: boolean) => patch({ translateAllTimelines }),
     [patch],
@@ -288,6 +294,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         codexExecutablePath: active.codexExecutablePath,
         translatePrompts: active.translatePrompts,
         translateResponses: active.translateResponses,
+        translateNotifications: active.translateNotifications,
         translateReasoning: active.translateReasoning,
         translateAllTimelines: active.translateAllTimelines,
         translationContextEnabled: active.translationContextEnabled,
@@ -521,6 +528,12 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           hint={t("translateReasoningHint")}
           value={active.translateReasoning}
           onValueChange={toggleReasoning}
+          disabled={settings.saving}
+        />
+        <SettingsSwitch
+          label={t("translateNotifications")}
+          value={active.translateNotifications}
+          onValueChange={toggleNotifications}
           disabled={settings.saving}
         />
         <SettingsSwitch

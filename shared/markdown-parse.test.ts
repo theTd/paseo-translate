@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseInline, parseMarkdownBlocks } from "./markdown-parse";
+import { parseInline, parseMarkdownBlocks } from "../shared/markdown-parse";
 
 describe("markdown blocks", () => {
   it("parses headings, paragraphs, and rules", () => {

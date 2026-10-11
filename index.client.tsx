@@ -10,6 +10,10 @@ import {
 import { TranslateSettingsScreen } from "./client/settings-screen";
 import { detectSystemLocale, translate } from "./client/i18n";
 import {
+  NOTIFICATION_BOUNDARY_KIND,
+  notificationBoundarySchema,
+} from "./shared/notification-preview";
+import {
   TRANSLATED_MESSAGE_KIND,
   TRANSLATED_MESSAGE_VERSION,
   TRANSLATED_REASONING_KIND,
@@ -22,6 +26,12 @@ import {
 } from "./shared/translate";
 
 export default function contribute(client: PluginClientContext) {
+  client.addTimelineRenderer({
+    kind: NOTIFICATION_BOUNDARY_KIND,
+    version: 1,
+    schema: notificationBoundarySchema,
+    Component: () => null,
+  });
   client.addTimelineTransformer({
     id: "translate-assistant",
     query: { itemType: "assistant_message" },

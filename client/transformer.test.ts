@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { NOTIFICATION_PREVIEW_PREFIX } from "../shared/notification-preview";
 import {
   translatedMessageDataSchema,
   translatedReasoningDataSchema,
@@ -11,6 +12,10 @@ import {
 } from "./transformer";
 
 describe("translate assistant transformer", () => {
+  it("hides notification previews without translating or displaying them again", () => {
+    expect(transformAssistantMessage({ item: { text: "Translated preview",
+      messageId: `${NOTIFICATION_PREVIEW_PREFIX}turn` }, phase: "complete" })).toEqual({ items: [] });
+  });
   it("passes the accumulated text through with the streaming phase", () => {
     const result = transformAssistantMessage({
       item: { text: "Guten Tag", messageId: "m-1" },

@@ -10,6 +10,7 @@ import {
   TRANSLATED_USER_MESSAGE_VERSION,
 } from "../shared/translate";
 import { promptTranslationParts } from "../shared/prompt-text";
+import { isNotificationPreview } from "../shared/notification-preview";
 
 /**
  * Passthrough mapping from a canonical assistant message to the plugin item
@@ -25,6 +26,7 @@ export function transformAssistantMessage(input: {
   item: { text: string; messageId?: string };
   phase: "streaming" | "complete";
 }): PluginTimelineTransformResult | undefined {
+  if (isNotificationPreview(input.item.messageId)) return { items: [] };
   if (isProviderImageMarkdown(input.item.text)) return undefined;
   return {
     items: [

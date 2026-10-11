@@ -32,6 +32,7 @@ const values: TranslateSettingsValues = {
   codexExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
+  translateNotifications: false,
   translateReasoning: false,
   translateAllTimelines: false,
   translationContextEnabled: true,

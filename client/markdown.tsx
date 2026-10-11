@@ -4,7 +4,7 @@ import {
   parseMarkdownBlocks,
   type BlockNode,
   type InlineNode,
-} from "./markdown-parse";
+} from "../shared/markdown-parse";
 
 export interface MarkdownColors {
   foreground: string;

@@ -148,6 +148,8 @@ export const translateSettings = defineSettings({
     codexExecutablePath: z.string().trim().default(""),
     translatePrompts: z.boolean().default(true),
     translateResponses: z.boolean().default(true),
+    /** Translate provider notification previews on the daemon, independently of timeline display. */
+    translateNotifications: z.boolean().default(false),
     translateAllTimelines: z.boolean().default(false),
     /**
      * Session-scoped translation context: each agent session keeps its own

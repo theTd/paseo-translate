@@ -17,6 +17,7 @@ import {
   defaultTranslationCacheDirectory,
 } from "./server/translation-cache-store";
 import { createTranslationContextManager } from "./server/translation-context";
+import { withNotificationTranslation } from "./server/notification-provider";
 import {
   assertConfigured,
   TRANSLATE_AGENT_ID_ENV,
@@ -72,9 +73,9 @@ export default function contribute(server: PluginServerContext) {
     if (!(TRANSLATE_PROVIDER_IDS as readonly string[]).includes(request.provider)) return;
     return { ...request, env: { ...request.env, [TRANSLATE_AGENT_ID_ENV]: request.agentId } };
   });
-  server.registerProvider(createTranslateProvider(deps));
-  server.registerProvider(createTranslateClaudeProvider(deps));
-  server.registerProvider(createTranslateCodexProvider(deps));
+  server.registerProvider(withNotificationTranslation(createTranslateProvider(deps), deps));
+  server.registerProvider(withNotificationTranslation(createTranslateClaudeProvider(deps), deps));
+  server.registerProvider(withNotificationTranslation(createTranslateCodexProvider(deps), deps));
   server.handle(translateTextRpc, createTranslateHandler(deps));
   const streamManager = createTranslateStreamManager(deps);
   server.handle(translateStreamStartRpc, createTranslateStreamStartHandler(streamManager));
