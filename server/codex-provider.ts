@@ -33,6 +33,7 @@ import {
   nonEmptyString,
   normalizeCodexQuestionPrompts,
   readThreadId,
+  readTurnStatus,
   readTurnId,
   reasoningTextFromItem,
   threadItemToTimeline,
@@ -151,7 +152,16 @@ interface CodexSession {
   client: CodexClientLike | null;
   threadId: string | null;
   nativeTurnId: string | null;
+  supersededNativeTurnIds: Set<string>;
   active: { clientMessageId: string; turnId: string } | null;
+  /**
+   * Native parity: root-thread turn activity arriving with no open foreground
+   * turn (a turn/start ack timeout whose turn still started server-side) is
+   * live work, so a synthetic turn is opened that the daemon tracks as a
+   * running session until the turn/completed, the next prompt, an interrupt,
+   * a rewind, or a process death.
+   */
+  autonomous: { turnId: string } | null;
   interrupted: boolean;
   closed: boolean;
   pendingPermissions: Map<string, PendingPermission>;
@@ -478,7 +488,9 @@ async function openSession(
     client: null,
     threadId: storedThreadId,
     nativeTurnId: null,
+    supersededNativeTurnIds: new Set(),
     active: null,
+    autonomous: null,
     interrupted: false,
     closed: false,
     pendingPermissions: new Map(),
@@ -802,6 +814,10 @@ async function startTurn(
   const turnId = randomUUID();
   session.active = { clientMessageId, turnId };
   session.interrupted = false;
+  // Native parity: a new foreground turn supersedes an open autonomous one
+  // (out-of-band work that outlived the previous turn's local state).
+  settleAutonomousTurn(session, context, "completed");
+  if (session.nativeTurnId !== null) session.supersededNativeTurnIds.add(session.nativeTurnId);
   session.nativeTurnId = null;
   session.pendingAssistantBoundary = false;
   session.pendingAgentMessages.clear();
@@ -836,6 +852,8 @@ async function startTurn(
   try {
     await client.request("turn/start", params, TURN_START_TIMEOUT_MS);
   } catch (error) {
+    // Notifications may finish the turn before its start acknowledgement fails.
+    if (session.active?.turnId !== turnId) return;
     dropUnconsumedAnchors(session, clientMessageId);
     session.active = null;
     context.emit({
@@ -845,6 +863,9 @@ async function startTurn(
       state: "failed",
       error: { message: describe(error) },
     });
+    if (session.nativeTurnId !== null && !session.interrupted) {
+      startAutonomousTurn(session, context);
+    }
   }
 }
 
@@ -931,17 +952,26 @@ async function interruptSession(
   context: DispatchContext | null = null,
 ): Promise<void> {
   session.interrupted = true;
+  const autonomous = session.autonomous;
   dropUnconsumedAnchors(session);
   denyPending(session, context);
   const client = session.client;
   const threadId = session.threadId;
   const nativeTurnId = session.nativeTurnId;
-  if (client === null || threadId === null || nativeTurnId === null) return;
   try {
-    await client.request("turn/interrupt", { threadId, turnId: nativeTurnId }, INTERRUPT_TIMEOUT_MS);
+    if (client !== null && threadId !== null && nativeTurnId !== null) {
+      await client.request("turn/interrupt", { threadId, turnId: nativeTurnId }, INTERRUPT_TIMEOUT_MS);
+    }
   } catch (error) {
-    if (isIdleInterruptError(error)) return;
-    throw error;
+    if (!isIdleInterruptError(error)) {
+      if (session.nativeTurnId === nativeTurnId) session.interrupted = false;
+      throw error;
+    }
+  }
+  // Keep live work tracked when interruption fails. Completion notifications
+  // may already have settled this turn while the interrupt was in flight.
+  if (context !== null && session.autonomous === autonomous) {
+    settleAutonomousTurn(session, context, "canceled");
   }
 }
 
@@ -952,6 +982,10 @@ function handleClientExit(session: CodexSession, error: Error, context: Dispatch
   const active = session.active;
   session.active = null;
   session.nativeTurnId = null;
+  session.supersededNativeTurnIds.clear();
+  // A dead process ends out-of-band work too: its autonomous turn settles
+  // alongside the foreground one.
+  settleAutonomousTurn(session, context, "failed", error.message);
   if (active !== null) {
     context.emit({
       type: "session.turn",
@@ -978,21 +1012,46 @@ function handleNotification(
   context: DispatchContext,
 ): void {
   const record = toObjectRecord(params);
+  // Native parity (resolveCodexThreadRoute): a notification whose threadId is
+  // neither absent nor the session's root thread is sub-agent activity — its
+  // turn lifecycle must not settle the root turn or overwrite its native
+  // turn id, and its text must not surface as root replies.
+  const notificationThreadId =
+    record !== null && typeof record.threadId === "string" && record.threadId.length > 0
+      ? record.threadId
+      : null;
+  const childThread =
+    notificationThreadId !== null &&
+    session.threadId !== null &&
+    notificationThreadId !== session.threadId;
   if (method === "turn/started") {
-    session.nativeTurnId = readTurnId(params);
+    if (childThread) return;
+    const nativeTurnId = readTurnId(params);
+    if (nativeTurnId !== null && session.supersededNativeTurnIds.has(nativeTurnId)) return;
+    session.nativeTurnId = nativeTurnId;
+    // Native parity: a root-thread turn starting with no open foreground
+    // turn is live work the plugin is not tracking (a turn/start ack timeout
+    // whose turn still started server-side, or trailing activity after a
+    // settled turn). Open a synthetic turn so the daemon keeps the session
+    // listed as running. Trailing activity of a killed request (interrupted)
+    // must not wake it, or a turn nothing closes wedges the status.
+    if (session.active === null && !session.interrupted) {
+      startAutonomousTurn(session, context);
+    }
     if (session.interrupted) void interruptSession(session, context);
     return;
   }
   if (method === "turn/completed") {
+    if (childThread) return;
     finishTurn(session, record, context);
     return;
   }
   if (method === "item/agentMessage/delta") {
-    appendTextDelta(session, record, "assistant", context);
+    if (!childThread) appendTextDelta(session, record, "assistant", context);
     return;
   }
   if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/delta") {
-    appendTextDelta(session, record, "reasoning", context);
+    if (!childThread) appendTextDelta(session, record, "reasoning", context);
     return;
   }
   if (method === "thread/tokenUsage/updated") {
@@ -1008,7 +1067,7 @@ function handleNotification(
     return;
   }
   if (method === "item/started" || method === "item/completed") {
-    handleItemLifecycle(session, record, method === "item/completed", context);
+    handleItemLifecycle(session, record, method === "item/completed", childThread, context);
     return;
   }
   if (method === "turn/plan/updated") {
@@ -1021,22 +1080,35 @@ function finishTurn(
   record: Record<string, unknown> | null,
   context: DispatchContext,
 ): void {
+  const nativeTurnId = readTurnId(record);
+  if (nativeTurnId !== null) {
+    if (session.supersededNativeTurnIds.delete(nativeTurnId)) return;
+    if (session.nativeTurnId !== null && nativeTurnId !== session.nativeTurnId) return;
+  }
   const active = session.active;
+  const autonomous = session.autonomous;
   session.active = null;
+  session.autonomous = null;
   session.nativeTurnId = null;
   session.pendingAgentMessages.clear();
   session.pendingReasoning.clear();
   dropUnconsumedAnchors(session);
-  const status = typeof record?.status === "string" ? record.status : "completed";
+  const { status, errorMessage } = readTurnStatus(record);
+  // Native parity: the interrupt flag is consumed by ANY turn/completed, so
+  // the trailing output of a killed request cannot wedge the status.
   session.interrupted = false;
-  if (active === null) return;
+  // The open turn settles the same way whether it is foreground or the
+  // synthetic autonomous turn a late turn/started opened.
+  const openTurn = active ?? autonomous;
+  if (openTurn === null) return;
+  const turnId = openTurn.turnId;
   if (status === "failed") {
     context.emit({
       type: "session.turn",
       sessionId: session.id,
-      turnId: active.turnId,
+      turnId,
       state: "failed",
-      error: { message: nonEmptyString(record?.errorMessage) ?? "Codex turn failed" },
+      error: { message: errorMessage ?? "Codex turn failed" },
     });
     return;
   }
@@ -1044,7 +1116,7 @@ function finishTurn(
     context.emit({
       type: "session.turn",
       sessionId: session.id,
-      turnId: active.turnId,
+      turnId,
       state: "canceled",
     });
     return;
@@ -1052,8 +1124,42 @@ function finishTurn(
   context.emit({
     type: "session.turn",
     sessionId: session.id,
-    turnId: active.turnId,
+    turnId,
     state: "completed",
+  });
+}
+
+/**
+ * Mirrors the native adapter's out-of-band turn handling: the native
+ * provider emits turn_started for root-thread turns regardless of its
+ * foreground bookkeeping, so a session keeps reporting as running while
+ * untracked work is live. Without this synthetic turn the daemon-side agent
+ * settles to idle and the session list shows a still-working session as
+ * stopped.
+ */
+function startAutonomousTurn(session: CodexSession, context: DispatchContext): void {
+  if (session.autonomous !== null) return;
+  const turnId = randomUUID();
+  session.autonomous = { turnId };
+  context.emit({ type: "session.turn", sessionId: session.id, turnId, state: "started" });
+}
+
+/** Ends the open autonomous turn, if any, with the given terminal state. */
+function settleAutonomousTurn(
+  session: CodexSession,
+  context: DispatchContext,
+  state: "completed" | "failed" | "canceled",
+  error?: string,
+): void {
+  const autonomous = session.autonomous;
+  if (autonomous === null) return;
+  session.autonomous = null;
+  context.emit({
+    type: "session.turn",
+    sessionId: session.id,
+    turnId: autonomous.turnId,
+    state,
+    ...(error !== undefined ? { error: { message: error } } : {}),
   });
 }
 
@@ -1153,12 +1259,20 @@ function handleItemLifecycle(
   session: CodexSession,
   record: Record<string, unknown> | null,
   completed: boolean,
+  childThread: boolean,
   context: DispatchContext,
 ): void {
   const item = record?.item ?? record;
   const itemRecord = toObjectRecord(item);
   if (itemRecord === null) return;
   const type = typeof itemRecord.type === "string" ? itemRecord.type : "";
+  // Sub-agent text is never root state: a child thread's userMessage would
+  // consume the next prompt's user-text anchor and its agentMessage would
+  // read as a root reply (and reach attention notifications). Tool-call
+  // cards still flatten into the root timeline.
+  if (childThread && (type === "userMessage" || type === "agentMessage" || type === "reasoning")) {
+    return;
+  }
   if (type === "userMessage") {
     noteUserMessage(session, itemRecord, readTurnId(record), context);
     return;
@@ -1650,7 +1764,9 @@ async function revertSession(
     return;
   }
   try {
-    if (session.active !== null) await interruptSession(session, context);
+    // A rewind must also end out-of-band work: the forked thread will never
+    // deliver the old thread's turn/completed.
+    if (session.active !== null || session.autonomous !== null) await interruptSession(session, context);
     denyPending(session, context);
     const response = await session.client.request("thread/fork", {
       threadId: session.threadId,
@@ -1659,6 +1775,7 @@ async function revertSession(
     const forked = readThreadId(response);
     if (forked === null) throw new Error("Codex thread/fork did not return a thread id");
     session.threadId = forked;
+    session.supersededNativeTurnIds.clear();
     session.userMessageTurnIds.clear();
     context.emit({
       type: "session.persistence",

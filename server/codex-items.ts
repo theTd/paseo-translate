@@ -416,3 +416,22 @@ export function readTurnId(params: unknown): string | null {
   const turn = toObjectRecord(record.turn);
   return nonEmptyString(turn?.id);
 }
+
+export interface CodexTurnStatus {
+  status: string;
+  errorMessage: string | null;
+}
+
+/**
+ * Reads a turn/completed status from either wire shape Codex has used: the
+ * current app-server nests it under `turn` (`{ threadId, turn: { status,
+ * error } }`); older payloads and tests use a flat `{ status, errorMessage }`.
+ */
+export function readTurnStatus(params: unknown): CodexTurnStatus {
+  const record = toObjectRecord(params);
+  const turn = toObjectRecord(record?.turn);
+  const status = nonEmptyString(turn?.status) ?? nonEmptyString(record?.status) ?? "completed";
+  const error = toObjectRecord(turn?.error);
+  const errorMessage = nonEmptyString(error?.message) ?? nonEmptyString(record?.errorMessage);
+  return { status, errorMessage };
+}

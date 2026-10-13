@@ -204,10 +204,26 @@ app after each turn.
   translated back (fail closed).
 - Interrupt maps to `turn/interrupt`. Active-turn steering maps to
   `turn/steer`. Conversation rewind forks the Codex thread.
+- Session-list status tracks out-of-band root turns like the native
+  provider: a `turn/started` arriving with no open foreground turn (a
+  `turn/start` ack timeout whose turn still started server-side) opens a
+  synthetic autonomous turn the daemon tracks as running, until the
+  `turn/completed`, the next prompt, an interrupt, a rewind, or a process
+  death. The interrupt flag is consumed by any `turn/completed`, so a
+  killed request's trailing activity cannot wedge the status at running.
+  Start notifications that arrive before an acknowledgement failure are
+  recovered too. Superseded native turn completions cannot settle the next
+  prompt, and a rejected interrupt keeps autonomous work tracked as running.
+- Sub-agent threads are routed away from the root like the native adapter:
+  their turn lifecycle never settles the root turn or overwrites the native
+  turn id, and their user/agent/reasoning text never surfaces as root rows
+  (it would read as replies and reach attention notifications). Sub-agent
+  tool activity is flattened to tool-call cards (not provider subsessions);
+  archive/unarchive and file rewind stay capability-gated off.
+- `turn/completed` statuses are read from both wire shapes Codex has used
+  (`turn.status`/`turn.error` and the older flat `status`/`errorMessage`).
 - Slash commands listed from Codex skills keep the command word verbatim;
   only free-text arguments are translated.
-- Sub-agent activity is flattened to tool-call cards (not provider
-  subsessions). Archive/unarchive and file rewind stay capability-gated off.
 
 ## Interface language
 

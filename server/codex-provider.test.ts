@@ -362,6 +362,252 @@ describe("translate Codex provider", () => {
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "canceled");
   });
 
+  it("keeps the root turn running through sub-agent child threads", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    await send(promptInput("spawn a subagent"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "started");
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-root" });
+    // Codex spawns a collab sub-agent on a child thread while the root turn runs.
+    fake.emit("item/completed", {
+      threadId: "thread-1",
+      item: {
+        type: "collabAgentToolCall",
+        id: "call-sub",
+        tool: "spawnAgent",
+        status: "inProgress",
+        prompt: "Report findings.",
+        receiverThreadIds: ["child-thread-1"],
+      },
+    });
+    fake.emit("turn/started", { threadId: "child-thread-1", turnId: "native-child" });
+    fake.emit("item/agentMessage/delta", {
+      threadId: "child-thread-1",
+      itemId: "child-msg-1",
+      delta: "Found the path.",
+    });
+    fake.emit("item/completed", {
+      threadId: "child-thread-1",
+      item: { type: "userMessage", id: "child-user-1", content: [{ type: "text", text: "Go" }] },
+    });
+    // The child thread finishing must not settle the still-running root turn.
+    fake.emit("turn/completed", { threadId: "child-thread-1", turn: { status: "completed" } });
+    const turnStates = events
+      .filter((event) => event.type === "session.turn")
+      .map((event) => (event.type === "session.turn" ? event.state : ""));
+    expect(turnStates).toEqual(["started"]);
+    // Sub-agent text never surfaces as root rows, but the spawn card does.
+    const items = events.flatMap((event) =>
+      event.type === "timeline.item" ? [event.item] : [],
+    );
+    expect(items.some((item) => item.type === "assistant_message")).toBe(false);
+    expect(items.some((item) => item.type === "user_message")).toBe(false);
+    expect(items.some((item) => item.type === "tool_call")).toBe(true);
+    // An interrupt still targets the root turn, not the child's turn id.
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    const interrupts = fake.state.requests.filter((request) => request.method === "turn/interrupt");
+    expect(interrupts.at(-1)?.params).toEqual({ threadId: "thread-1", turnId: "native-root" });
+    fake.emit("turn/completed", { threadId: "thread-1", turn: { status: "interrupted" } });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "canceled");
+    expect(
+      events
+        .filter((event) => event.type === "session.turn")
+        .map((event) => (event.type === "session.turn" ? event.state : "")),
+    ).toEqual(["started", "canceled"]);
+  });
+
+  it("reads the nested turn/completed status shapes", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    await send(promptInput("Hello"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "started");
+    fake.emit("turn/started", { threadId: "thread-1", turn: { id: "native-1" } });
+    fake.emit("turn/completed", {
+      threadId: "thread-1",
+      turn: { status: "failed", error: { message: "model unavailable" } },
+    });
+    const failed = events.find(
+      (event): event is Extract<ProviderEvent, { type: "session.turn" }> =>
+        event.type === "session.turn" && event.state === "failed",
+    );
+    expect(failed?.error?.message).toBe("model unavailable");
+  });
+
+  it("opens an autonomous turn for a turn that outlived its start ack failure", async () => {
+    const { fake, events, send } = await createHarness();
+    fake.state.handlers["turn/start"] = () => {
+      throw new Error("ack timeout");
+    };
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    await send(promptInput("Hello"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "failed");
+    // The ack timed out locally, but Codex actually started the turn.
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-late" });
+    fake.emit("item/agentMessage/delta", { threadId: "thread-1", itemId: "a-1", delta: "Working" });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "started");
+    fake.emit("turn/completed", { threadId: "thread-1", turn: { status: "completed" } });
+    const turns = events
+      .filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> =>
+        event.type === "session.turn",
+      )
+      .map((event) => ({ state: event.state, turnId: event.turnId }));
+    expect(turns).toHaveLength(4);
+    expect(turns[0]?.state).toBe("started");
+    expect(turns[1]?.state).toBe("failed");
+    expect(turns[2]?.turnId).not.toBe(turns[0]?.turnId);
+    expect(turns[2]?.state).toBe("started");
+    expect(turns[3]).toMatchObject({ turnId: turns[2]?.turnId, state: "completed" });
+    // The late turn's items still surfaced on the timeline while it ran.
+    expect(
+      events.some(
+        (event) =>
+          event.type === "timeline.item" &&
+          event.item.type === "assistant_message" &&
+          event.item.text === "Working",
+      ),
+    ).toBe(true);
+  });
+
+  it.each([false, true])("handles start acknowledgement failure after native activity (completed=%s)", async (completed) => {
+    const { fake, events, send } = await createHarness();
+    fake.state.handlers["turn/start"] = () => {
+      fake.emit("turn/started", { threadId: "thread-1", turn: { id: "native-early" } });
+      if (completed) {
+        fake.emit("turn/completed", {
+          threadId: "thread-1",
+          turn: { id: "native-early", status: "completed" },
+        });
+      }
+      throw new Error("ack timeout");
+    };
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    await send(promptInput("Hello"));
+    const turns = events.filter(
+      (event): event is Extract<ProviderEvent, { type: "session.turn" }> => event.type === "session.turn",
+    );
+    expect(turns.map((turn) => turn.state)).toEqual(
+      completed ? ["started", "completed"] : ["started", "failed", "started"],
+    );
+    if (!completed) {
+      expect(turns[2]?.turnId).not.toBe(turns[0]?.turnId);
+      fake.emit("turn/completed", {
+        threadId: "thread-1",
+        turn: { id: "native-early", status: "completed" },
+      });
+      expect(events.at(-1)).toMatchObject({
+        type: "session.turn", turnId: turns[2]?.turnId, state: "completed",
+      });
+    }
+  });
+
+  it("keeps an autonomous turn running when interruption fails", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    fake.state.handlers["turn/start"] = () => { throw new Error("ack timeout"); };
+    await send(promptInput("Hello"));
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-auto" });
+    fake.state.handlers["turn/interrupt"] = () => { throw new Error("interrupt refused"); };
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    expect(events.some((event) => event.type === "request.failed" && event.requestId === "r-int")).toBe(true);
+    expect(events.filter((event) => event.type === "session.turn")).toHaveLength(3);
+    // Repeated native activity must not retry the failed interrupt or duplicate the turn.
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-auto" });
+    expect(fake.state.requests.filter((request) => request.method === "turn/interrupt")).toHaveLength(1);
+    fake.emit("turn/completed", {
+      threadId: "thread-1", turn: { id: "native-auto", status: "completed" },
+    });
+    expect(events.filter((event) => event.type === "session.turn").map((event) => event.state))
+      .toEqual(["started", "failed", "started", "completed"]);
+  });
+
+  it("settles an autonomous turn on interrupt and silences trailing activity", async () => {
+    const { fake, events, send } = await createHarness();
+    fake.state.handlers["turn/start"] = () => {
+      throw new Error("ack timeout");
+    };
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    await send(promptInput("Hello"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "failed");
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-late" });
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" &&
+        event.state === "started" &&
+        events.filter((turn) => turn.type === "session.turn").length === 3,
+    );
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "canceled");
+    const interrupts = fake.state.requests.filter((request) => request.method === "turn/interrupt");
+    expect(interrupts.at(-1)?.params).toEqual({ threadId: "thread-1", turnId: "native-late" });
+    // Trailing activity of the killed request must not re-open a turn.
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-late-2" });
+    fake.emit("item/agentMessage/delta", { threadId: "thread-1", itemId: "a-2", delta: "Trailing" });
+    fake.emit("turn/completed", { threadId: "thread-1", turn: { status: "completed" } });
+    expect(
+      events
+        .filter((event) => event.type === "session.turn")
+        .map((event) => (event.type === "session.turn" ? event.state : "")),
+    ).toEqual(["started", "failed", "started", "canceled"]);
+  });
+
+  it.each([false, true])("ignores superseded completion with the next prompt (new native turn started=%s)", async (nextStarted) => {
+    const { fake, events, send } = await createHarness();
+    fake.state.handlers["turn/start"] = () => {
+      throw new Error("ack timeout");
+    };
+    await send(openInput);
+    await waitFor(events, (event) => event.type === "session.ready");
+    await send(promptInput("Hello"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "failed");
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-late" });
+    await waitFor(
+      events,
+      (event) =>
+        event.type === "session.turn" &&
+        event.state === "started" &&
+        events.filter((turn) => turn.type === "session.turn").length === 3,
+    );
+    fake.state.handlers["turn/start"] = () => {
+      if (nextStarted) fake.emit("turn/started", { threadId: "thread-1", turnId: "native-next" });
+      fake.emit("turn/started", { threadId: "thread-1", turnId: "native-late" });
+      fake.emit("turn/completed", {
+        threadId: "thread-1", turn: { id: "native-late", status: "completed" },
+      });
+      return {};
+    };
+    await send(promptInput("Again", "m-2"));
+    const turns = events
+      .filter((event): event is Extract<ProviderEvent, { type: "session.turn" }> =>
+        event.type === "session.turn",
+      )
+      .map((event) => ({ state: event.state, turnId: event.turnId }));
+    expect(turns).toHaveLength(5);
+    expect(turns[3]).toMatchObject({ turnId: turns[2]?.turnId, state: "completed" });
+    expect(turns[4]?.state).toBe("started");
+    expect(turns[4]?.turnId).not.toBe(turns[2]?.turnId);
+    if (!nextStarted) fake.emit("turn/started", { threadId: "thread-1", turnId: "native-next" });
+    fake.emit("item/started", {
+      threadId: "thread-1", turnId: "native-next",
+      item: { type: "userMessage", id: "u-next", content: [{ type: "text", text: "DE(Again)" }] },
+    });
+    expect(events.filter((event) => event.type === "timeline.item" && event.item.type === "user_message").at(-1))
+      .toMatchObject({ item: { text: "Again", clientMessageId: "m-2" } });
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    expect(fake.state.requests.filter((request) => request.method === "turn/interrupt").at(-1)?.params)
+      .toEqual({ threadId: "thread-1", turnId: "native-next" });
+    fake.emit("turn/completed", {
+      threadId: "thread-1", turn: { id: "native-next", status: "interrupted" },
+    });
+    expect(events.at(-1)).toMatchObject({ type: "session.turn", turnId: turns[4]?.turnId, state: "canceled" });
+  });
+
   it("round-trips command approvals", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
