@@ -101,6 +101,15 @@ export function usePluginLocale(setting: UiLanguageSetting): PluginLocale {
 }
 
 const en = {
+  forkNewAttemptHint: "Retry to finish the previous attempt. Starting a new fork creates a separate copy.",
+  forkRestartConfirm: "Start a new fork",
+  forkSession: "Fork session",
+  forkConfirm: "Confirm fork",
+  forkDescription: "Copy this entire conversation and its subagent history into a new session with a distinct fork title. Both sessions use the same working directory. Wait for background tasks to finish first.",
+  forkBusy: "Forking…",
+  forkCompleted: "Forked session created",
+  forkCancel: "Cancel",
+  openFork: "Open forked session",
   settingsTitle: "Translate",
   settingsInfo:
     "Prompts are translated before they reach the agent. Replies are translated in the app after each stream completes.",
@@ -206,6 +215,15 @@ export type PluginStringKey = keyof typeof en;
 type PluginDictionary = Record<PluginStringKey, string>;
 
 const zhCN: PluginDictionary = {
+  forkNewAttemptHint: "重试可完成上一次操作。开始新的分叉会另建一份副本。",
+  forkRestartConfirm: "开始新的分叉",
+  forkSession: "分叉会话",
+  forkConfirm: "确认分叉",
+  forkDescription: "复制完整会话及子代理历史，创建带独立分叉标题的新会话。两个会话共用同一工作目录，请先等待后台任务结束。",
+  forkBusy: "正在分叉…",
+  forkCompleted: "已创建分叉会话",
+  forkCancel: "取消",
+  openFork: "打开分叉会话",
   settingsTitle: "翻译",
   settingsInfo: "提示词会在到达智能体之前被翻译；回复则在每轮流式输出完成后在应用内翻译。",
   loadingSettings: "正在加载设置…",
@@ -297,6 +315,15 @@ const zhCN: PluginDictionary = {
 };
 
 const ja: PluginDictionary = {
+  forkNewAttemptHint: "再試行すると前の操作を完了できます。新しい分岐は別のコピーを作成します。",
+  forkRestartConfirm: "新しい分岐を開始",
+  forkSession: "セッションを分岐",
+  forkConfirm: "分岐を確認",
+  forkDescription: "会話全体とサブエージェント履歴を、区別できるタイトルの新しいセッションにコピーします。作業ディレクトリは共通です。先にバックグラウンドタスクの完了を待ってください。",
+  forkBusy: "分岐中…",
+  forkCompleted: "分岐セッションを作成しました",
+  forkCancel: "キャンセル",
+  openFork: "分岐セッションを開く",
   settingsTitle: "翻訳",
   settingsInfo: "プロンプトはエージェントに届く前に翻訳されます。返答はストリーム完了後にアプリ内で翻訳されます。",
   loadingSettings: "設定を読み込み中…",
@@ -392,6 +419,15 @@ const ja: PluginDictionary = {
 };
 
 const ko: PluginDictionary = {
+  forkNewAttemptHint: "재시도하면 이전 작업을 완료합니다. 새 분기를 시작하면 별도 복사본이 생성됩니다.",
+  forkRestartConfirm: "새 분기 시작",
+  forkSession: "세션 분기",
+  forkConfirm: "분기 확인",
+  forkDescription: "전체 대화와 하위 에이전트 기록을 구분되는 제목의 새 세션으로 복사합니다. 작업 디렉터리는 공유됩니다. 먼저 백그라운드 작업이 끝날 때까지 기다려 주세요.",
+  forkBusy: "분기 중…",
+  forkCompleted: "분기 세션 생성 완료",
+  forkCancel: "취소",
+  openFork: "분기 세션 열기",
   settingsTitle: "번역",
   settingsInfo: "프롬프트는 에이전트에 전달되기 전에 번역됩니다. 답변은 스트림이 끝난 뒤 앱에서 번역됩니다.",
   loadingSettings: "설정을 불러오는 중…",
@@ -486,6 +522,15 @@ const ko: PluginDictionary = {
 };
 
 const fr: PluginDictionary = {
+  forkNewAttemptHint: "Réessayez pour terminer la tentative précédente. Une nouvelle copie reste distincte.",
+  forkRestartConfirm: "Démarrer une nouvelle copie",
+  forkSession: "Dupliquer la session",
+  forkConfirm: "Confirmer la copie",
+  forkDescription: "Copier toute la conversation et son historique de sous-agents dans une nouvelle session au titre distinct. Les deux sessions partagent le répertoire de travail. Attendez la fin des tâches en arrière-plan.",
+  forkBusy: "Copie en cours…",
+  forkCompleted: "Session dupliquée créée",
+  forkCancel: "Annuler",
+  openFork: "Ouvrir la copie",
   settingsTitle: "Traduction",
   settingsInfo:
     "Les prompts sont traduits avant d'atteindre l'agent. Les réponses sont traduites dans l'app une fois le flux terminé.",
@@ -587,6 +632,15 @@ const fr: PluginDictionary = {
 };
 
 const es: PluginDictionary = {
+  forkNewAttemptHint: "Reintente para completar el intento anterior. Una nueva copia será independiente.",
+  forkRestartConfirm: "Iniciar una nueva copia",
+  forkSession: "Duplicar sesión",
+  forkConfirm: "Confirmar copia",
+  forkDescription: "Copiar toda la conversación y su historial de subagentes en una nueva sesión con un título distinto. Ambas comparten el directorio de trabajo. Espere a que terminen las tareas en segundo plano.",
+  forkBusy: "Copiando…",
+  forkCompleted: "Sesión duplicada creada",
+  forkCancel: "Cancelar",
+  openFork: "Abrir sesión duplicada",
   settingsTitle: "Traducción",
   settingsInfo:
     "Los prompts se traducen antes de llegar al agente. Las respuestas se traducen en la app cuando termina el stream.",
@@ -687,6 +741,15 @@ const es: PluginDictionary = {
 };
 
 const ru: PluginDictionary = {
+  forkNewAttemptHint: "Повторите попытку, чтобы завершить предыдущую. Новая копия создаётся отдельно.",
+  forkRestartConfirm: "Создать новую копию",
+  forkSession: "Создать копию сеанса",
+  forkConfirm: "Подтвердить копирование",
+  forkDescription: "Скопировать весь диалог и историю субагентов в новый сеанс с отличающимся названием. Рабочая папка общая. Сначала дождитесь завершения фоновых задач.",
+  forkBusy: "Копирование…",
+  forkCompleted: "Копия сеанса создана",
+  forkCancel: "Отмена",
+  openFork: "Открыть копию сеанса",
   settingsTitle: "Перевод",
   settingsInfo:
     "Запросы переводятся до того, как попадут к агенту. Ответы переводятся в приложении после завершения потока.",
@@ -784,6 +847,15 @@ const ru: PluginDictionary = {
 };
 
 const ptBR: PluginDictionary = {
+  forkNewAttemptHint: "Tente novamente para concluir a tentativa anterior. Uma nova cópia será separada.",
+  forkRestartConfirm: "Iniciar uma nova cópia",
+  forkSession: "Duplicar sessão",
+  forkConfirm: "Confirmar cópia",
+  forkDescription: "Copiar toda a conversa e o histórico dos subagentes para uma nova sessão com um título distinto. Ambas compartilham o diretório de trabalho. Aguarde o fim das tarefas em segundo plano.",
+  forkBusy: "Copiando…",
+  forkCompleted: "Sessão duplicada criada",
+  forkCancel: "Cancelar",
+  openFork: "Abrir sessão duplicada",
   settingsTitle: "Tradução",
   settingsInfo:
     "Os prompts são traduzidos antes de chegar ao agente. As respostas são traduzidas no app quando o stream termina.",
@@ -882,6 +954,15 @@ const ptBR: PluginDictionary = {
 };
 
 const ar: PluginDictionary = {
+  forkNewAttemptHint: "أعد المحاولة لإكمال المحاولة السابقة. بدء نسخة جديدة ينشئ نسخة منفصلة.",
+  forkRestartConfirm: "بدء نسخة جديدة",
+  forkSession: "نسخ الجلسة",
+  forkConfirm: "تأكيد النسخ",
+  forkDescription: "نسخ المحادثة كاملة وسجل الوكلاء الفرعيين إلى جلسة جديدة بعنوان مميز. تشترك الجلستان في مجلد العمل. انتظر انتهاء المهام الخلفية أولاً.",
+  forkBusy: "جارٍ النسخ…",
+  forkCompleted: "تم إنشاء نسخة الجلسة",
+  forkCancel: "إلغاء",
+  openFork: "فتح نسخة الجلسة",
   settingsTitle: "الترجمة",
   settingsInfo: "تُترجم المطالبات قبل وصولها إلى الوكيل. تُترجم الردود داخل التطبيق بعد اكتمال البث.",
   loadingSettings: "جارٍ تحميل الإعدادات…",

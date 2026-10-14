@@ -9,6 +9,7 @@ import {
 } from "./client/transformer";
 import { TranslateSettingsScreen } from "./client/settings-screen";
 import { detectSystemLocale, translate } from "./client/i18n";
+import { contributeClaudeSessionFork } from "./client/claude-session-fork";
 import {
   NOTIFICATION_BOUNDARY_KIND,
   notificationBoundarySchema,
@@ -74,5 +75,5 @@ export default function contribute(client: PluginClientContext) {
     icon: "Languages",
     Component: TranslateSettingsScreen,
   });
-  return () => {};
+  return contributeClaudeSessionFork(client);
 }

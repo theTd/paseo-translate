@@ -7,6 +7,7 @@ import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
  * daemon compiler's dependency walk, which is what the bundle avoids.
  */
 export declare function createTranslateClaudeProvider(deps: {
+  forkCoordinator?: import("./claude-fork-coordinator").ClaudeForkCoordinator;
   /** Loads validated translate settings; rejects while unconfigured. */
   loadConfig(): Promise<Record<string, unknown>>;
   /** Translation endpoint override for tests. */

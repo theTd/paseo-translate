@@ -27,7 +27,7 @@ import {
 import { createTranslator, type TranslatorDeps } from "./translate";
 import { claudeModelSupportsFastMode, findClaudeModel } from "./claude-model-manifest";
 import { translateSessionTitlesForDisplay } from "./session-titles";
-import { listClaudeTranscriptSummaries } from "./claude-sessions";
+import { listClaudeTranscriptSummaries, markManagedClaudeFork } from "./claude-sessions";
 import { forkSession as sdkForkSession } from "./claude-rewind";
 import {
   isSerializedAttachment,
@@ -48,6 +48,8 @@ import { ClaudeSubagentTracker, flattenSubagentItemForParent } from "./claude-su
 import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
+import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration, claudeForkEnvironment } from "./claude-fork-coordinator";
+import { resolveClaudeConfigDir } from "./claude-project-dir";
 import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
   TRANSLATE_CLAUDE_PROVIDER_LABEL,
@@ -95,6 +97,7 @@ export type ClaudeQueryFactory = (params: {
 }) => ClaudeQueryHandle;
 
 export interface ClaudeProviderDeps extends TranslatorDeps {
+  forkCoordinator?: ClaudeForkCoordinator;
   /** Test seam; defaults to the real claude-agent-sdk query. */
   queryFactory?: ClaudeQueryFactory;
   /** Test seam; defaults to the real SDK forkSession (conversation rewind). */
@@ -191,6 +194,7 @@ type ProviderPermissionActions = NonNullable<
 >;
 
 interface ClaudeSession {
+  forkConfiguration: boolean;
   id: string;
   config: ProviderSessionConfig;
   /**
@@ -351,11 +355,14 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
     sdkForkSession.forkSession(id, options));
   const listeners = new Set<(event: ProviderEvent) => void>();
   const sessions = new Map<string, ClaudeSession>();
+  const unregisterForks = new Map<string, () => void>();
   const context: DispatchContext = {
     sessions,
     translator,
     queryFactory,
     forkClaudeSession,
+    forkCoordinator: deps.forkCoordinator,
+    unregisterForks,
     loadValues: () => deps.loadConfig(),
     emit(event) {
       if (!connectionClosed) for (const listener of listeners) listener(event);
@@ -391,7 +398,10 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
         capabilities,
         async send(input) {
           if (connectionClosed) throw new Error("Translate Claude provider connection is closed");
-          await dispatch(input, context, capabilities);
+          const session = "sessionId" in input ? sessions.get(input.sessionId) : undefined;
+          if (session && deps.forkCoordinator) {
+            await deps.forkCoordinator.exclusive(session.contextKey, () => dispatch(input, context, capabilities));
+          } else await dispatch(input, context, capabilities);
         },
         onEvent(listener) {
           listeners.add(listener);
@@ -400,7 +410,14 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
         async close() {
           if (connectionClosed) return;
           connectionClosed = true;
-          for (const session of sessions.values()) await teardownSession(session);
+          for (const session of sessions.values()) {
+            const close = async () => {
+              unregisterForks.get(session.id)?.();
+              await teardownSession(session);
+            };
+            if (deps.forkCoordinator) await deps.forkCoordinator.exclusive(session.contextKey, close);
+            else await close();
+          }
           sessions.clear();
           listeners.clear();
         },
@@ -411,6 +428,8 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
 }
 
 interface DispatchContext {
+  forkCoordinator?: ClaudeForkCoordinator;
+  unregisterForks: Map<string, () => void>;
   sessions: Map<string, ClaudeSession>;
   translator: ReturnType<typeof createTranslator>;
   queryFactory: ClaudeQueryFactory;
@@ -466,6 +485,8 @@ async function dispatch(
     }
     case "session.close": {
       const session = context.sessions.get(input.sessionId);
+      context.unregisterForks.get(input.sessionId)?.();
+      context.unregisterForks.delete(input.sessionId);
       context.sessions.delete(input.sessionId);
       if (session !== undefined) await teardownSession(session);
       context.emit({ type: "session.closed", sessionId: input.sessionId });
@@ -477,6 +498,7 @@ async function dispatch(
       const session = context.sessions.get(input.sessionId);
       if (session === undefined) throw new Error(`Unknown session: ${input.sessionId}`);
       await applyConfigChanges(session, input.changes);
+      if (session.forkConfiguration) context.emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
       context.emit({
         type: "session.config",
         sessionId: input.sessionId,
@@ -615,12 +637,15 @@ async function rewindConversationOnce(
     throw new Error("Claude session is not ready for rewind");
   }
   const fork = await context.forkClaudeSession(session.claudeSessionId, { upToMessageId: messageId });
+  if (session.forkConfiguration) {
+    await markManagedClaudeFork(session.config.cwd, session.config.env["CLAUDE_CONFIG_DIR"], fork.sessionId);
+  }
   session.claudeSessionId = fork.sessionId;
   await resetQuery(session, (event) => context.emit(event));
   context.emit({
     type: "session.persistence",
     sessionId: session.id,
-    persistence: { version: 1, data: { claudeSessionId: fork.sessionId } },
+    persistence: claudePersistence(session),
   });
 }
 
@@ -646,6 +671,7 @@ async function resetQuery(
   const active = session.active;
   session.active = null;
   await pump?.catch(() => undefined);
+  session.subagents?.finishProcessTasks();
   session.detached = false;
   if (active !== null) {
     emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
@@ -662,6 +688,18 @@ async function openSession(
 ): Promise<void> {
   if (context.sessions.has(input.sessionId)) {
     throw new Error(`Session already exists: ${input.sessionId}`);
+  }
+  const storedConfigDir = readStoredConfigDir(input.persistence);
+  const importConfig = readStoredForkConfiguration(input.persistence);
+  if (storedConfigDir || importConfig) {
+    input = { ...input, config: { ...input.config,
+      ...(importConfig ? { model: importConfig.model, mode: importConfig.mode,
+        thinkingOption: importConfig.thinkingOption, settings: importConfig.settings,
+        providerOptions: importConfig.providerOptions,
+        ...(importConfig.systemPrompt !== undefined ? { systemPrompt: importConfig.systemPrompt } : {}) } : {}),
+      env: { ...input.config.env, ...claudeForkEnvironment(importConfig?.env ?? {}),
+        ...(storedConfigDir ? { CLAUDE_CONFIG_DIR: storedConfigDir } : {}) },
+    } };
   }
   const contextKey = resolveTranslationContextKey(input.config.env, input.sessionId);
   let translatedSystemPrompt: string | null = null;
@@ -688,6 +726,7 @@ async function openSession(
     }
   }
   const session: ClaudeSession = {
+    forkConfiguration: importConfig !== undefined,
     id: input.sessionId,
     config: input.config,
     contextKey,
@@ -730,6 +769,22 @@ async function openSession(
     session.supportsSubsessions,
   );
   context.sessions.set(input.sessionId, session);
+  if (context.forkCoordinator) {
+    context.unregisterForks.set(session.id, context.forkCoordinator.register(session.contextKey, async () => {
+      if (session.closed || session.active || session.autonomous || session.pendingPermissions.size ||
+        session.subagents?.hasRunningTasks()) {
+        throw new Error("Wait for Claude and its background tasks to finish, and resolve pending permissions before forking");
+      }
+      if (!session.claudeSessionId) throw new Error("Send a message first so Claude has a persisted session to fork");
+      if (session.query) await resetQuery(session, context.emit);
+      return { claudeSessionId: session.claudeSessionId,
+        configDir: path.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
+        config: { ...session.config, model: session.desiredModel ?? undefined,
+          mode: session.desiredMode ?? undefined, thinkingOption: session.desiredThinking ?? undefined,
+          settings: { ...session.config.settings, fast_mode: session.fastMode } },
+      };
+    }));
+  }
   context.emit({
     type: "session.opened",
     requestId: input.requestId,
@@ -737,7 +792,7 @@ async function openSession(
     capabilities,
     restoration: "core",
     ...(session.claudeSessionId !== null
-      ? { persistence: { version: 1, data: { claudeSessionId: session.claudeSessionId } } }
+      ? { persistence: claudePersistence(session) }
       : {}),
     title: input.config.title,
     cwd: input.config.cwd,
@@ -801,7 +856,7 @@ async function replayHistory(
 ): Promise<void> {
   if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
   const restore = await buildReplayRestore(context);
-  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore);
+  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore, session.config.env["CLAUDE_CONFIG_DIR"]);
   for (const item of replay.rootItems) {
     if (session.closed) return;
     context.emit({ type: "timeline.item", sessionId: session.id, item });
@@ -990,6 +1045,30 @@ function readStoredSessionId(persistence: { version: number; data: unknown } | u
   }
   const stored = (persistence.data as { claudeSessionId?: unknown }).claudeSessionId;
   return typeof stored === "string" && stored.length > 0 ? stored : null;
+}
+
+function readStoredConfigDir(persistence: { data: unknown } | undefined): string | undefined {
+  if (!persistence || typeof persistence.data !== "object" || !persistence.data) return undefined;
+  const configDir = (persistence.data as { configDir?: unknown }).configDir;
+  return typeof configDir === "string" && configDir.length > 0 ? configDir : undefined;
+}
+
+function claudePersistence(session: ClaudeSession) {
+  const configDir = session.config.env["CLAUDE_CONFIG_DIR"];
+  return { version: 1, data: { claudeSessionId: session.claudeSessionId,
+    ...(configDir ? { configDir } : {}),
+    ...(session.forkConfiguration ? { forkConfig: claudeForkConfiguration({ ...session.config,
+      model: session.desiredModel ?? undefined,
+      mode: session.desiredMode ?? undefined,
+      thinkingOption: session.desiredThinking ?? undefined,
+      settings: { ...session.config.settings, fast_mode: session.fastMode },
+    }) } : {}),
+  } };
+}
+
+function readStoredForkConfiguration(persistence: { data: unknown } | undefined) {
+  if (!persistence || typeof persistence.data !== "object" || !persistence.data || !("forkConfig" in persistence.data)) return undefined;
+  return claudeForkConfigurationSchema.parse(persistence.data.forkConfig);
 }
 
 /** The pre-translation user text, for rewind anchor display. */
@@ -1296,6 +1375,7 @@ async function buildMessageBlocks(
 
 async function ensureQuery(session: ClaudeSession, context: DispatchContext): Promise<void> {
   if (session.query !== null) return;
+  session.subagents?.resetProcessTasks();
   const values = await context.loadValues();
   // Prefer the settings override, then the user's PATH claude (their own
   // install and login); the daemon-bundled CLI is only the last resort.
@@ -1938,6 +2018,7 @@ async function respondToPermission(
         const targetMode = shouldResumeBypass ? "bypassPermissions" : "acceptEdits";
         session.desiredMode = targetMode;
         session.planResumeMode = targetMode;
+        if (session.forkConfiguration) emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
         if (session.query?.setPermissionMode !== undefined) {
           await session.query.setPermissionMode(targetMode).catch(() => undefined);
         }
@@ -2070,7 +2151,7 @@ function finishDeadQuery(
   // An interrupt ends foreground children; a dead process fails everything
   // still running, including backgrounded work that outlived its turn.
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
-  else session.subagents?.failRunningTasks();
+  session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
     pending.resolve({ behavior: "deny", message: "Claude session ended" });
   }
@@ -2361,7 +2442,7 @@ function handleSdkMessage(
     emit({
       type: "session.persistence",
       sessionId: session.id,
-      persistence: { version: 1, data: { claudeSessionId: message.session_id } },
+      persistence: claudePersistence(session),
     });
     // The per-model context windows recorded on every result keep the ring
     // denominator fresh even when the model changes mid-session.

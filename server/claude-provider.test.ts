@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
   PROVIDER_CAPABILITIES,
@@ -6,6 +6,7 @@ import {
   type ProviderInput,
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateClaudeProvider } from "./claude-provider";
+import { ClaudeForkCoordinator } from "./claude-fork-coordinator";
 import { createTranslateHandler } from "./translate";
 import { createMemoryTranslationCacheStore } from "./translation-cache-store";
 import { translatePromptFragment } from "./prompt-text";
@@ -190,12 +191,14 @@ async function createHarness(
   cacheStore?: import("./translation-cache-store").TranslationCacheStore,
   connectCapabilities?: readonly string[],
   context?: import("./translation-context").TranslationContextManager,
+  forkCoordinator?: ClaudeForkCoordinator,
 ) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
     loadConfig: async () => ({ ...values, ...overrides }),
     fetchFn: translatingFetch(),
     queryFactory: fake.factory,
+    forkCoordinator,
     ...(cacheStore !== undefined ? { cacheStore } : {}),
     ...(context !== undefined ? { context } : {}),
   });
@@ -1901,6 +1904,51 @@ describe("translate claude provider extended protocol", () => {
     expect(fake.state.options?.resume).toBe("cs-1-fork-0f0f");
   });
 
+  it("keeps a managed fork out of generic import after conversation rewind", async () => {
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const { claudeProjectDir } = await import("./claude-project-dir");
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-fork-rewind-"));
+    const configDir = path.join(root, "config");
+    const cwd = path.join(root, "project");
+    fs.mkdirSync(cwd);
+    const project = claudeProjectDir(cwd, configDir);
+    fs.mkdirSync(project, { recursive: true });
+    const newId = "33333333-3333-4333-8333-333333333333";
+    const { fake } = await createHarness();
+    const events: ProviderEvent[] = [];
+    const provider = createTranslateClaudeProvider({ loadConfig: async () => values, fetchFn: translatingFetch(),
+      queryFactory: fake.factory, forkSession: async () => {
+        // Match the SDK: only a transcript is generated, no clone manifest.
+        fs.writeFileSync(path.join(project, `${newId}.jsonl`), JSON.stringify({ type: "user", message: { content: "Rewound fork" } }) + "\n");
+        return { sessionId: newId };
+      } });
+    const registration = await provider.connect({ versions: [1], capabilities: [...PROVIDER_CAPABILITIES] });
+    registration.onEvent((event) => events.push(event));
+    const previous = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+    try {
+      await registration.send({ ...openInput, config: { ...openInput.config, cwd }, persistence: { version: 1,
+        data: { claudeSessionId: "22222222-2222-4222-8222-222222222222", configDir,
+          forkConfig: { model: "sonnet", settings: {} } } } });
+      await registration.send({ type: "session.revert", requestId: "rewind-managed", sessionId: "s",
+        scope: "conversation", token: "11111111-1111-4111-8111-111111111111" });
+      expect(events).toContainEqual({ type: "request.completed", requestId: "rewind-managed" });
+      expect(events.filter((event) => event.type === "session.persistence").at(-1))
+        .toMatchObject({ persistence: { data: { claudeSessionId: newId, forkConfig: { model: "sonnet" } } } });
+      await registration.send({ type: "sessions", requestId: "list-rewound", cwd, limit: 100 });
+      expect(events.find((event) => event.type === "sessions")).toMatchObject({ sessions: [] });
+      expect(fs.existsSync(path.join(project, `${newId}.clone.json`))).toBe(false);
+      expect(fs.existsSync(path.join(project, `${newId}.paseo-fork`))).toBe(true);
+    } finally {
+      await registration.close();
+      if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previous;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("lists sessions from Claude's transcript directory", async () => {
     const fs = await import("node:fs");
     const os = await import("node:os");
@@ -2952,6 +3000,134 @@ describe("claude provider bundle", () => {
       loadConfig: async () => ({}),
     });
     expect(provider.id).toBe("translate-claude");
+  });
+});
+
+describe("Claude fork coordination", () => {
+  it("forks after a completion level before its bookend, then keeps the resumed source forkable", async () => {
+    const coordinator = new ClaudeForkCoordinator();
+    const h = await createHarness(undefined, undefined, undefined, undefined, coordinator);
+    h.fake.use(async function* () {
+      yield { type: "system", subtype: "task_started", task_id: "bg", task_type: "local_agent",
+        tool_use_id: "toolu_bg", is_backgrounded: true } as unknown as SDKMessage;
+      yield { type: "system", subtype: "background_tasks_changed", tasks: [] } as unknown as SDKMessage;
+      yield resultSuccess("cs-original", "done");
+    });
+    await h.send({ ...openInput, config: { ...openInput.config, env: { [TRANSLATE_AGENT_ID_ENV]: "source-agent" } } });
+    await h.send(promptInput("Start background work"));
+    await waitFor(h.events, (event) => event.type === "session.turn" && event.sessionId === "s" && event.state === "completed");
+    await coordinator.exclusive("source-agent", () => coordinator.prepare("source-agent"));
+    expect(h.events).toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: "subagent:s:toolu_bg", state: "canceled" }));
+    expect(h.events).not.toContainEqual(expect.objectContaining({ type: "session.turn", sessionId: "subagent:s:toolu_bg", state: "completed" }));
+    h.fake.use(async function* () { yield resultSuccess("cs-original", "continued"); });
+    await h.send(promptInput("Resume original", "m-next"));
+    await vi.waitFor(() => expect(h.events.filter((event) => event.type === "session.turn" && event.sessionId === "s" && event.state === "completed")).toHaveLength(2));
+    expect((await coordinator.exclusive("source-agent", () => coordinator.prepare("source-agent"))).claudeSessionId).toBe("cs-original");
+    await h.registration.close();
+  });
+
+  it("retains changed fork configuration after the entire provider is recreated", async () => {
+    const first = await createHarness();
+    await first.send({ ...openInput, persistence: { version: 1, data: {
+      claudeSessionId: "cs-copy", configDir: "E:/test-claude-storage",
+      forkConfig: { model: "claude-sonnet-4-6", mode: "acceptEdits", thinkingOption: "high", settings: { fast_mode: true },
+        systemPrompt: "Keep the source instructions", env: { CUSTOM_ENV: "keep", PASEO_AGENT_ID: "old-agent",
+          PASEO_AGENT_CWD: "old-cwd", [TRANSLATE_AGENT_ID_ENV]: "old-agent" } },
+    } } });
+    await first.send(promptInput("First continuation"));
+    expect(first.fake.state.options?.systemPrompt).toMatchObject({ append: "DE(Keep the source instructions)" });
+    expect(first.fake.state.options?.env?.CUSTOM_ENV).toBe("keep");
+    await first.send({ type: "session.configure", requestId: "config-copy", sessionId: "s",
+      changes: { model: "claude-opus-4-6", mode: "plan", thinkingOption: "medium", settings: { fast_mode: false } } });
+    const persisted = first.events.filter((event) => event.type === "session.persistence").at(-1);
+    if (!persisted || persisted.type !== "session.persistence") throw new Error("Missing updated fork persistence");
+    await first.registration.close();
+    const restarted = await createHarness();
+    await restarted.send({ ...openInput, config: { ...openInput.config, env: { PASEO_AGENT_ID: "new-agent",
+      PASEO_AGENT_CWD: openInput.config.cwd, [TRANSLATE_AGENT_ID_ENV]: "new-agent" } }, persistence: persisted.persistence });
+    await restarted.send(promptInput("Continue after restart"));
+    expect(restarted.fake.state.options?.model).toBe("claude-opus-4-6");
+    expect(restarted.fake.state.options?.permissionMode).toBe("plan");
+    expect(restarted.fake.state.options?.env?.CLAUDE_CONFIG_DIR).toBe("E:/test-claude-storage");
+    expect(restarted.fake.state.options?.settings).not.toHaveProperty("fastMode");
+    expect(restarted.fake.state.options?.systemPrompt).toMatchObject({ append: "DE(Keep the source instructions)" });
+    expect(restarted.fake.state.options?.env?.CUSTOM_ENV).toBe("keep");
+    expect(restarted.fake.state.options?.env?.PASEO_AGENT_ID).toBe("new-agent");
+    expect(restarted.fake.state.options?.env?.PASEO_AGENT_CWD).toBe(openInput.config.cwd);
+    expect(restarted.fake.state.options?.env?.[TRANSLATE_AGENT_ID_ENV]).toBeUndefined();
+    await restarted.registration.close();
+  });
+
+  it("clears background readiness after a CLI process exits following interruption", async () => {
+    const coordinator = new ClaudeForkCoordinator();
+    const h = await createHarness(undefined, undefined, undefined, undefined, coordinator);
+    let finish!: () => void;
+    const done = new Promise<void>((resolve) => { finish = resolve; });
+    h.fake.use(async function* () {
+      yield { type: "system", subtype: "background_tasks_changed", tasks: [{ task_id: "level-only", task_type: "local_bash", description: "Background" }] } as unknown as SDKMessage;
+      yield resultSuccess("cs-original", "done");
+      await done;
+      return END_ITERATOR;
+    });
+    await h.send({ ...openInput, config: { ...openInput.config, env: { [TRANSLATE_AGENT_ID_ENV]: "source-agent" } } });
+    await h.send(promptInput("Run background work"));
+    await waitFor(h.events, (event) => event.type === "session.turn" && event.state === "completed");
+    await expect(coordinator.prepare("source-agent")).rejects.toThrow("background tasks");
+    await h.send({ type: "session.interrupt", requestId: "interrupt", sessionId: "s" });
+    finish();
+    await vi.waitFor(async () => expect((await coordinator.prepare("source-agent")).claudeSessionId).toBe("cs-original"));
+    await h.registration.close();
+  });
+
+  it("releases an idle query and lets the original resume its own durable session", async () => {
+    const coordinator = new ClaudeForkCoordinator();
+    const { fake, events, send, registration } = await createHarness(undefined, undefined, undefined, undefined, coordinator);
+    fake.use(async function* () { yield resultSuccess("cs-original", "done"); });
+    await send({ ...openInput, config: { ...openInput.config, env: { [TRANSLATE_AGENT_ID_ENV]: "source-agent" } },
+      persistence: { version: 1, data: { claudeSessionId: "cs-original" } } });
+    await send(promptInput("Hello"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    const originalOptions = fake.state.options;
+    const snapshot = await coordinator.exclusive("source-agent", () => coordinator.prepare("source-agent"));
+    expect(snapshot.claudeSessionId).toBe("cs-original");
+    expect(originalOptions?.abortController?.signal.aborted).toBe(true);
+    await send(promptInput("Continue original", "m-next"));
+    expect(fake.state.spawnCount).toBe(2);
+    expect(fake.state.options?.resume).toBe("cs-original");
+    await registration.close();
+    await expect(coordinator.prepare("source-agent")).rejects.toThrow("Open the source");
+  });
+
+  it("rejects a background Bash task even though it has no subagent row", async () => {
+    const coordinator = new ClaudeForkCoordinator();
+    const { fake, events, send, registration } = await createHarness(undefined, undefined, undefined, undefined, coordinator);
+    fake.use(async function* () {
+      yield { type: "system", subtype: "task_started", task_id: "bash-bg", task_type: "local_bash", tool_use_id: "tu-bash", is_backgrounded: true } as unknown as SDKMessage;
+      yield resultSuccess("cs-original", "done");
+    });
+    await send({ ...openInput, config: { ...openInput.config, env: { [TRANSLATE_AGENT_ID_ENV]: "source-agent" } } });
+    await send(promptInput("Start job"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    await expect(coordinator.exclusive("source-agent", () => coordinator.prepare("source-agent")))
+      .rejects.toThrow("background tasks");
+    expect(fake.state.options?.abortController?.signal.aborted).toBe(false);
+    await registration.close();
+  });
+
+  it("restores a fork's storage root and selected configuration without replacing new tool wiring", async () => {
+    const coordinator = new ClaudeForkCoordinator();
+    const { fake, events, send, registration } = await createHarness(undefined, undefined, undefined, undefined, coordinator);
+    await send({ ...openInput, config: { ...openInput.config, mcpServers: { fresh: { type: "stdio", command: "new-agent" } } },
+      persistence: { version: 1, data: { claudeSessionId: "cs-copy", configDir: "E:/test-claude-storage",
+        forkConfig: { model: "claude-sonnet-4-6", mode: "acceptEdits", thinkingOption: "high", settings: { fast_mode: true } } } } });
+    expect(events.find((event) => event.type === "session.opened" && event.sessionId === "s"))
+      .toMatchObject({ persistence: { version: 1, data: { claudeSessionId: "cs-copy", configDir: "E:/test-claude-storage" } } });
+    await send(promptInput("Continue copy"));
+    expect(fake.state.options?.env?.CLAUDE_CONFIG_DIR).toBe("E:/test-claude-storage");
+    expect(fake.state.options?.model).toBe("claude-sonnet-4-6");
+    expect(fake.state.options?.permissionMode).toBe("acceptEdits");
+    expect(fake.state.options?.mcpServers).toEqual({ fresh: { type: "stdio", command: "new-agent" } });
+    await registration.close();
   });
 });
 

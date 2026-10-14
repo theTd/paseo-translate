@@ -162,6 +162,8 @@ export class ClaudeSubagentTracker {
   private readonly backgroundedIds = new Set<string>();
   private readonly children = new Map<string, ChildState>();
   private readonly lastStatusById = new Map<string, SubagentStatus>();
+  private readonly runningTaskIds = new Map<string, boolean>();
+  private backgroundTaskIds: Set<string> | null = null;
 
   constructor(
     private readonly rootSessionId: string,
@@ -177,6 +179,7 @@ export class ClaudeSubagentTracker {
   ) {}
 
   reset(): void {
+    this.resetProcessTasks();
     this.subagentIdByTaskId.clear();
     this.canonicalIdByToolUseId.clear();
     this.ownerCanonicalByToolUseId.clear();
@@ -222,6 +225,21 @@ export class ClaudeSubagentTracker {
    */
   observeSystemMessage(message: SDKMessage): boolean {
     if (message.type !== "system") return false;
+    if (message.subtype === "background_tasks_changed") {
+      this.backgroundTaskIds = new Set(message.tasks.map((task) => task.task_id));
+      return true;
+    }
+    const task = message as unknown as { task_id?: string; is_backgrounded?: boolean; status?: unknown;
+      patch?: { status?: unknown; is_backgrounded?: boolean } };
+    if (task.task_id) {
+      if (message.subtype === "task_started") this.runningTaskIds.set(task.task_id, task.is_backgrounded === true);
+      else if (message.subtype === "task_notification" || message.subtype === "task_updated") {
+        const backgrounded = task.patch?.is_backgrounded ?? this.runningTaskIds.get(task.task_id) ?? false;
+        const status = mapTaskStatus(task.patch?.status ?? task.status);
+        if (status === "running" || (status === undefined && this.runningTaskIds.has(task.task_id))) this.runningTaskIds.set(task.task_id, backgrounded);
+        else if (status) this.runningTaskIds.delete(task.task_id);
+      }
+    }
     switch (message.subtype) {
       case "task_started":
         this.observeTaskStarted(message as unknown as TaskStartedShape);
@@ -238,6 +256,31 @@ export class ClaudeSubagentTracker {
       default:
         return false;
     }
+  }
+
+  /** Includes background Bash tasks that deliberately have no subagent track row. */
+  hasRunningTasks(): boolean {
+    return Boolean(this.backgroundTaskIds?.size) ||
+      [...this.runningTaskIds.values()].some((backgrounded) => !backgrounded || this.backgroundTaskIds === null) ||
+      [...this.children.values()].some((child) => child.turnOpen &&
+        (!this.backgroundedIds.has(child.canonicalId) || this.backgroundTaskIds === null));
+  }
+
+  /** Background membership is per CLI process, independent of historical task declarations. */
+  resetProcessTasks(): void {
+    this.runningTaskIds.clear();
+    this.backgroundTaskIds = null;
+  }
+
+  /** Intentional query teardown ends its live work, not the retained task history. */
+  finishProcessTasks(): void {
+    for (const child of this.children.values()) {
+      if (!child.turnOpen) continue;
+      // Membership absence cannot distinguish success, failure, or kill. Preserve actual
+      // terminal bookends; otherwise report the query teardown without inventing success.
+      this.closeChildTurn(child, "canceled");
+    }
+    this.resetProcessTasks();
   }
 
   /**
@@ -263,12 +306,16 @@ export class ClaudeSubagentTracker {
   cancelRunningForegroundTasks(): void {
     for (const [id, child] of this.children) {
       if (this.backgroundedIds.has(id) || !child.turnOpen) continue;
+      for (const [taskId, canonicalId] of this.subagentIdByTaskId) {
+        if (canonicalId === id) this.runningTaskIds.delete(taskId);
+      }
       this.closeChildTurn(child, "canceled");
     }
   }
 
   /** A lost process fails every child with an open turn. */
   failRunningTasks(): void {
+    this.resetProcessTasks();
     for (const child of this.children.values()) {
       if (!child.turnOpen) continue;
       this.closeChildTurn(child, "failed", "Claude session ended");

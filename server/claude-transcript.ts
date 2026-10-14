@@ -402,10 +402,11 @@ export async function readClaudeReplay(
   cwd: string,
   claudeSessionId: string,
   restore?: ReplayUserTextRestore,
+  configDir?: string,
 ): Promise<ReplayResult> {
   const empty: ReplayResult = { rootItems: [], children: [] };
   try {
-    return await readReplayInner(cwd, claudeSessionId, restore);
+    return await readReplayInner(cwd, claudeSessionId, restore, configDir);
   } catch {
     return empty;
   }
@@ -421,8 +422,9 @@ async function readReplayInner(
   cwd: string,
   claudeSessionId: string,
   restore?: ReplayUserTextRestore,
+  configDir?: string,
 ): Promise<ReplayResult> {
-  const projectDir = claudeProjectDir(cwd);
+  const projectDir = claudeProjectDir(cwd, configDir);
   const entries = await readJsonLines(join(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
 

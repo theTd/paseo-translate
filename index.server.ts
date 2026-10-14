@@ -6,6 +6,9 @@ import { createTranslateProvider } from "./server/provider";
 // out of the daemon compiler's dependency walk. See server/claude-provider.dist.d.cts.
 import { createTranslateClaudeProvider } from "./server/claude-provider.dist.cjs";
 import { createTranslateCodexProvider } from "./server/codex-provider";
+import { ClaudeForkCoordinator } from "./server/claude-fork-coordinator";
+import { createClaudeSessionForkHandler } from "./server/claude-session-fork";
+import { forkClaudeSessionRpc } from "./shared/claude-session-fork";
 import { createTranslateHandler } from "./server/translate";
 import {
   createTranslateStreamManager,
@@ -65,6 +68,7 @@ export default function contribute(server: PluginServerContext) {
     }),
   });
   const deps = { loadConfig, cacheStore, context };
+  const forkCoordinator = new ClaudeForkCoordinator();
   // Bridge the agent id into our providers' session env: the daemon assigns
   // providers a fresh random session id per open, so without this the prompt
   // path could not share a transcript with the client display path (which
@@ -74,7 +78,8 @@ export default function contribute(server: PluginServerContext) {
     return { ...request, env: { ...request.env, [TRANSLATE_AGENT_ID_ENV]: request.agentId } };
   });
   server.registerProvider(withNotificationTranslation(createTranslateProvider(deps), deps));
-  server.registerProvider(withNotificationTranslation(createTranslateClaudeProvider(deps), deps));
+  server.registerProvider(withNotificationTranslation(createTranslateClaudeProvider({ ...deps, forkCoordinator }), deps));
+  server.handle(forkClaudeSessionRpc, createClaudeSessionForkHandler({ coordinator: forkCoordinator }));
   server.registerProvider(withNotificationTranslation(createTranslateCodexProvider(deps), deps));
   server.handle(translateTextRpc, createTranslateHandler(deps));
   const streamManager = createTranslateStreamManager(deps);

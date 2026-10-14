@@ -1,7 +1,7 @@
 {
   "id": "translate",
   "requirements": {
-    "paseo": ">=0.8.0"
+    "paseo": ">=0.11.2"
   },
   "build": [["npm", "ci"], ["npm", "run", "build"]]
 }

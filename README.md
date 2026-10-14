@@ -156,6 +156,20 @@ the app after each turn.
   restarts). Permissions pass through to you with Allow/Deny; interrupt maps
   to Claude's interrupt. "Always allow" style permission upgrades from the
   CLI's suggestions are not offered — every request is a plain Allow/Deny.
+- **Fork session** is an agent-scoped composer button with a second confirmation.
+  It copies the complete persisted Claude session, companion subagent/workflow
+  storage, saved tool results, file-history backups, and session environment,
+  assigning new session/message/tool/subagent identifiers. The copy gets a
+  distinct `Original title (fork 12ab34cd)` title in both Claude storage and
+  Paseo. Both sessions share the working directory. Finish foreground and
+  background work and resolve permissions before forking; the source remains
+  resumable under its original ID. Import/title failures can be retried without
+  creating another copy. Forks preserve custom system instructions and process
+  environment overrides, with new Paseo agent identities and tool wiring. They
+  are opened through Paseo's session list or the fork operation's retry, and
+  excluded from generic Claude session import to prevent duplicate writers.
+  Forking uses the installed Paseo CLI against the
+  daemon's home and requires Paseo 0.11.2 or newer; no daemon patch is needed.
 - Session-list status tracks background work like the native provider:
   a backgrounded Task subagent or a background job that outlives its turn
   keeps the session reporting as running (the provider opens a synthetic

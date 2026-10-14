@@ -53290,14 +53290,22 @@ function encodeProjectDir(input2) {
   }
   return `${replaced.slice(0, PROJECT_DIR_LENGTH_CAP)}-${Math.abs(hash2).toString(36)}`;
 }
-function claudeProjectDir(cwd) {
-  return (0, import_node_path2.join)(resolveClaudeConfigDir(), "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
+function claudeProjectDir(cwd, configDir = resolveClaudeConfigDir()) {
+  return (0, import_node_path2.join)(configDir, "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
 }
 function normalizeProjectPath(input2) {
   return process.platform === "darwin" ? input2.normalize("NFC") : input2;
 }
 
 // server/claude-sessions.ts
+async function markManagedClaudeFork(cwd, configDir, sessionId) {
+  const marker = (0, import_node_path3.join)(claudeProjectDir(cwd, configDir), `${sessionId}.paseo-fork`);
+  try {
+    await (0, import_promises12.writeFile)(marker, "Managed by Translate session fork\n", { flag: "wx", mode: 384 });
+  } catch (error62) {
+    if (error62.code !== "EEXIST") throw error62;
+  }
+}
 async function readTranscriptPreview(path3) {
   const base = path3.split(/[\\/]/).pop() ?? "";
   const claudeSessionId = /^([0-9a-fA-F][0-9a-fA-F-]{7,})\.jsonl$/.exec(base)?.[1];
@@ -53332,6 +53340,16 @@ async function readTranscriptPreview(path3) {
     if (title !== void 0 && updatedAt !== void 0) break;
   }
   if (title === void 0) return null;
+  for (const line of raw.slice(-512e3).split("\n").reverse()) {
+    try {
+      const record2 = JSON.parse(line);
+      if (typeof record2 === "object" && record2 !== null && "type" in record2 && record2.type === "custom-title" && "customTitle" in record2 && typeof record2.customTitle === "string" && record2.customTitle.trim()) {
+        title = record2.customTitle.trim();
+        break;
+      }
+    } catch {
+    }
+  }
   try {
     const stats = await (0, import_promises12.stat)(path3);
     updatedAt = updatedAt ?? stats.mtime;
@@ -53368,8 +53386,11 @@ async function listClaudeTranscriptSummaries(cwd, limit) {
     return [];
   }
   const previews = [];
+  const storedNames = new Set(names);
   for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
+    const sessionId = name.slice(0, -".jsonl".length);
+    if (storedNames.has(`${sessionId}.clone.json`) || storedNames.has(`${sessionId}.paseo-fork`)) continue;
     const preview = await readTranscriptPreview((0, import_node_path3.join)(directory, name));
     if (preview === null) continue;
     previews.push(preview);
@@ -53775,8 +53796,11 @@ var ClaudeSubagentTracker = class {
     this.backgroundedIds = /* @__PURE__ */ new Set();
     this.children = /* @__PURE__ */ new Map();
     this.lastStatusById = /* @__PURE__ */ new Map();
+    this.runningTaskIds = /* @__PURE__ */ new Map();
+    this.backgroundTaskIds = null;
   }
   reset() {
+    this.resetProcessTasks();
     this.subagentIdByTaskId.clear();
     this.canonicalIdByToolUseId.clear();
     this.ownerCanonicalByToolUseId.clear();
@@ -53819,6 +53843,20 @@ var ClaudeSubagentTracker = class {
    */
   observeSystemMessage(message) {
     if (message.type !== "system") return false;
+    if (message.subtype === "background_tasks_changed") {
+      this.backgroundTaskIds = new Set(message.tasks.map((task2) => task2.task_id));
+      return true;
+    }
+    const task = message;
+    if (task.task_id) {
+      if (message.subtype === "task_started") this.runningTaskIds.set(task.task_id, task.is_backgrounded === true);
+      else if (message.subtype === "task_notification" || message.subtype === "task_updated") {
+        const backgrounded = task.patch?.is_backgrounded ?? this.runningTaskIds.get(task.task_id) ?? false;
+        const status = mapTaskStatus(task.patch?.status ?? task.status);
+        if (status === "running" || status === void 0 && this.runningTaskIds.has(task.task_id)) this.runningTaskIds.set(task.task_id, backgrounded);
+        else if (status) this.runningTaskIds.delete(task.task_id);
+      }
+    }
     switch (message.subtype) {
       case "task_started":
         this.observeTaskStarted(message);
@@ -53835,6 +53873,23 @@ var ClaudeSubagentTracker = class {
       default:
         return false;
     }
+  }
+  /** Includes background Bash tasks that deliberately have no subagent track row. */
+  hasRunningTasks() {
+    return Boolean(this.backgroundTaskIds?.size) || [...this.runningTaskIds.values()].some((backgrounded) => !backgrounded || this.backgroundTaskIds === null) || [...this.children.values()].some((child) => child.turnOpen && (!this.backgroundedIds.has(child.canonicalId) || this.backgroundTaskIds === null));
+  }
+  /** Background membership is per CLI process, independent of historical task declarations. */
+  resetProcessTasks() {
+    this.runningTaskIds.clear();
+    this.backgroundTaskIds = null;
+  }
+  /** Intentional query teardown ends its live work, not the retained task history. */
+  finishProcessTasks() {
+    for (const child of this.children.values()) {
+      if (!child.turnOpen) continue;
+      this.closeChildTurn(child, "canceled");
+    }
+    this.resetProcessTasks();
   }
   /**
    * Route a sidechain frame (`parent_tool_use_id` set) to its owning child
@@ -53854,11 +53909,15 @@ var ClaudeSubagentTracker = class {
   cancelRunningForegroundTasks() {
     for (const [id2, child] of this.children) {
       if (this.backgroundedIds.has(id2) || !child.turnOpen) continue;
+      for (const [taskId, canonicalId] of this.subagentIdByTaskId) {
+        if (canonicalId === id2) this.runningTaskIds.delete(taskId);
+      }
       this.closeChildTurn(child, "canceled");
     }
   }
   /** A lost process fails every child with an open turn. */
   failRunningTasks() {
+    this.resetProcessTasks();
     for (const child of this.children.values()) {
       if (!child.turnOpen) continue;
       this.closeChildTurn(child, "failed", "Claude session ended");
@@ -54431,16 +54490,16 @@ function flattenReplayContent(content) {
   }
   return parts.length > 0 ? parts.join("\n") : null;
 }
-async function readClaudeReplay(cwd, claudeSessionId, restore) {
+async function readClaudeReplay(cwd, claudeSessionId, restore, configDir) {
   const empty = { rootItems: [], children: [] };
   try {
-    return await readReplayInner(cwd, claudeSessionId, restore);
+    return await readReplayInner(cwd, claudeSessionId, restore, configDir);
   } catch {
     return empty;
   }
 }
-async function readReplayInner(cwd, claudeSessionId, restore) {
-  const projectDir = claudeProjectDir(cwd);
+async function readReplayInner(cwd, claudeSessionId, restore, configDir) {
+  const projectDir = claudeProjectDir(cwd, configDir);
   const entries = await readJsonLines((0, import_node_path5.join)(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
   const root = createCollector(null);
@@ -54549,6 +54608,31 @@ async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUse
   return { canonicalId, meta: meta3 ?? {}, collector };
 }
 
+// server/claude-fork-coordinator.ts
+var claudeForkConfigurationSchema = external_exports.object({
+  model: external_exports.string().optional(),
+  mode: external_exports.string().optional(),
+  thinkingOption: external_exports.string().optional(),
+  settings: external_exports.record(external_exports.string(), external_exports.json()),
+  providerOptions: external_exports.record(external_exports.string(), external_exports.json()).optional(),
+  systemPrompt: external_exports.string().optional(),
+  env: external_exports.record(external_exports.string(), external_exports.string()).optional()
+});
+function claudeForkEnvironment(env) {
+  return Object.fromEntries(Object.entries(env).filter(([key]) => key !== TRANSLATE_AGENT_ID_ENV && key !== "PASEO_AGENT_ID" && key !== "PASEO_AGENT_CWD"));
+}
+function claudeForkConfiguration(config2) {
+  return claudeForkConfigurationSchema.parse({
+    model: config2.model,
+    mode: config2.mode,
+    thinkingOption: config2.thinkingOption,
+    settings: { ...config2.settings },
+    providerOptions: config2.providerOptions,
+    systemPrompt: config2.systemPrompt,
+    env: claudeForkEnvironment(config2.env)
+  });
+}
+
 // server/claude-provider.ts
 var CAPABILITIES = [
   "prompt.message",
@@ -54648,11 +54732,14 @@ function createTranslateClaudeProvider(deps) {
   const forkClaudeSession = deps.forkSession ?? ((id2, options) => forkSession.forkSession(id2, options));
   const listeners = /* @__PURE__ */ new Set();
   const sessions = /* @__PURE__ */ new Map();
+  const unregisterForks = /* @__PURE__ */ new Map();
   const context = {
     sessions,
     translator,
     queryFactory,
     forkClaudeSession,
+    forkCoordinator: deps.forkCoordinator,
+    unregisterForks,
     loadValues: () => deps.loadConfig(),
     emit(event) {
       if (!connectionClosed) for (const listener of listeners) listener(event);
@@ -54679,7 +54766,10 @@ function createTranslateClaudeProvider(deps) {
         capabilities,
         async send(input2) {
           if (connectionClosed) throw new Error("Translate Claude provider connection is closed");
-          await dispatch(input2, context, capabilities);
+          const session = "sessionId" in input2 ? sessions.get(input2.sessionId) : void 0;
+          if (session && deps.forkCoordinator) {
+            await deps.forkCoordinator.exclusive(session.contextKey, () => dispatch(input2, context, capabilities));
+          } else await dispatch(input2, context, capabilities);
         },
         onEvent(listener) {
           listeners.add(listener);
@@ -54688,7 +54778,14 @@ function createTranslateClaudeProvider(deps) {
         async close() {
           if (connectionClosed) return;
           connectionClosed = true;
-          for (const session of sessions.values()) await teardownSession(session);
+          for (const session of sessions.values()) {
+            const close = async () => {
+              unregisterForks.get(session.id)?.();
+              await teardownSession(session);
+            };
+            if (deps.forkCoordinator) await deps.forkCoordinator.exclusive(session.contextKey, close);
+            else await close();
+          }
           sessions.clear();
           listeners.clear();
         }
@@ -54730,6 +54827,8 @@ async function dispatch(input2, context, capabilities) {
     }
     case "session.close": {
       const session = context.sessions.get(input2.sessionId);
+      context.unregisterForks.get(input2.sessionId)?.();
+      context.unregisterForks.delete(input2.sessionId);
       context.sessions.delete(input2.sessionId);
       if (session !== void 0) await teardownSession(session);
       context.emit({ type: "session.closed", sessionId: input2.sessionId });
@@ -54741,6 +54840,7 @@ async function dispatch(input2, context, capabilities) {
       const session = context.sessions.get(input2.sessionId);
       if (session === void 0) throw new Error(`Unknown session: ${input2.sessionId}`);
       await applyConfigChanges(session, input2.changes);
+      if (session.forkConfiguration) context.emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
       context.emit({
         type: "session.config",
         sessionId: input2.sessionId,
@@ -54839,12 +54939,15 @@ async function rewindConversationOnce(session, messageId, context) {
     throw new Error("Claude session is not ready for rewind");
   }
   const fork = await context.forkClaudeSession(session.claudeSessionId, { upToMessageId: messageId });
+  if (session.forkConfiguration) {
+    await markManagedClaudeFork(session.config.cwd, session.config.env["CLAUDE_CONFIG_DIR"], fork.sessionId);
+  }
   session.claudeSessionId = fork.sessionId;
   await resetQuery(session, (event) => context.emit(event));
   context.emit({
     type: "session.persistence",
     sessionId: session.id,
-    persistence: { version: 1, data: { claudeSessionId: fork.sessionId } }
+    persistence: claudePersistence(session)
   });
 }
 async function resetQuery(session, emit) {
@@ -54861,6 +54964,7 @@ async function resetQuery(session, emit) {
   const active = session.active;
   session.active = null;
   await pump?.catch(() => void 0);
+  session.subagents?.finishProcessTasks();
   session.detached = false;
   if (active !== null) {
     emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
@@ -54870,6 +54974,26 @@ async function resetQuery(session, emit) {
 async function openSession(input2, context, capabilities) {
   if (context.sessions.has(input2.sessionId)) {
     throw new Error(`Session already exists: ${input2.sessionId}`);
+  }
+  const storedConfigDir = readStoredConfigDir(input2.persistence);
+  const importConfig = readStoredForkConfiguration(input2.persistence);
+  if (storedConfigDir || importConfig) {
+    input2 = { ...input2, config: {
+      ...input2.config,
+      ...importConfig ? {
+        model: importConfig.model,
+        mode: importConfig.mode,
+        thinkingOption: importConfig.thinkingOption,
+        settings: importConfig.settings,
+        providerOptions: importConfig.providerOptions,
+        ...importConfig.systemPrompt !== void 0 ? { systemPrompt: importConfig.systemPrompt } : {}
+      } : {},
+      env: {
+        ...input2.config.env,
+        ...claudeForkEnvironment(importConfig?.env ?? {}),
+        ...storedConfigDir ? { CLAUDE_CONFIG_DIR: storedConfigDir } : {}
+      }
+    } };
   }
   const contextKey = resolveTranslationContextKey(input2.config.env, input2.sessionId);
   let translatedSystemPrompt = null;
@@ -54896,6 +55020,7 @@ async function openSession(input2, context, capabilities) {
     }
   }
   const session = {
+    forkConfiguration: importConfig !== void 0,
     id: input2.sessionId,
     config: input2.config,
     contextKey,
@@ -54938,13 +55063,33 @@ async function openSession(input2, context, capabilities) {
     session.supportsSubsessions
   );
   context.sessions.set(input2.sessionId, session);
+  if (context.forkCoordinator) {
+    context.unregisterForks.set(session.id, context.forkCoordinator.register(session.contextKey, async () => {
+      if (session.closed || session.active || session.autonomous || session.pendingPermissions.size || session.subagents?.hasRunningTasks()) {
+        throw new Error("Wait for Claude and its background tasks to finish, and resolve pending permissions before forking");
+      }
+      if (!session.claudeSessionId) throw new Error("Send a message first so Claude has a persisted session to fork");
+      if (session.query) await resetQuery(session, context.emit);
+      return {
+        claudeSessionId: session.claudeSessionId,
+        configDir: import_node_path6.default.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
+        config: {
+          ...session.config,
+          model: session.desiredModel ?? void 0,
+          mode: session.desiredMode ?? void 0,
+          thinkingOption: session.desiredThinking ?? void 0,
+          settings: { ...session.config.settings, fast_mode: session.fastMode }
+        }
+      };
+    }));
+  }
   context.emit({
     type: "session.opened",
     requestId: input2.requestId,
     sessionId: input2.sessionId,
     capabilities,
     restoration: "core",
-    ...session.claudeSessionId !== null ? { persistence: { version: 1, data: { claudeSessionId: session.claudeSessionId } } } : {},
+    ...session.claudeSessionId !== null ? { persistence: claudePersistence(session) } : {},
     title: input2.config.title,
     cwd: input2.config.cwd
   });
@@ -54986,7 +55131,7 @@ function readConfigured(value) {
 async function replayHistory(session, history, context) {
   if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
   const restore = await buildReplayRestore(context);
-  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore);
+  const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore, session.config.env["CLAUDE_CONFIG_DIR"]);
   for (const item of replay.rootItems) {
     if (session.closed) return;
     context.emit({ type: "timeline.item", sessionId: session.id, item });
@@ -55119,6 +55264,29 @@ function readStoredSessionId(persistence) {
   }
   const stored = persistence.data.claudeSessionId;
   return typeof stored === "string" && stored.length > 0 ? stored : null;
+}
+function readStoredConfigDir(persistence) {
+  if (!persistence || typeof persistence.data !== "object" || !persistence.data) return void 0;
+  const configDir = persistence.data.configDir;
+  return typeof configDir === "string" && configDir.length > 0 ? configDir : void 0;
+}
+function claudePersistence(session) {
+  const configDir = session.config.env["CLAUDE_CONFIG_DIR"];
+  return { version: 1, data: {
+    claudeSessionId: session.claudeSessionId,
+    ...configDir ? { configDir } : {},
+    ...session.forkConfiguration ? { forkConfig: claudeForkConfiguration({
+      ...session.config,
+      model: session.desiredModel ?? void 0,
+      mode: session.desiredMode ?? void 0,
+      thinkingOption: session.desiredThinking ?? void 0,
+      settings: { ...session.config.settings, fast_mode: session.fastMode }
+    }) } : {}
+  } };
+}
+function readStoredForkConfiguration(persistence) {
+  if (!persistence || typeof persistence.data !== "object" || !persistence.data || !("forkConfig" in persistence.data)) return void 0;
+  return claudeForkConfigurationSchema.parse(persistence.data.forkConfig);
 }
 function rawPromptText(content) {
   const parts = [];
@@ -55338,6 +55506,7 @@ async function buildMessageBlocks(content, context, contextKey) {
 }
 async function ensureQuery(session, context) {
   if (session.query !== null) return;
+  session.subagents?.resetProcessTasks();
   const values = await context.loadValues();
   const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const permissionMode = session.desiredMode ?? void 0;
@@ -55793,6 +55962,7 @@ async function respondToPermission(session, permissionId, response, context) {
         const targetMode = shouldResumeBypass ? "bypassPermissions" : "acceptEdits";
         session.desiredMode = targetMode;
         session.planResumeMode = targetMode;
+        if (session.forkConfiguration) emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
         if (session.query?.setPermissionMode !== void 0) {
           await session.query.setPermissionMode(targetMode).catch(() => void 0);
         }
@@ -55886,7 +56056,7 @@ function finishDeadQuery(session, message, emit) {
     settleAutonomousTurn(session, emit, wasInterrupted ? "canceled" : "failed", wasInterrupted ? void 0 : message);
   }
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
-  else session.subagents?.failRunningTasks();
+  session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
     pending.resolve({ behavior: "deny", message: "Claude session ended" });
   }
@@ -56087,7 +56257,7 @@ function handleSdkMessage(session, message, context) {
     emit({
       type: "session.persistence",
       sessionId: session.id,
-      persistence: { version: 1, data: { claudeSessionId: message.session_id } }
+      persistence: claudePersistence(session)
     });
     recordModelContextWindow(session, message.modelUsage);
     session.streamInputTokens = null;

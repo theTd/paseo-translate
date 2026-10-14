@@ -38,8 +38,8 @@ export function encodeProjectDir(input: string): string {
 }
 
 /** `<configDir>/projects/<encoded-canonical-cwd>` — the transcript folder. */
-export function claudeProjectDir(cwd: string): string {
-  return join(resolveClaudeConfigDir(), "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
+export function claudeProjectDir(cwd: string, configDir = resolveClaudeConfigDir()): string {
+  return join(configDir, "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
 }
 
 function normalizeProjectPath(input: string): string {

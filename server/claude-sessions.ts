@@ -1,7 +1,17 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProviderSessionSummary } from "@getpaseo/plugin/server/provider";
 import { claudeProjectDir } from "./claude-project-dir";
+
+/** SDK rewinds create a new transcript without a clone manifest; retain managed ownership. */
+export async function markManagedClaudeFork(cwd: string, configDir: string | undefined, sessionId: string): Promise<void> {
+  const marker = join(claudeProjectDir(cwd, configDir), `${sessionId}.paseo-fork`);
+  try {
+    await writeFile(marker, "Managed by Translate session fork\n", { flag: "wx", mode: 0o600 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
 
 interface TranscriptPreview {
   claudeSessionId: string;
@@ -49,6 +59,17 @@ async function readTranscriptPreview(path: string): Promise<TranscriptPreview | 
     if (title !== undefined && updatedAt !== undefined) break;
   }
   if (title === undefined) return null;
+  // Claude custom titles are appended, so the tail wins over the first prompt.
+  for (const line of raw.slice(-512_000).split("\n").reverse()) {
+    try {
+      const record: unknown = JSON.parse(line);
+      if (typeof record === "object" && record !== null && "type" in record && record.type === "custom-title" &&
+        "customTitle" in record && typeof record.customTitle === "string" && record.customTitle.trim()) {
+        title = record.customTitle.trim();
+        break;
+      }
+    } catch { /* A partial tail line must not suppress the transcript's prompt title. */ }
+  }
   try {
     const stats = await stat(path);
     updatedAt = updatedAt ?? stats.mtime;
@@ -101,8 +122,13 @@ export async function listClaudeTranscriptSummaries(
     return [];
   }
   const previews: TranscriptPreview[] = [];
+  const storedNames = new Set(names);
   for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
+    // Forks are registered by their durable operation, including retry after failure.
+    // A generic import handle would bypass that operation and open the same storage twice.
+    const sessionId = name.slice(0, -".jsonl".length);
+    if (storedNames.has(`${sessionId}.clone.json`) || storedNames.has(`${sessionId}.paseo-fork`)) continue;
     const preview = await readTranscriptPreview(join(directory, name));
     if (preview === null) continue;
     previews.push(preview);

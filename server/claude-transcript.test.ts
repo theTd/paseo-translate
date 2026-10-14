@@ -64,6 +64,13 @@ function writeRootSession(fixture: Fixture, lines: string[]): void {
   writeFileSync(path.join(projectDir, `${fixture.sessionId}.jsonl`), lines.join("\n"), "utf8");
 }
 
+it("replays from an explicit fork storage root without changing the daemon environment", async () => {
+  const fixture = createFixture();
+  writeRootSession(fixture, [userText("Forked history")]);
+  const result = await readClaudeReplay(fixture.cwd, fixture.sessionId, undefined, fixture.configDir);
+  expect(result.rootItems).toContainEqual(expect.objectContaining({ type: "user_message", text: "Forked history" }));
+});
+
 function writeSidecar(
   fixture: Fixture,
   agentId: string,
