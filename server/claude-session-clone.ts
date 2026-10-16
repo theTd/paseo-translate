@@ -98,7 +98,7 @@ function text(file: string, bytes: Buffer): string {
   let decoded: string;
   try { decoded = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes); }
   catch { throw new Error(`UTF-8 reading failed: ${file}`); }
-  if (decoded.includes("\ufffd")) throw new Error(`UTF-8 reading still contains replacement characters: ${file}`);
+  // Fatal decoding rejects malformed bytes; a literal U+FFFD is valid stored text.
   return decoded;
 }
 

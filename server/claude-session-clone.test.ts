@@ -135,9 +135,35 @@ describe("complete Claude session cloning", () => {
     expect(await readFile(source.transcript)).toEqual(source.original);
   });
 
-  it("rejects invalid UTF-8 before publishing a copy", async () => {
+  it.each([
+    ["transcript", false], ["transcript", true],
+    ["subagent", false], ["subagent", true],
+  ] as const)("preserves stored replacement characters in %s (escaped=%s)", async (location, escaped) => {
     const source = await fixture();
-    await writeFile(source.transcript, Buffer.from([255, 254, 253]));
+    const relative = path.join("subagents", `agent-${source.child}.jsonl`);
+    const file = location === "transcript" ? source.transcript : path.join(source.project, source.sourceId, relative);
+    const content = "Stored text: \ufffd 你好";
+    const record = { type: "assistant", sessionId: source.sourceId, agentId: source.child,
+      message: { role: "assistant", content } };
+    const serialized = JSON.stringify(record);
+    const bytes = Buffer.from(escaped ? serialized.replaceAll("\ufffd", "\\ufffd") : serialized, "utf8");
+    await writeFile(file, bytes);
+
+    const copy = await cloneClaudeSession({ transcript: source.transcript, configDir: source.configDir });
+    const target = location === "transcript" ? copy.transcript
+      : path.join(source.project, copy.newSessionId, "subagents", `agent-${copy.identifierMapping[source.child]}.jsonl`);
+    const copied = await readFile(target, "utf8");
+    expect(JSON.parse(copied)).toEqual({ ...record, sessionId: copy.newSessionId,
+      agentId: copy.identifierMapping[source.child] });
+    expect(copied).toContain(escaped ? "\\ufffd" : "\ufffd");
+    expect(await readFile(file)).toEqual(bytes);
+  });
+
+  it.each(["transcript", "subagent"])("rejects invalid UTF-8 in %s before publishing a copy", async (location) => {
+    const source = await fixture();
+    const file = location === "transcript" ? source.transcript
+      : path.join(source.project, source.sourceId, "subagents", `agent-${source.child}.jsonl`);
+    await writeFile(file, Buffer.from([255, 254, 253]));
     await expect(cloneClaudeSession({ transcript: source.transcript, configDir: source.configDir })).rejects.toThrow("UTF-8 reading failed");
     expect((await readdir(source.project)).filter((name) => name.endsWith(".jsonl"))).toHaveLength(1);
   });
