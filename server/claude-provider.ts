@@ -225,6 +225,10 @@ interface ClaudeSession {
    */
   autonomous: { turnId: string } | null;
   interrupted: boolean;
+  /** Canceled foreground requests whose ordered terminal results are still
+   * pending on this query. Keep their ownership across replacement prompts
+   * and repeated interrupts, regardless of the result's success/error text. */
+  pendingInterruptedResults: number;
   closed: boolean;
   /** Set while the live query is being swapped out (rewind); the pump then settles silently. */
   detached: boolean;
@@ -464,16 +468,31 @@ async function dispatch(
       const session = context.sessions.get(input.sessionId);
       if (session !== undefined && session.query !== null) {
         session.interrupted = true;
+        const active = session.active;
         // Native parity: interrupt settles an open autonomous turn as
-        // completed; the interrupted flag then blocks the killed request's
-        // trailing notifications until its result arrives.
+        // completed; canceled foreground results retain their ownership
+        // until the CLI reports their terminal frames.
         settleAutonomousTurn(session, context.emit, "completed");
+        if (active !== null) {
+          session.pendingInterruptedResults += 1;
+          // The pump keeps reading after an interrupt, so settle the stopped
+          // turn here instead of waiting for the killed request's trailing
+          // result frame, which must not settle a newer turn either (see the
+          // result handler's stale suppression).
+          session.active = null;
+          context.emit({
+            type: "session.turn",
+            sessionId: session.id,
+            turnId: active.turnId,
+            state: "canceled",
+          });
+        }
         // Discard steers Claude never read first: the SDK would otherwise
         // dequeue one and resume the turn just stopped.
         session.sink.discardPendingSteers();
         await session.query.interrupt().catch(() => undefined);
-        // A canceled turn ends its foreground children; backgrounded ones
-        // outlive it and keep their descriptors for the later settle.
+        // Settle foreground children now; retain background descriptors for
+        // the CLI's separate task termination notifications.
         session.subagents?.cancelRunningForegroundTasks();
       }
       context.emit({ type: "request.completed", requestId: input.requestId });
@@ -661,6 +680,10 @@ async function resetQuery(
   session.detached = true;
   session.abort.abort();
   session.abort = new AbortController();
+  // The rebuilt query belongs to no interrupted request: a stale flag would
+  // mute genuine background work and suppress a later real crash.
+  session.interrupted = false;
+  session.pendingInterruptedResults = 0;
   for (const pending of session.pendingPermissions.values()) {
     pending.resolve({ behavior: "deny", message: "Superseded by a rewind" });
   }
@@ -742,6 +765,7 @@ async function openSession(
     active: null,
     autonomous: null,
     interrupted: false,
+    pendingInterruptedResults: 0,
     closed: false,
     detached: false,
     fastModeSupported: claudeModelSupportsFastMode(input.config.model),
@@ -1428,10 +1452,12 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
     // setPermissionMode("bypassPermissions") does not fail after a restart
     // (native provider parity).
     allowDangerouslySkipPermissions: true,
+    // Leave perTaskStopAffordance undeclared until the client exposes a
+    // stop_task control. The CLI's default then lets Stop end background
+    // tasks too, rather than leaving work the user cannot directly stop.
     ...(permissionMode !== undefined
       ? { permissionMode: permissionMode as Options["permissionMode"] }
       : {}),
-    ...(session.config.persist ? { persistSession: true } : {}),
     ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
     ...(thinking.thinking !== undefined ? { thinking: thinking.thinking } : {}),
     ...(Object.keys(settings).length > 0 ? { settings } : {}),
@@ -2084,6 +2110,16 @@ async function resolveQuestionAllow(
   }
 }
 
+/**
+ * The long-lived query's message pump.
+ *
+ * A `session.interrupt` never ends this iteration: the SDK's `query()` is a
+ * one-shot generator over the CLI's output stream, and `query.interrupt()` is
+ * a control request that the CLI answers with a terminal *result* frame (the
+ * "aborted" result the result handler suppresses), not an iterator failure.
+ * Keep reading task termination notifications and subsequent prompts; only
+ * the stream erroring or closing ends this pump.
+ */
 async function pumpQuery(
   session: ClaudeSession,
   query: ClaudeQueryHandle,
@@ -2113,12 +2149,12 @@ async function pumpQuery(
 }
 
 /**
- * The long-lived query is gone (process death, or an SDK that ends the
- * iterator after an interrupt). Reset it so the next prompt rebuilds the
- * process from the latest Claude session id, settle the active turn
- * (canceled when the user interrupted, failed otherwise), and only surface a
- * runtime failure when the exit was not interrupt-driven.
+ * The long-lived query is gone (the CLI process died). Reset it so the next
+ * prompt rebuilds the process from the latest Claude session id, settle the
+ * active turn (canceled when the user interrupted, failed otherwise), and
+ * only surface a runtime failure when the exit was not interrupt-driven.
  */
+
 function finishDeadQuery(
   session: ClaudeSession,
   message: string,
@@ -2128,6 +2164,7 @@ function finishDeadQuery(
   session.pump = null;
   const wasInterrupted = session.interrupted;
   session.interrupted = false;
+  session.pendingInterruptedResults = 0;
   const active = session.active;
   if (active !== null) {
     session.active = null;
@@ -2227,9 +2264,16 @@ function handleSdkMessage(
   // Native parity: SDK activity with no open foreground turn is live work —
   // a backgrounded subagent or job that outlived its turn, or trailing
   // output. Open an autonomous turn so the daemon keeps the session listed
-  // as running; the trailing garbage of a killed request (session.interrupted)
-  // must not wake it, or a turn nothing closes wedges the status at running.
-  if (session.active === null && !session.interrupted && isAssistantishSdkMessage(message)) {
+  // as running; the trailing garbage of a killed foreground request must
+  // not wake it, or a turn nothing closes wedges the status at running.
+  // Stop also kills idle background work: keep consuming its notifications
+  // without reopening the root turn while the interrupt is outstanding.
+  if (
+    session.active === null &&
+    !session.interrupted &&
+    session.pendingInterruptedResults === 0 &&
+    isAssistantishSdkMessage(message)
+  ) {
     startAutonomousTurn(session, emit);
   }
   // The Task protocol owns subagent identity and status; sidechain frames
@@ -2425,6 +2469,7 @@ function handleSdkMessage(
       // dead conversation cannot be closed by it, so settle it here.
       settleAutonomousTurn(session, emit, "failed", missingConversation);
       session.interrupted = false;
+      session.pendingInterruptedResults = 0;
       // Detach so the iterator ending does not emit runtime_failed and
       // kill the daemon session. The next prompt rebuilds without resume.
       session.detached = true;
@@ -2444,17 +2489,27 @@ function handleSdkMessage(
       sessionId: session.id,
       persistence: claudePersistence(session),
     });
+    // The CLI serializes foreground requests on this query. A canceled
+    // request still owns its next terminal result, even if a replacement
+    // prompt is already active or this result reports success. Consume that
+    // ownership before touching the replacement's usage or turn state.
+    if (session.pendingInterruptedResults > 0) {
+      session.pendingInterruptedResults -= 1;
+      session.interrupted &&= session.pendingInterruptedResults > 0;
+      return;
+    }
     // The per-model context windows recorded on every result keep the ring
     // denominator fresh even when the model changes mid-session.
     recordModelContextWindow(session, (message as { modelUsage?: unknown }).modelUsage);
     // The turn is over: streaming counters are stale for the next turn.
     session.streamInputTokens = null;
     session.streamOutputTokens = null;
-    const active = session.active;
+
     // Native parity: the interrupt flag is consumed by ANY result, and a
     // result arriving with only an autonomous turn open settles it.
     const wasInterrupted = session.interrupted;
     session.interrupted = false;
+    const active = session.active;
     if (active === null) {
       if (wasInterrupted) {
         settleAutonomousTurn(session, emit, "canceled");

@@ -54813,7 +54813,18 @@ async function dispatch(input2, context, capabilities) {
       const session = context.sessions.get(input2.sessionId);
       if (session !== void 0 && session.query !== null) {
         session.interrupted = true;
+        const active = session.active;
         settleAutonomousTurn(session, context.emit, "completed");
+        if (active !== null) {
+          session.pendingInterruptedResults += 1;
+          session.active = null;
+          context.emit({
+            type: "session.turn",
+            sessionId: session.id,
+            turnId: active.turnId,
+            state: "canceled"
+          });
+        }
         session.sink.discardPendingSteers();
         await session.query.interrupt().catch(() => void 0);
         session.subagents?.cancelRunningForegroundTasks();
@@ -54954,6 +54965,8 @@ async function resetQuery(session, emit) {
   session.detached = true;
   session.abort.abort();
   session.abort = new AbortController();
+  session.interrupted = false;
+  session.pendingInterruptedResults = 0;
   for (const pending of session.pendingPermissions.values()) {
     pending.resolve({ behavior: "deny", message: "Superseded by a rewind" });
   }
@@ -55036,6 +55049,7 @@ async function openSession(input2, context, capabilities) {
     active: null,
     autonomous: null,
     interrupted: false,
+    pendingInterruptedResults: 0,
     closed: false,
     detached: false,
     fastModeSupported: claudeModelSupportsFastMode(input2.config.model),
@@ -55548,8 +55562,10 @@ async function ensureQuery(session, context) {
     // setPermissionMode("bypassPermissions") does not fail after a restart
     // (native provider parity).
     allowDangerouslySkipPermissions: true,
+    // Leave perTaskStopAffordance undeclared until the client exposes a
+    // stop_task control. The CLI's default then lets Stop end background
+    // tasks too, rather than leaving work the user cannot directly stop.
     ...permissionMode !== void 0 ? { permissionMode } : {},
-    ...session.config.persist ? { persistSession: true } : {},
     ...executable !== null ? { pathToClaudeCodeExecutable: executable } : {},
     ...thinking.thinking !== void 0 ? { thinking: thinking.thinking } : {},
     ...Object.keys(settings).length > 0 ? { settings } : {},
@@ -56037,6 +56053,7 @@ function finishDeadQuery(session, message, emit) {
   session.pump = null;
   const wasInterrupted = session.interrupted;
   session.interrupted = false;
+  session.pendingInterruptedResults = 0;
   const active = session.active;
   if (active !== null) {
     session.active = null;
@@ -56095,7 +56112,7 @@ function settleAutonomousTurn(session, emit, state, error62) {
 }
 function handleSdkMessage(session, message, context) {
   const emit = (event) => context.emit(event);
-  if (session.active === null && !session.interrupted && isAssistantishSdkMessage(message)) {
+  if (session.active === null && !session.interrupted && session.pendingInterruptedResults === 0 && isAssistantishSdkMessage(message)) {
     startAutonomousTurn(session, emit);
   }
   if (session.subagents?.observeSystemMessage(message) === true) return;
@@ -56242,6 +56259,7 @@ function handleSdkMessage(session, message, context) {
       }
       settleAutonomousTurn(session, emit, "failed", missingConversation);
       session.interrupted = false;
+      session.pendingInterruptedResults = 0;
       session.detached = true;
       session.abort.abort();
       session.abort = new AbortController();
@@ -56259,12 +56277,17 @@ function handleSdkMessage(session, message, context) {
       sessionId: session.id,
       persistence: claudePersistence(session)
     });
+    if (session.pendingInterruptedResults > 0) {
+      session.pendingInterruptedResults -= 1;
+      session.interrupted &&= session.pendingInterruptedResults > 0;
+      return;
+    }
     recordModelContextWindow(session, message.modelUsage);
     session.streamInputTokens = null;
     session.streamOutputTokens = null;
-    const active = session.active;
     const wasInterrupted = session.interrupted;
     session.interrupted = false;
+    const active = session.active;
     if (active === null) {
       if (wasInterrupted) {
         settleAutonomousTurn(session, emit, "canceled");

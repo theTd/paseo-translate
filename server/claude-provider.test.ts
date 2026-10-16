@@ -100,27 +100,48 @@ function createFakeFactory() {
       params.options.abortController?.signal.addEventListener("abort", () => resolve());
     });
     const prompts = params.prompt[Symbol.asyncIterator]();
-    const iterator = (async function* () {
-      while (true) {
+    // Faithful to the real SDK: `query()` is a one-shot generator over the
+    // CLI's output stream. It yields until the stream errors (a thrown script
+    // models that: `inputStream.error()` ends the only pass) or closes
+    // (END_ITERATOR / an aborted controller), and re-iterating it afterwards
+    // yields nothing. `finished` marks both terminal cases.
+    let finished = false;
+    let current: AsyncGenerator<SDKMessage> | null = null;
+    const iterator = {
+      async next(): Promise<IteratorResult<SDKMessage, unknown>> {
+        if (finished) return { done: true as const, value: undefined };
+        if (current !== null) {
+          let frame: IteratorResult<SDKMessage, unknown>;
+          try {
+            frame = await current.next();
+          } catch (error) {
+            current = null;
+            finished = true;
+            throw error;
+          }
+          if (!frame.done) return { done: false, value: frame.value };
+          current = null;
+          if (frame.value === END_ITERATOR) {
+            finished = true;
+            return { done: true as const, value: undefined };
+          }
+        }
         const next = await Promise.race([
           prompts.next(),
           aborted.then(() => "aborted" as const),
         ]);
-        if (next === "aborted" || next.done) return;
-        state.received.push(next.value);
-        const scripted = script(next.value);
-        while (true) {
-          const nextMessage = await scripted.next();
-          if (nextMessage.done) {
-            // A script may end the whole iterator (modeling an SDK that
-            // terminates after interrupt) by returning END_ITERATOR.
-            if (nextMessage.value === END_ITERATOR) return;
-            break;
-          }
-          yield nextMessage.value;
+        if (next === "aborted" || next.done) {
+          finished = true;
+          return { done: true as const, value: undefined };
         }
-      }
-    })();
+        state.received.push(next.value);
+        current = script(next.value);
+        return iterator.next();
+      },
+      [Symbol.asyncIterator]() {
+        return this;
+      },
+    };
     return {
       async interrupt() {
         state.interrupted += 1;
@@ -182,6 +203,18 @@ function resultSuccess(sessionId: string, text: string): SDKMessage {
     is_error: false,
     result: text,
     errors: [],
+    session_id: sessionId,
+  } as unknown as SDKMessage;
+}
+
+/** The CLI's trailing result frame for a request stopped by an interrupt. */
+function resultAborted(sessionId: string): SDKMessage {
+  return {
+    type: "result",
+    subtype: "error_during_tool_use",
+    is_error: true,
+    result: "",
+    errors: ["API Error: The request was aborted"],
     session_id: sessionId,
   } as unknown as SDKMessage;
 }
@@ -652,7 +685,7 @@ describe("translate claude provider", () => {
     expect(fake.state.interrupted).toBe(1);
   });
 
-  it("recovers when the iterator ends after an interrupt", async () => {
+  it("settles silently and rebuilds when the stream ends after an interrupt", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
     let endIteration: (() => void) | null = null;
@@ -661,8 +694,8 @@ describe("translate claude provider", () => {
     });
     fake.use(async function* () {
       yield assistantText("a-1", "Teils");
-      // An SDK that ends the iterator after interrupt instead of yielding a
-      // result frame: the script ends the whole iterator.
+      // A stream that ends after an interrupt instead of yielding a result
+      // frame: the turn must settle silently and the next prompt rebuilds.
       await gate;
       return END_ITERATOR;
     });
@@ -687,6 +720,152 @@ describe("translate claude provider", () => {
     // The interrupted turn never produced a result frame, so no Claude
     // session id was captured yet and the rebuild starts without resume.
     expect(fake.state.options?.resume).toBeUndefined();
+  });
+
+  it("keeps the CLI default that interrupts stop background tasks too", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Hello"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    // There is no per-task stop control in the read-only subagent UI.
+    expect(fake.state.options?.perTaskStopAffordance).toBeUndefined();
+  });
+
+  it("keeps the query usable after an interrupt and its trailing result", async () => {
+    const { fake, events, send } = await createHarness();
+    await send(openInput);
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fake.use(async function* () {
+      yield assistantText("a-1", "Teils");
+      await gate;
+      // An interrupt ends work, while the message stream remains usable
+      // for task termination notifications and subsequent prompts.
+      yield resultAborted("cs-1");
+      yield assistantText("a-bg", "Hintergrund laeuft");
+      yield resultSuccess("cs-2", "ok");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "timeline.item");
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    await waitFor(events, (_event) => fake.state.interrupted > 0);
+    (release as unknown as () => void)();
+    // The killed foreground request's trailing result settles neither a newer
+    // turn nor a running session twice: exactly one canceled turn.
+    await waitFor(
+      events,
+      (event) => event.type === "session.turn" && event.state === "canceled",
+    );
+    // The next prompt is served without rebuilding the CLI process.
+    fake.use(async function* () {
+      yield assistantText("a-2", "Wieder");
+      yield resultSuccess("cs-1", "ok");
+    });
+    await send(promptInput("Again", "m-2"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+    expect(fake.state.spawnCount).toBe(1);
+    expect(
+      events.filter((event) => event.type === "session.turn" && event.state === "canceled"),
+    ).toHaveLength(1);
+  });
+
+  it("settles an aborted error without a user interrupt and accepts the next prompt", async () => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () { yield resultAborted("cs-1"); });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "failed");
+    fake.use(async function* () { yield resultSuccess("cs-1", "recovered"); });
+    await send(promptInput("Again", "m-next"));
+    await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+    expect(events.some((event) => event.type === "session.prompt_result" && event.result.type === "failed")).toBe(false);
+    await registration.close();
+  });
+
+  it.each([
+    ["message", "success"], ["message", "aborted"],
+    ["command", "success"], ["command", "aborted"],
+  ] as const)("ignores an old %s turn's %s result after replacement", async (inputType, outcome) => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    let releaseOld!: () => void;
+    let releaseNew!: () => void;
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    const newGate = new Promise<void>((resolve) => { releaseNew = resolve; });
+    fake.use(async function* () {
+      yield assistantText("a-old", "Working");
+      await oldGate;
+      yield outcome === "success" ? resultSuccess("cs-1", "old result") : resultAborted("cs-1");
+    });
+    await send(promptInput("Old"));
+    await waitFor(events, (event) => event.type === "timeline.item");
+    await send({ type: "session.interrupt", requestId: "stop-old", sessionId: "s" });
+    // Repeated Stop must not reserve a second result for the same request.
+    await send({ type: "session.interrupt", requestId: "stop-again", sessionId: "s" });
+    fake.use(async function* () {
+      yield assistantText("a-new", "New work");
+      await newGate;
+      yield resultSuccess("cs-1", "new result");
+    });
+    const replacement = promptInput("New", "m-new");
+    if (inputType === "command") replacement.prompt.input = { type: "command", name: "help", arguments: "" };
+    await send(replacement);
+    const newTurn = events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "m-new");
+    if (newTurn?.type !== "session.prompt_result" || newTurn.result.type !== "turn") throw new Error("Replacement not accepted");
+    const newTurnId = newTurn.result.turnId;
+    releaseOld();
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-new");
+    expect(events.filter((event) => event.type === "session.turn" && event.turnId === newTurnId && event.state !== "started")).toEqual([]);
+    releaseNew();
+    await waitFor(events, (event) => event.type === "session.turn" && event.turnId === newTurnId && event.state === "completed");
+    expect(fake.state.spawnCount).toBe(1);
+    await registration.close();
+  });
+
+  it("consumes both canceled results when a queued replacement is stopped too", async () => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    let releaseOld!: () => void;
+    const oldGate = new Promise<void>((resolve) => { releaseOld = resolve; });
+    fake.use(async function* () {
+      yield assistantText("a-old", "Working");
+      await oldGate;
+      yield resultAborted("cs-1");
+    });
+    await send(promptInput("Old"));
+    await waitFor(events, (event) => event.type === "timeline.item");
+    await send({ type: "session.interrupt", requestId: "stop-old", sessionId: "s" });
+    await send(promptInput("Replacement", "m-replacement"));
+    await send({ type: "session.interrupt", requestId: "stop-replacement", sessionId: "s" });
+    let releaseLatest!: () => void;
+    const latestGate = new Promise<void>((resolve) => { releaseLatest = resolve; });
+    fake.use(async function* (prompt) {
+      if (JSON.stringify(prompt).includes("Replacement")) {
+        yield resultSuccess("cs-1", "canceled replacement");
+        return;
+      }
+      yield assistantText("a-latest", "Latest work");
+      await latestGate;
+      yield resultSuccess("cs-1", "latest result");
+    });
+    await send(promptInput("Latest", "m-latest"));
+    const latest = events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "m-latest");
+    if (latest?.type !== "session.prompt_result" || latest.result.type !== "turn") throw new Error("Latest prompt not accepted");
+    const turnId = latest.result.turnId;
+    releaseOld();
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-latest");
+    expect(events.filter((event) => event.type === "session.turn" && event.turnId === turnId && event.state !== "started")).toEqual([]);
+    releaseLatest();
+    await waitFor(events, (event) => event.type === "session.turn" && event.turnId === turnId && event.state === "completed");
+    expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "s" && event.state === "canceled")).toHaveLength(2);
+    expect(fake.state.spawnCount).toBe(1);
+    await registration.close();
   });
 
   it("keeps command words and serialized attachments untranslated", async () => {
@@ -1190,8 +1369,8 @@ describe("translate claude provider subagents", () => {
     expect(childOpens[0]).toMatchObject({ capabilities: ["session.subsession"] });
   });
 
-  it("keeps backgrounded children running across an interrupt", async () => {
-    const { fake, events, send } = await createHarness();
+  it("settles foreground and background children when the user stops the session", async () => {
+    const { fake, events, send, registration } = await createHarness();
     await send(openInput);
     let release: (() => void) | null = null;
     const gate = new Promise<void>((resolve) => {
@@ -1203,7 +1382,10 @@ describe("translate claude provider subagents", () => {
       yield rootToolUse("a-bg", "tu-bg", "Task", { subagent_type: "Explore" });
       yield taskStarted("t-bg", "tu-bg", { is_backgrounded: true });
       await gate;
-      return END_ITERATOR;
+      // The CLI default kills background tasks too, reporting their actual
+      // termination on the still-open stream.
+      yield taskNotification("t-bg", "killed");
+      yield resultAborted("cs-1");
     });
     await send(promptInput("Work"));
     await waitFor(
@@ -1218,21 +1400,41 @@ describe("translate claude provider subagents", () => {
         event.sessionId === "subagent:s:tu-fg" &&
         event.state === "canceled",
     );
-    // The backgrounded child outlives the turn: no terminal event for it.
-    expect(
-      events.some(
-        (event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg",
-      ),
-    ).toBe(true);
-    expect(
-      events.some(
-        (event) =>
-          event.type === "session.turn" &&
-          event.sessionId === "subagent:s:tu-bg" &&
-          event.state !== "started",
-      ),
-    ).toBe(false);
     (release as unknown as () => void)();
+    await waitFor(events, (event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" && event.state === "canceled");
+    expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+    await registration.close();
+  });
+
+  it("keeps a background child live after foreground completion and across the next prompt", async () => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-bg", "tu-bg", "Task", { subagent_type: "Explore" });
+      yield taskStarted("t-bg", "tu-bg", { is_backgrounded: true });
+      yield resultSuccess("cs-1", "foreground done");
+      yield sidechainText("tu-bg", "a-bg-idle", "Still working");
+    });
+    await send(promptInput("Start background work"));
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-bg-idle");
+    expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" && event.state !== "started")).toEqual([]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fake.use(async function* () {
+      yield sidechainText("tu-bg", "a-bg-next", "Continuing");
+      await gate;
+      yield taskNotification("t-bg", "completed");
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Continue", "m-next"));
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-bg-next");
+    expect(fake.state.interrupted).toBe(0);
+    expect(fake.state.spawnCount).toBe(1);
+    expect(fake.state.options?.abortController?.signal.aborted).toBe(false);
+    expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" && event.state !== "started")).toEqual([]);
+    release();
+    await waitFor(events, (event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" && event.state === "completed");
+    await registration.close();
   });
 });
 
@@ -1349,6 +1551,58 @@ describe("translate claude provider background work", () => {
     );
     expect(events.some((event) => event.type === "session.runtime_failed")).toBe(false);
     (release as unknown as () => void)();
+  });
+
+  it("ignores trailing background heartbeats after an idle interrupt", async () => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    fake.use(async function* () {
+      yield resultSuccess("cs-1", "done");
+      yield toolProgress("tu-job");
+      await gate;
+      // A task heartbeat can already be in flight when Stop is processed.
+      // Keep observing it until the CLI reports termination.
+      yield toolProgress("tu-job-next");
+      yield resultAborted("cs-1");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, () => rootTurns(events, "started").length === 2);
+    await send({ type: "session.interrupt", requestId: "r-int", sessionId: "s" });
+    (release as unknown as () => void)();
+    await waitFor(events, () => rootTurns(events, "completed").length === 2);
+    await registration.close();
+    expect(rootTurns(events, "started")).toHaveLength(2);
+  });
+
+  it.each([
+    ["killed", false], ["killed", true], ["completed", false], ["completed", true],
+  ] as const)("keeps the root stopped after a standalone %s task notice (heartbeat=%s)", async (status, heartbeat) => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fake.use(async function* () {
+      yield rootToolUse("a-bg", "tu-bg", "Task", { subagent_type: "Explore" });
+      yield taskStarted("t-bg", "tu-bg", { is_backgrounded: true });
+      yield resultSuccess("cs-1", "done");
+      yield toolProgress("tu-before-stop");
+      await gate;
+      if (heartbeat) yield toolProgress("tu-after-stop");
+      yield taskNotification("t-bg", status);
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, () => rootTurns(events, "started").length === 2);
+    await send({ type: "session.interrupt", requestId: "stop-idle", sessionId: "s" });
+    release();
+    await waitFor(events, (event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" &&
+      event.state === (status === "killed" ? "canceled" : "completed"));
+    expect(rootTurns(events, "started")).toHaveLength(2);
+    expect(rootTurns(events, "completed")).toHaveLength(2);
+    await registration.close();
   });
 
   it("ignores the trailing activity of a killed request until its result arrives", async () => {
