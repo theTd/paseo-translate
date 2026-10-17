@@ -27,3 +27,10 @@ describe("Claude text snapshots", () => {
     ] } } as unknown as SDKMessage)).toEqual([{ type: "assistant_message", id: "u", messageId: "u", text: "HelloHello world" }]);
   });
 });
+
+
+it.each(["No response requested.", "[Request interrupted by user for tool use]", "<local-command-stdout>internal</local-command-stdout>"])("filters native transcript noise: %s", (text) => {
+  expect(new ClaudeMessageStream().observe({ type: "assistant", uuid: "noise", message: {
+    content: [{ type: "text", text }],
+  } } as unknown as SDKMessage)).toEqual([]);
+});

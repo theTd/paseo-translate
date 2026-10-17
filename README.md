@@ -18,7 +18,7 @@ user-language rendering of replies exists only in the app's plugin view.
 | Direction | Where | Failure policy |
 | --- | --- | --- |
 | Prompt (you → agent) | The plugin's `translate-acp` provider proxies the inner ACP agent and translates `session/prompt` text blocks and the per-agent system prompt on the wire | Fail closed: a failed translation blocks that request with an error instead of leaking your language to the agent |
-| Prompt display (you → you) | A client timeline transformer + renderer (`translated-user-message`) shows the original and agent-language translation together in a plugin-owned right-aligned bubble. Translation starts automatically. Prompt submission caches joined display text and individual fragments, so cache-hot prompts need no extra endpoint call. Slash-command prefixes and serialized attachments stay verbatim | Display only; requires **Translate prompts**, a Translate provider, and a root agent. Failures leave the original. Matching languages and identical results show only one text. No host changes required; replaced rows lack native copy/rewind controls |
+| Prompt display (you → you) | A client timeline transformer + renderer (`translated-user-message`) shows the original and agent-language translation together in a plugin-owned right-aligned bubble. Translation starts automatically. Prompt submission caches joined display text and individual fragments, so cache-hot prompts need no extra endpoint call. Slash-command prefixes and serialized attachments stay verbatim | Display only; requires **Translate prompts**, a Translate provider, and a root agent. Failures leave the original. Matching languages and identical results show only one text. Hosts advertising source-row preservation keep the native copy/rewind controls and show the translation below the original; older hosts retain the bilingual plugin bubble |
 | Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message is settled — `phase` is `complete`, the agent is no longer running, or the live-head text has been unchanged for 800ms — and renders each poll as Markdown | Display only: stream-first against the endpoint's SSE with bounded retries from a fresh job (exponential backoff, longer for `busy`; fatal errors such as oversized text or an unconfigured endpoint fail fast), then a retried `translate.text` fallback. No total time limit: a stream attempt is dropped only when its text stops growing for 2 × `translationTimeoutMs` + 15s of awake time (device sleep does not count). On failure the original text stays, with an error hint and a manual Retry translation button; non-fatal failures also retry by themselves when a host comes back online or the app returns to the foreground |
 | Reasoning (agent thinking → you) | A separate client timeline transformer + renderer (`translated-reasoning`) with the same streaming job machinery, rendering muted so thoughts never look like replies | Opt-in via the **Translate thinking** setting (default off — thinking blocks are often long, so translating them doubles endpoint spend on auxiliary text) and additionally requires **Translate replies** (the server display path shares that gate). Same display-only failure policy as replies, plus a Show original / Show translation toggle |
 | Session titles (agent → you) | History-list titles render in your language: the direct providers translate Claude transcript titles and Codex thread names/previews, and the ACP proxy translates `session/list` result titles inbound. Exact prompt-time originals always restore from cache first (no endpoint call, even with display translation off or matching languages); anything else goes through display translation, sequentially, with over-long titles and ACP entries past 100 per frame left verbatim | Display only; per-title fail soft (a failed title keeps its original text, the listing never fails for this) |
@@ -148,14 +148,17 @@ the app after each turn.
   translate them for display (muted, with a Show original toggle).
 - Model switching, thinking intensity, and permission modes match the native
   provider's surface: the catalog is probed live from the CLI's reported
-  models (effort levels become thinking options), modes are
-  Plan/Always Ask/Accept Edits/Bypass. Model and mode changes apply live;
-  thinking changes apply at the next query. "Auto" mode is not offered (it requires the API
-  transport).
+  models, supplemented by the curated catalog and custom models from Claude settings.
+  Catalog probing disables persistence, hooks and MCP servers. Modes are
+  Plan/Always Ask/Accept Edits/Auto/Bypass. Model and mode changes apply live;
+  thinking changes apply at the next query. Auto is the default on the Anthropic API
+  transport; Bedrock and Vertex omit Auto and default to Always Ask.
 - Session persistence uses Claude's own session id (resume survives daemon
   restarts). Permissions pass through to you with Allow/Deny; interrupt maps
   to Claude's interrupt. "Always allow" style permission upgrades from the
-  CLI's suggestions are not offered — every request is a plain Allow/Deny.
+  CLI's suggestions are passed through; the host determines which actions it offers.
+  Tool permission cards include structured details and the originating tool identity.
+  Configured `providerOptions.extraArgs` pass through to the CLI, including valueless flags.
 - **Fork session** is an agent-scoped composer button with a second confirmation.
   It copies the complete persisted Claude session, companion subagent/workflow
   storage, saved tool results, file-history backups, and session environment,
@@ -193,7 +196,9 @@ the app after each turn.
   timelines, nesting, backgrounded children, resume aliases), usage
   reporting, and history replay from Claude's own transcript files
   (including subagent sidecars), session listing, and file/conversation rewind.
-  Archive/unarchive stay capability-gated off; the daemon handles their absence
+  `/rewind [user_message_uuid]` runs locally against Claude file checkpoints and
+  never goes through prompt translation or the model. Without a UUID it tries the newest
+  available user checkpoints. Archive/unarchive stay capability-gated off; the daemon handles their absence
   gracefully. The default catalog entry uses the CLI's default model.
 
 ## Direct Codex provider
@@ -318,9 +323,9 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   provider images) stay on the host renderer; other user prompts render as
   plain text in a plugin-owned right-aligned bubble. Original and translated
   text appear together on this plugin's root agents when Translate prompts
-  is on; identical translations are hidden. This requires no Paseo host
-  changes. Replaced rows do not retain native attachment previews, timestamps,
-  copy, or rewind controls; text remains selectable. Display translation starts
+  is on; identical translations are hidden. Hosts supporting source-row preservation
+  retain native attachment previews, timestamps and copy/rewind controls. Older hosts
+  keep the plugin bubble with selectable text. Display translation starts
   automatically and may call the endpoint when the prompt cache has expired.
 - Structured attachments (forge issues, reviews, uploaded files) reach the
   agent as serialized JSON and are passed through untranslated; free text
@@ -328,12 +333,10 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
 - A plain message that starts with `/word` keeps its first word untranslated,
   because flattened slash commands are indistinguishable on the wire.
 - Sub-agent tracks and chat search operate on the agent-language text.
-- History replay for the direct Claude provider is tail-kept per timeline:
-  the root keeps its newest 2000 items (from the newest 10000 transcript
-  lines) and all subagent sidecars share a further newest-2000 budget, so at
-  most 4000 items are re-emitted per session open. After a daemon restart,
-  older scrollback may be missing, but the newest messages — including the
-  final response — always come back.
+- History replay for the direct Claude provider retains the full root transcript and all available subagent sidecars.
+  Replayed tool screenshots and compaction markers are restored; internal summaries,
+  synthetic messages and control placeholders stay hidden. Very large histories use
+  memory proportional to the transcript, matching the native provider.
 - Restart fan-out: after a daemon restart, many replayed messages open
   translation jobs at once. Same-session starts that land within 80ms share
   one tagged endpoint call (parse failure falls back to per-item). `busy`

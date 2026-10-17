@@ -36,7 +36,8 @@ __export(claude_provider_exports, {
 module.exports = __toCommonJS(claude_provider_exports);
 var import_node_crypto6 = require("node:crypto");
 var import_node_fs4 = require("node:fs");
-var import_node_path6 = __toESM(require("node:path"));
+var import_node_path7 = __toESM(require("node:path"));
+var import_server = require("@getpaseo/plugin/server");
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 var import_node_module = require("node:module");
@@ -52616,6 +52617,7 @@ var translatedReasoningDataSchema = external_exports.object({
 });
 var translatedUserMessageDataSchema = external_exports.object({
   text: external_exports.string(),
+  originalPreserved: external_exports.boolean().optional(),
   phase: external_exports.enum(["streaming", "complete"]),
   messageId: external_exports.string().nullable()
 });
@@ -53102,147 +53104,164 @@ function promptDisplayKey(values, text, scopeKey) {
   })}`;
 }
 
+// server/claude-model-catalog.ts
+var import_promises12 = require("node:fs/promises");
+var import_node_path3 = require("node:path");
+
 // server/claude-model-manifest.ts
+var CLAUDE_EFFORT_LEVELS = {
+  standard: ["low", "medium", "high", "max"],
+  xhigh: ["low", "medium", "high", "xhigh", "max"]
+};
 var CLAUDE_MODEL_MANIFEST = [
   {
     id: "claude-opus-5-5",
     label: "Opus 5.5",
     description: "Opus 5.5 \xB7 Latest release",
+    minimumClaudeCodeVersion: "2.1.280",
+    defaultThinkingOption: "medium",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true,
-    defaultThinkingOption: "medium"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    supportsFastMode: true
   },
   {
     id: "claude-opus-5",
     label: "Opus 5",
     description: "Opus 5 \xB7 Previous release",
+    minimumClaudeCodeVersion: "2.1.219",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    supportsFastMode: true
   },
   {
     id: "claude-mythos-5-1",
     label: "Mythos 5.1",
+    requiresDiscovery: true,
     description: "Mythos 5.1 \xB7 Requires verified access",
     contextWindowMaxTokens: 1e6,
-    defaultThinkingOption: "high"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh
   },
   {
     id: "claude-fable-5-1",
     label: "Fable 5.1",
     description: "Fable 5.1 \xB7 Most powerful model",
     contextWindowMaxTokens: 1e6,
-    defaultThinkingOption: "high"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh
   },
   {
     id: "claude-fable-5",
     aliases: ["claude-fable-5[1m]"],
     label: "Fable 5",
     description: "Fable 5 \xB7 Previous release",
+    minimumClaudeCodeVersion: "2.1.169",
     contextWindowMaxTokens: 1e6,
-    defaultThinkingOption: "high"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh
   },
   {
     id: "claude-opus-4-8[1m]",
     label: "Opus 4.8 1M",
     description: "Opus 4.8 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    supportsFastMode: true
   },
   {
     id: "claude-opus-4-8",
     label: "Opus 4.8",
     description: "Opus 4.8 \xB7 Previous release",
     contextWindowMaxTokens: 2e5,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    supportsFastMode: true
   },
   {
     id: "claude-sonnet-5-5",
     label: "Sonnet 5.5",
     description: "Sonnet 5.5 \xB7 Best for everyday tasks",
+    minimumClaudeCodeVersion: "2.1.284",
+    defaultThinkingOption: "medium",
     contextWindowMaxTokens: 1e6,
-    defaultThinkingOption: "medium"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh
   },
   {
     id: "claude-sonnet-5",
     label: "Sonnet 5",
     description: "Sonnet 5 \xB7 Previous release",
     contextWindowMaxTokens: 2e5,
-    supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    supportsThinkingDisabled: true
   },
   {
     id: "claude-sonnet-5[1m]",
     label: "Sonnet 5 1M",
     description: "Sonnet 5 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    supportsThinkingDisabled: true
   },
   {
     id: "claude-opus-4-7[1m]",
     label: "Opus 4.7 1M",
     description: "Opus 4.7 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    supportsFastMode: true
   },
   {
     id: "claude-opus-4-7",
     label: "Opus 4.7",
     description: "Opus 4.7 \xB7 Previous release",
     contextWindowMaxTokens: 2e5,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    supportsFastMode: true
   },
   {
     id: "claude-opus-4-6[1m]",
     label: "Opus 4.6 1M",
     description: "Opus 4.6 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    supportsFastMode: true
   },
   {
     id: "claude-opus-4-6",
     label: "Opus 4.6",
     description: "Opus 4.6 \xB7 Most capable for complex work",
     contextWindowMaxTokens: 2e5,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    supportsFastMode: true
   },
   {
     id: "claude-sonnet-4-6[1m]",
     label: "Sonnet 4.6 1M",
     description: "Sonnet 4.6 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
+    supportsThinkingDisabled: true
   },
   {
     id: "claude-sonnet-4-6",
     label: "Sonnet 4.6",
     description: "Sonnet 4.6 \xB7 Best for everyday tasks",
     contextWindowMaxTokens: 2e5,
-    supportsThinkingDisabled: true,
-    defaultThinkingOption: "high"
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
+    supportsThinkingDisabled: true
   },
   {
     id: "claude-haiku-5-5",
     label: "Haiku 5.5",
     description: "Haiku 5.5 \xB7 Fastest for quick answers",
+    minimumClaudeCodeVersion: "2.1.293",
+    defaultThinkingOption: "medium",
     contextWindowMaxTokens: 1e6,
-    supportsThinkingDisabled: true,
-    defaultThinkingOption: "medium"
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    supportsThinkingDisabled: true
   },
   {
     id: "claude-haiku-4-5",
@@ -53264,6 +53283,110 @@ function findClaudeModel(modelId) {
 }
 function claudeModelSupportsFastMode(modelId) {
   return findClaudeModel(modelId)?.supportsFastMode === true;
+}
+
+// server/claude-project-dir.ts
+var import_node_fs = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path2 = require("node:path");
+var PROJECT_DIR_LENGTH_CAP = 200;
+function resolveClaudeConfigDir() {
+  const override = process.env["CLAUDE_CONFIG_DIR"];
+  if (typeof override === "string" && override.length > 0) return override;
+  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude");
+}
+function canonicalizeProjectCwd(input2) {
+  const trimmed = input2.replace(/[\\/]+$/, "") || input2;
+  try {
+    return normalizeProjectPath(import_node_fs.realpathSync.native(trimmed));
+  } catch {
+    return normalizeProjectPath(trimmed);
+  }
+}
+function encodeProjectDir(input2) {
+  const replaced = input2.replace(/[^a-zA-Z0-9]/g, "-");
+  if (replaced.length <= PROJECT_DIR_LENGTH_CAP) return replaced;
+  let hash2 = 0;
+  for (let i = 0; i < input2.length; i++) {
+    hash2 = (hash2 << 5) - hash2 + input2.charCodeAt(i) | 0;
+  }
+  return `${replaced.slice(0, PROJECT_DIR_LENGTH_CAP)}-${Math.abs(hash2).toString(36)}`;
+}
+function claudeProjectDir(cwd, configDir = resolveClaudeConfigDir()) {
+  return (0, import_node_path2.join)(configDir, "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
+}
+function normalizeProjectPath(input2) {
+  return process.platform === "darwin" ? input2.normalize("NFC") : input2;
+}
+
+// server/claude-model-catalog.ts
+var MODEL_ENV_KEYS = [
+  "ANTHROPIC_MODEL",
+  "ANTHROPIC_SMALL_FAST_MODEL",
+  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+  "ANTHROPIC_DEFAULT_HAIKU_MODEL"
+];
+async function completeClaudeCatalog(discovered, configDir = resolveClaudeConfigDir(), version2) {
+  const observed = new Set(discovered.map((model) => findClaudeModel(model.id)?.id ?? model.id));
+  const models = /* @__PURE__ */ new Map();
+  models.set("default", { id: "default", label: "Claude (CLI default)", isDefault: true });
+  for (const entry of CLAUDE_MODEL_MANIFEST) {
+    if (version2 && entry.minimumClaudeCodeVersion && !supportsVersion(version2, entry.minimumClaudeCodeVersion)) continue;
+    if (entry.requiresDiscovery && !observed.has(entry.id)) continue;
+    const levels = entry.effortLevels;
+    const defaultThinkingOptionId = levels ? entry.defaultThinkingOption ?? "high" : void 0;
+    const thinkingOptions = levels ? [
+      ...entry.supportsThinkingDisabled ? [{ id: "off", label: "Off" }] : [],
+      ...levels.map((id2) => ({
+        id: id2,
+        label: id2 === "xhigh" ? "Extra high" : id2[0].toUpperCase() + id2.slice(1),
+        ...id2 === defaultThinkingOptionId ? { isDefault: true } : {}
+      })),
+      ...levels.includes("xhigh") ? [{ id: "ultracode", label: "Ultra Code" }] : []
+    ] : void 0;
+    models.set(entry.id, {
+      id: entry.id,
+      label: entry.label,
+      description: entry.description,
+      aliases: entry.aliases ? [...entry.aliases] : void 0,
+      contextWindowMaxTokens: entry.contextWindowMaxTokens,
+      thinkingOptions,
+      defaultThinkingOptionId
+    });
+  }
+  for (const model of discovered) {
+    const known = findClaudeModel(model.id);
+    if (version2 && known?.minimumClaudeCodeVersion && !supportsVersion(version2, known.minimumClaudeCodeVersion)) continue;
+    const curated = models.get(model.id) ?? (known ? models.get(known.id) : void 0);
+    models.set(model.id, { ...curated, ...model, ...curated?.thinkingOptions ? {
+      thinkingOptions: curated.thinkingOptions,
+      defaultThinkingOptionId: curated.defaultThinkingOptionId
+    } : {} });
+  }
+  let settings;
+  try {
+    settings = JSON.parse(await (0, import_promises12.readFile)((0, import_node_path3.join)(configDir, "settings.json"), "utf8"));
+  } catch {
+  }
+  const configured = [settings?.model, ...MODEL_ENV_KEYS.map((key) => settings?.env?.[key])];
+  for (const value of configured) {
+    if (typeof value !== "string" || !value.trim() || models.has(value.trim())) continue;
+    const id2 = value.trim();
+    models.set(id2, { id: id2, label: id2, description: "From Claude settings.json" });
+  }
+  return [...models.values()];
+}
+function supportsVersion(version2, minimum) {
+  const parsed = /\b(\d+)\.(\d+)\.(\d+)\b/.exec(version2);
+  if (!parsed) return false;
+  const actual = parsed.slice(1).map(Number);
+  const required2 = minimum.split(".").map(Number);
+  for (let index = 0; index < 3; index++) {
+    if (actual[index] !== required2[index]) return actual[index] > required2[index];
+  }
+  return true;
 }
 
 // server/session-titles.ts
@@ -53314,48 +53437,32 @@ async function restoreAndMaybeTranslate(session, translator, display) {
 }
 
 // server/claude-sessions.ts
-var import_promises12 = require("node:fs/promises");
-var import_node_path3 = require("node:path");
+var import_promises13 = require("node:fs/promises");
+var import_node_path4 = require("node:path");
 
-// server/claude-project-dir.ts
-var import_node_fs = require("node:fs");
-var import_node_os2 = require("node:os");
-var import_node_path2 = require("node:path");
-var PROJECT_DIR_LENGTH_CAP = 200;
-function resolveClaudeConfigDir() {
-  const override = process.env["CLAUDE_CONFIG_DIR"];
-  if (typeof override === "string" && override.length > 0) return override;
-  return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude");
+// server/claude-transcript-content.ts
+function isClaudeTranscriptNoise(text) {
+  const value = text.trim();
+  return /^\[Request interrupted by user(?:[^\]]*)\]$/.test(value) || value === "No response requested." || /^<local-command-stdout>[\s\S]*<\/local-command-stdout>$/.test(value);
 }
-function canonicalizeProjectCwd(input2) {
-  const trimmed = input2.replace(/[\\/]+$/, "") || input2;
-  try {
-    return normalizeProjectPath(import_node_fs.realpathSync.native(trimmed));
-  } catch {
-    return normalizeProjectPath(trimmed);
-  }
+function isClaudeSyntheticUserEntry(entry) {
+  return entry.isSynthetic === true || entry.isMeta === true || Boolean(entry.toolUseResult);
 }
-function encodeProjectDir(input2) {
-  const replaced = input2.replace(/[^a-zA-Z0-9]/g, "-");
-  if (replaced.length <= PROJECT_DIR_LENGTH_CAP) return replaced;
-  let hash2 = 0;
-  for (let i = 0; i < input2.length; i++) {
-    hash2 = (hash2 << 5) - hash2 + input2.charCodeAt(i) | 0;
-  }
-  return `${replaced.slice(0, PROJECT_DIR_LENGTH_CAP)}-${Math.abs(hash2).toString(36)}`;
-}
-function claudeProjectDir(cwd, configDir = resolveClaudeConfigDir()) {
-  return (0, import_node_path2.join)(configDir, "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
-}
-function normalizeProjectPath(input2) {
-  return process.platform === "darwin" ? input2.normalize("NFC") : input2;
+function claudeUserText(content) {
+  const parts = typeof content === "string" ? [content] : Array.isArray(content) ? content.flatMap((block) => {
+    if (typeof block !== "object" || block === null) return [];
+    const record2 = block;
+    return record2.type === "text" && typeof record2.text === "string" ? [record2.text] : [];
+  }) : [];
+  const text = parts.filter((part) => !isClaudeTranscriptNoise(part)).join("\n").trim();
+  return text || void 0;
 }
 
 // server/claude-sessions.ts
 async function markManagedClaudeFork(cwd, configDir, sessionId) {
-  const marker = (0, import_node_path3.join)(claudeProjectDir(cwd, configDir), `${sessionId}.paseo-fork`);
+  const marker = (0, import_node_path4.join)(claudeProjectDir(cwd, configDir), `${sessionId}.paseo-fork`);
   try {
-    await (0, import_promises12.writeFile)(marker, "Managed by Translate session fork\n", { flag: "wx", mode: 384 });
+    await (0, import_promises13.writeFile)(marker, "Managed by Translate session fork\n", { flag: "wx", mode: 384 });
   } catch (error62) {
     if (error62.code !== "EEXIST") throw error62;
   }
@@ -53366,15 +53473,15 @@ async function readTranscriptPreview(path3) {
   if (claudeSessionId === void 0) return null;
   let raw;
   try {
-    raw = await (0, import_promises12.readFile)(path3, "utf8");
+    raw = await (0, import_promises13.readFile)(path3, "utf8");
   } catch {
     return null;
   }
-  const head = raw.slice(0, 512e3);
-  let title;
-  let updatedAt;
-  for (const line of head.split("\n")) {
-    if (line.trim().length === 0) continue;
+  let promptTitle;
+  let customTitle;
+  let aiTitle;
+  let updatedAt = /* @__PURE__ */ new Date(0);
+  for (const line of raw.split(/\r?\n/)) {
     let entry;
     try {
       const parsed = JSON.parse(line);
@@ -53383,59 +53490,33 @@ async function readTranscriptPreview(path3) {
     } catch {
       continue;
     }
-    if (updatedAt === void 0 && typeof entry.timestamp === "string") {
-      const parsed = new Date(entry.timestamp);
-      if (!Number.isNaN(parsed.getTime())) updatedAt = parsed;
+    if (entry.isSidechain === true) continue;
+    if (typeof entry.timestamp === "string") {
+      const timestamp = new Date(entry.timestamp);
+      if (timestamp > updatedAt) updatedAt = timestamp;
     }
-    if (title === void 0 && entry.type === "user") {
-      const text = firstUserText(entry.message);
-      if (text !== void 0) title = text;
+    if (entry.type === "custom-title" && typeof entry.customTitle === "string") {
+      customTitle = entry.customTitle.trim() || void 0;
+    } else if (entry.type === "ai-title" && typeof entry.aiTitle === "string") {
+      aiTitle = entry.aiTitle.trim() || void 0;
+    } else if (entry.type === "user" && !entry.isCompactSummary && !isClaudeSyntheticUserEntry(entry)) {
+      const message = entry.message;
+      promptTitle ??= claudeUserText(message?.content);
     }
-    if (title !== void 0 && updatedAt !== void 0) break;
   }
+  const title = customTitle ?? aiTitle ?? promptTitle;
   if (title === void 0) return null;
-  for (const line of raw.slice(-512e3).split("\n").reverse()) {
-    try {
-      const record2 = JSON.parse(line);
-      if (typeof record2 === "object" && record2 !== null && "type" in record2 && record2.type === "custom-title" && "customTitle" in record2 && typeof record2.customTitle === "string" && record2.customTitle.trim()) {
-        title = record2.customTitle.trim();
-        break;
-      }
-    } catch {
-    }
-  }
   try {
-    const stats = await (0, import_promises12.stat)(path3);
-    updatedAt = updatedAt ?? stats.mtime;
+    updatedAt = (await (0, import_promises13.stat)(path3)).mtime;
   } catch {
   }
-  return {
-    claudeSessionId,
-    title: title.length > 200 ? `${title.slice(0, 200)}\u2026` : title,
-    updatedAt: updatedAt ?? /* @__PURE__ */ new Date(0)
-  };
-}
-function firstUserText(message) {
-  if (typeof message !== "object" || message === null) return void 0;
-  const content = message.content;
-  const parts = [];
-  if (typeof content === "string") {
-    parts.push(content);
-  } else if (Array.isArray(content)) {
-    for (const block of content) {
-      if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
-        parts.push(block.text);
-      }
-    }
-  }
-  const joined = parts.join("\n").trim();
-  return joined.length > 0 ? joined : void 0;
+  return { claudeSessionId, title: title.length > 200 ? `${title.slice(0, 200)}\u2026` : title, updatedAt };
 }
 async function listClaudeTranscriptSummaries(cwd, limit) {
   const directory = claudeProjectDir(cwd);
   let names;
   try {
-    names = await (0, import_promises12.readdir)(directory);
+    names = await (0, import_promises13.readdir)(directory);
   } catch {
     return [];
   }
@@ -53445,7 +53526,7 @@ async function listClaudeTranscriptSummaries(cwd, limit) {
     if (!name.endsWith(".jsonl")) continue;
     const sessionId = name.slice(0, -".jsonl".length);
     if (storedNames.has(`${sessionId}.clone.json`) || storedNames.has(`${sessionId}.paseo-fork`)) continue;
-    const preview = await readTranscriptPreview((0, import_node_path3.join)(directory, name));
+    const preview = await readTranscriptPreview((0, import_node_path4.join)(directory, name));
     if (preview === null) continue;
     previews.push(preview);
   }
@@ -53687,6 +53768,11 @@ function readString(input2, key) {
   const value = input2[key];
   return typeof value === "string" && value.length > 0 ? value : void 0;
 }
+function readNumber(input2, key) {
+  if (typeof input2 !== "object" || input2 === null) return void 0;
+  const value = input2[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : void 0;
+}
 function readInputJson(input2) {
   try {
     return JSON.stringify(input2 ?? {});
@@ -53719,7 +53805,9 @@ function describeRunningTool(name, input2) {
   if (READ_NAMES.has(trimmed)) {
     return {
       type: "read",
-      filePath: readString(input2, "file_path") ?? readString(input2, "path") ?? trimmed
+      filePath: readString(input2, "file_path") ?? readString(input2, "path") ?? trimmed,
+      ...readNumber(input2, "offset") !== void 0 ? { offset: readNumber(input2, "offset") } : {},
+      ...readNumber(input2, "limit") !== void 0 ? { limit: readNumber(input2, "limit") } : {}
     };
   }
   if (WRITE_NAMES.has(trimmed)) {
@@ -53733,8 +53821,9 @@ function describeRunningTool(name, input2) {
     return {
       type: "edit",
       filePath: readString(input2, "file_path") ?? readString(input2, "path") ?? trimmed,
-      ...readString(input2, "old_string") !== void 0 ? { oldString: readString(input2, "old_string") } : {},
-      ...readString(input2, "new_string") !== void 0 ? { newString: readString(input2, "new_string") } : {}
+      ...readString(input2, "old_string") ?? readString(input2, "old_str") ? { oldString: readString(input2, "old_string") ?? readString(input2, "old_str") } : {},
+      ...readString(input2, "new_string") ?? readString(input2, "new_str") ? { newString: readString(input2, "new_string") ?? readString(input2, "new_str") } : {},
+      ...readString(input2, "patch") ?? readString(input2, "diff") ? { unifiedDiff: readString(input2, "patch") ?? readString(input2, "diff") } : {}
     };
   }
   if (SEARCH_NAMES.has(trimmed)) {
@@ -53767,6 +53856,7 @@ function describeFinishedTool(name, input2, output2) {
     case "plan":
       return running;
     case "read":
+      return { ...running, content: output2 };
     case "write":
     case "edit":
       return running;
@@ -53839,7 +53929,7 @@ var ClaudeMessageStream = class {
     const blocks = [...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
     const text = blocks.filter((block) => block.kind === "text").map((block) => block.text).join("");
     const thinking = blocks.filter((block) => block.kind === "thinking").map((block) => block.text).join("");
-    if (text && text !== state.text && text !== "[Request interrupted by user]") {
+    if (text && text !== state.text && !isClaudeTranscriptNoise(text)) {
       items.push({ type: "assistant_message", id: state.id, messageId: state.id, text });
       state.text = text;
     }
@@ -53848,6 +53938,367 @@ var ClaudeMessageStream = class {
       state.thinking = thinking;
     }
     return items;
+  }
+};
+
+// server/claude-partial-json.ts
+function skipWhitespace(input2, index) {
+  let currentIndex = index;
+  while (currentIndex < input2.length && /\s/u.test(input2[currentIndex] ?? "")) {
+    currentIndex += 1;
+  }
+  return currentIndex;
+}
+function parsePartialString(input2, index) {
+  if (input2[index] !== '"') {
+    return null;
+  }
+  let currentIndex = index + 1;
+  let value = "";
+  while (currentIndex < input2.length) {
+    const character = input2[currentIndex];
+    if (character === '"') {
+      return {
+        value,
+        nextIndex: currentIndex + 1,
+        complete: true
+      };
+    }
+    if (character === "\\") {
+      const escapeCharacter = input2[currentIndex + 1];
+      if (escapeCharacter === void 0) {
+        return {
+          value,
+          nextIndex: input2.length,
+          complete: false
+        };
+      }
+      switch (escapeCharacter) {
+        case '"':
+        case "\\":
+        case "/":
+          value += escapeCharacter;
+          currentIndex += 2;
+          continue;
+        case "b":
+          value += "\b";
+          currentIndex += 2;
+          continue;
+        case "f":
+          value += "\f";
+          currentIndex += 2;
+          continue;
+        case "n":
+          value += "\n";
+          currentIndex += 2;
+          continue;
+        case "r":
+          value += "\r";
+          currentIndex += 2;
+          continue;
+        case "t":
+          value += "	";
+          currentIndex += 2;
+          continue;
+        case "u": {
+          const hex3 = input2.slice(currentIndex + 2, currentIndex + 6);
+          if (hex3.length < 4 || !/^[0-9a-fA-F]{4}$/u.test(hex3)) {
+            return {
+              value,
+              nextIndex: input2.length,
+              complete: false
+            };
+          }
+          value += String.fromCodePoint(Number.parseInt(hex3, 16));
+          currentIndex += 6;
+          continue;
+        }
+        default:
+          return {
+            value,
+            nextIndex: input2.length,
+            complete: false
+          };
+      }
+    }
+    value += character;
+    currentIndex += 1;
+  }
+  return {
+    value,
+    nextIndex: input2.length,
+    complete: false
+  };
+}
+function parsePartialLiteral(input2, index) {
+  const remaining = input2.slice(index);
+  if (remaining.startsWith("true")) {
+    return { value: true, nextIndex: index + 4, complete: true };
+  }
+  if (remaining.startsWith("false")) {
+    return { value: false, nextIndex: index + 5, complete: true };
+  }
+  if (remaining.startsWith("null")) {
+    return { value: null, nextIndex: index + 4, complete: true };
+  }
+  return null;
+}
+function parsePartialNumber(input2, index) {
+  const match = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/u.exec(input2.slice(index));
+  if (!match?.[0]) {
+    return null;
+  }
+  return {
+    value: Number(match[0]),
+    nextIndex: index + match[0].length,
+    complete: true
+  };
+}
+function parsePartialArray(input2, index) {
+  if (input2[index] !== "[") {
+    return null;
+  }
+  const values = [];
+  let currentIndex = index + 1;
+  while (currentIndex <= input2.length) {
+    currentIndex = skipWhitespace(input2, currentIndex);
+    const nextCharacter = input2[currentIndex];
+    if (nextCharacter === "]") {
+      return {
+        value: values,
+        nextIndex: currentIndex + 1,
+        complete: true
+      };
+    }
+    if (nextCharacter === void 0) {
+      return {
+        value: values,
+        nextIndex: input2.length,
+        complete: false
+      };
+    }
+    const parsedValue = parsePartialJsonValue(input2, currentIndex);
+    if (!parsedValue) {
+      return {
+        value: values,
+        nextIndex: currentIndex,
+        complete: false
+      };
+    }
+    values.push(parsedValue.value);
+    currentIndex = skipWhitespace(input2, parsedValue.nextIndex);
+    if (!parsedValue.complete) {
+      return {
+        value: values,
+        nextIndex: currentIndex,
+        complete: false
+      };
+    }
+    const delimiter2 = input2[currentIndex];
+    if (delimiter2 === ",") {
+      currentIndex += 1;
+      continue;
+    }
+    if (delimiter2 === "]") {
+      return {
+        value: values,
+        nextIndex: currentIndex + 1,
+        complete: true
+      };
+    }
+    if (delimiter2 === void 0) {
+      return {
+        value: values,
+        nextIndex: input2.length,
+        complete: false
+      };
+    }
+    return {
+      value: values,
+      nextIndex: currentIndex,
+      complete: false
+    };
+  }
+  return {
+    value: values,
+    nextIndex: input2.length,
+    complete: false
+  };
+}
+function parsePartialObject(input2, index) {
+  if (input2[index] !== "{") {
+    return null;
+  }
+  const value = {};
+  let currentIndex = index + 1;
+  while (currentIndex <= input2.length) {
+    currentIndex = skipWhitespace(input2, currentIndex);
+    const nextCharacter = input2[currentIndex];
+    if (nextCharacter === "}") {
+      return {
+        value,
+        nextIndex: currentIndex + 1,
+        complete: true
+      };
+    }
+    if (nextCharacter === void 0) {
+      return {
+        value,
+        nextIndex: input2.length,
+        complete: false
+      };
+    }
+    const parsedKey = parsePartialString(input2, currentIndex);
+    if (!parsedKey?.complete) {
+      return {
+        value,
+        nextIndex: parsedKey?.nextIndex ?? currentIndex,
+        complete: false
+      };
+    }
+    currentIndex = skipWhitespace(input2, parsedKey.nextIndex);
+    if (input2[currentIndex] !== ":") {
+      return {
+        value,
+        nextIndex: currentIndex,
+        complete: false
+      };
+    }
+    currentIndex = skipWhitespace(input2, currentIndex + 1);
+    const parsedMemberValue = parsePartialJsonValue(input2, currentIndex);
+    if (!parsedMemberValue) {
+      return {
+        value,
+        nextIndex: currentIndex,
+        complete: false
+      };
+    }
+    if (!parsedMemberValue.complete) {
+      return {
+        value,
+        nextIndex: skipWhitespace(input2, parsedMemberValue.nextIndex),
+        complete: false
+      };
+    }
+    value[parsedKey.value] = parsedMemberValue.value;
+    currentIndex = skipWhitespace(input2, parsedMemberValue.nextIndex);
+    const delimiter2 = input2[currentIndex];
+    if (delimiter2 === ",") {
+      currentIndex += 1;
+      continue;
+    }
+    if (delimiter2 === "}") {
+      return {
+        value,
+        nextIndex: currentIndex + 1,
+        complete: true
+      };
+    }
+    if (delimiter2 === void 0) {
+      return {
+        value,
+        nextIndex: input2.length,
+        complete: false
+      };
+    }
+    return {
+      value,
+      nextIndex: currentIndex,
+      complete: false
+    };
+  }
+  return {
+    value,
+    nextIndex: input2.length,
+    complete: false
+  };
+}
+function parsePartialJsonValue(input2, index) {
+  const currentIndex = skipWhitespace(input2, index);
+  const character = input2[currentIndex];
+  if (character === void 0) {
+    return null;
+  }
+  if (character === '"') {
+    return parsePartialString(input2, currentIndex);
+  }
+  if (character === "{") {
+    return parsePartialObject(input2, currentIndex);
+  }
+  if (character === "[") {
+    return parsePartialArray(input2, currentIndex);
+  }
+  if (character === "t" || character === "f" || character === "n") {
+    return parsePartialLiteral(input2, currentIndex);
+  }
+  if (character === "-" || /\d/u.test(character)) {
+    return parsePartialNumber(input2, currentIndex);
+  }
+  return null;
+}
+function parsePartialJsonObject(input2) {
+  const currentIndex = skipWhitespace(input2, 0);
+  const parsed = parsePartialObject(input2, currentIndex);
+  if (!parsed) {
+    return null;
+  }
+  return {
+    value: parsed.value,
+    complete: parsed.complete && skipWhitespace(input2, parsed.nextIndex) === input2.length
+  };
+}
+
+// server/claude-tool-stream.ts
+var ClaudeToolStream = class {
+  constructor() {
+    this.ids = /* @__PURE__ */ new Map();
+    this.buffers = /* @__PURE__ */ new Map();
+  }
+  clear() {
+    this.ids.clear();
+    this.buffers.clear();
+  }
+  observe(message, names, inputs) {
+    if (message.type !== "stream_event") return [];
+    const event = message.event;
+    if (event.type === "message_start") {
+      this.clear();
+      return [];
+    }
+    let id2;
+    if (event.type === "content_block_start") {
+      const block = event.content_block;
+      if (block.type !== "tool_use") return [];
+      id2 = block.id;
+      this.ids.set(event.index, id2);
+      names.set(id2, block.name);
+      inputs.set(id2, block.input);
+    } else if (event.type === "content_block_delta" && event.delta.type === "input_json_delta") {
+      id2 = this.ids.get(event.index);
+      if (!id2) return [];
+      const buffer = (this.buffers.get(id2) ?? "") + event.delta.partial_json;
+      this.buffers.set(id2, buffer);
+      const parsed = parsePartialJsonObject(buffer);
+      if (!parsed || !parsed.complete && Object.keys(parsed.value).length === 0) return [];
+      if (JSON.stringify(inputs.get(id2)) === JSON.stringify(parsed.value)) return [];
+      inputs.set(id2, parsed.value);
+    } else if (event.type === "content_block_stop") {
+      id2 = this.ids.get(event.index);
+      this.ids.delete(event.index);
+      if (id2) this.buffers.delete(id2);
+      return [];
+    } else return [];
+    const name = names.get(id2);
+    if (!name) return [];
+    return [{
+      type: "tool_call",
+      id: id2,
+      callId: id2,
+      name,
+      status: "running",
+      error: null,
+      detail: describeRunningTool(name, inputs.get(id2))
+    }];
   }
 };
 
@@ -54093,6 +54544,10 @@ var ClaudeSubagentTracker = class {
     const canonical = this.canonicalIdByToolUseId.get(parentToolUseId);
     const child = (canonical !== void 0 ? this.children.get(canonical) : void 0) ?? (this.ownerCanonicalByToolUseId.get(parentToolUseId) !== void 0 ? this.children.get(this.ownerCanonicalByToolUseId.get(parentToolUseId)) : void 0);
     if (!child) return;
+    for (const item of child.toolStream.observe(message, child.toolNames, child.toolInputs)) {
+      if (item.type === "tool_call") this.ownerCanonicalByToolUseId.set(item.callId, child.canonicalId);
+      this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
+    }
     for (const item of child.messages.observe(message)) {
       this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
     }
@@ -54210,7 +54665,8 @@ var ClaudeSubagentTracker = class {
       turnOpen: true,
       toolNames: /* @__PURE__ */ new Map(),
       toolInputs: /* @__PURE__ */ new Map(),
-      messages: new ClaudeMessageStream()
+      messages: new ClaudeMessageStream(),
+      toolStream: new ClaudeToolStream()
     };
     this.children.set(id2, child);
     this.lastStatusById.set(id2, "running");
@@ -54472,11 +54928,43 @@ var ClaudeMessageInput = class {
   }
 };
 
+// server/claude-permission-modes.ts
+var MODES = [
+  { id: "plan", label: "Plan Mode", description: "Analyze the codebase without executing tools or edits" },
+  { id: "default", label: "Always Ask", description: "Prompts for permission the first time a tool is used" },
+  { id: "acceptEdits", label: "Accept File Edits", description: "Automatically approves edit-focused tools without prompting" },
+  { id: "auto", label: "Auto mode", description: "Uses a model classifier to review permission prompts automatically" },
+  { id: "bypassPermissions", label: "Bypass", description: "Skip all permission prompts (use with caution)" }
+];
+function unavailableTransport(env) {
+  const enabled = (value) => value !== void 0 && !["", "0", "false", "no", "off"].includes(value.trim().toLowerCase());
+  if (enabled(env.CLAUDE_CODE_USE_BEDROCK)) return "Bedrock";
+  if (enabled(env.CLAUDE_CODE_USE_VERTEX)) return "Vertex";
+  return void 0;
+}
+function claudeModeCatalog(env) {
+  const unavailable = unavailableTransport(env);
+  return {
+    modes: unavailable ? MODES.filter((mode) => mode.id !== "auto") : MODES,
+    defaultMode: unavailable ? "default" : "auto"
+  };
+}
+function assertClaudeMode(mode, env) {
+  if (!MODES.some((entry) => entry.id === mode)) throw new Error(`Unknown Claude mode: ${mode}`);
+  const transport = unavailableTransport(env);
+  if (mode === "auto" && transport) {
+    throw new Error(`Claude Auto mode requires the Anthropic API and is not supported with ${transport}. Select another permission mode.`);
+  }
+}
+function isClaudeMode(mode) {
+  return MODES.some((entry) => entry.id === mode);
+}
+
 // server/image-output.ts
 var import_node_crypto5 = require("node:crypto");
 var import_node_fs3 = require("node:fs");
 var import_node_os3 = __toESM(require("node:os"));
-var import_node_path4 = __toESM(require("node:path"));
+var import_node_path5 = __toESM(require("node:path"));
 var IMAGE_ATTACHMENT_DIR = "paseo-attachments";
 var IMAGE_ATTACHMENT_DIR_PREFIX = `${IMAGE_ATTACHMENT_DIR}-`;
 var PRIVATE_DIR_MODE = 448;
@@ -54493,7 +54981,7 @@ function canReuseDir(dir) {
 }
 function attachmentDir() {
   if (materializedDir !== null && canReuseDir(materializedDir)) return materializedDir;
-  materializedDir = (0, import_node_fs3.mkdtempSync)(import_node_path4.default.join(import_node_os3.default.tmpdir(), IMAGE_ATTACHMENT_DIR_PREFIX));
+  materializedDir = (0, import_node_fs3.mkdtempSync)(import_node_path5.default.join(import_node_os3.default.tmpdir(), IMAGE_ATTACHMENT_DIR_PREFIX));
   (0, import_node_fs3.chmodSync)(materializedDir, PRIVATE_DIR_MODE);
   return materializedDir;
 }
@@ -54556,7 +55044,7 @@ function materializeImageOutput(data, mimeType) {
   }
   if (bytes.length === 0) return null;
   const hash2 = (0, import_node_crypto5.createHash)("sha256").update(bytes).digest("hex");
-  const filePath = import_node_path4.default.join(attachmentDir(), `${hash2}.${extension}`);
+  const filePath = import_node_path5.default.join(attachmentDir(), `${hash2}.${extension}`);
   try {
     if (!(0, import_node_fs3.existsSync)(filePath)) (0, import_node_fs3.writeFileSync)(filePath, bytes, { mode: IMAGE_FILE_MODE });
     (0, import_node_fs3.chmodSync)(filePath, IMAGE_FILE_MODE);
@@ -54570,21 +55058,15 @@ function renderImageOutputMarkdown(uri, altText = "Image") {
 }
 
 // server/claude-transcript.ts
-var import_promises13 = require("node:fs/promises");
-var import_node_path5 = require("node:path");
-var MAX_REPLAY_LINES = 1e4;
-var MAX_REPLAY_ITEMS = 2e3;
-var MAX_REPLAY_CHILD_ITEMS = 2e3;
-var MAX_REPLAY_SIDECARS = 50;
+var import_promises14 = require("node:fs/promises");
+var import_node_path6 = require("node:path");
 function readString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
 }
 async function readJsonLines(path3) {
-  const raw = await (0, import_promises13.readFile)(path3, "utf8");
-  const rawLines = raw.split("\n");
-  const windowed = rawLines.length > MAX_REPLAY_LINES ? rawLines.slice(-MAX_REPLAY_LINES) : rawLines;
+  const raw = await (0, import_promises14.readFile)(path3, "utf8");
   const entries = [];
-  for (const line of windowed) {
+  for (const line of raw.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
     try {
       const parsed = JSON.parse(line);
@@ -54624,12 +55106,24 @@ function createCollector(contextCanonicalId) {
 function pushItem(collector, item) {
   collector.items.push(item);
 }
-function truncateTail(collector) {
-  if (collector.items.length > MAX_REPLAY_ITEMS) {
-    collector.items = collector.items.slice(-MAX_REPLAY_ITEMS);
-  }
-}
 async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
+  if (entry.type === "system" && entry.subtype === "compact_boundary") {
+    const metadata = entry.compaction ?? entry.metadata ?? entry.compactMetadata;
+    const preTokens = metadata?.preTokens ?? metadata?.pre_tokens;
+    pushItem(collector, {
+      type: "compaction",
+      id: idSeed,
+      status: "completed",
+      trigger: metadata?.trigger === "manual" ? "manual" : "auto",
+      ...typeof preTokens === "number" ? { preTokens } : {}
+    });
+    return;
+  }
+  if (entry.isCompactSummary) return;
+  if (entry.type === "user" && isClaudeSyntheticUserEntry(entry)) {
+    const content = entry.message?.content;
+    if (!Array.isArray(content) || !content.some((block) => typeof block === "object" && block !== null && block.type === "tool_result")) return;
+  }
   const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : void 0;
   const withTimestamp = (item) => timestamp !== void 0 ? { ...item, timestamp } : item;
   if (entry.type === "assistant") {
@@ -54638,7 +55132,7 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
     const rawContent = entry.message?.content;
     if (typeof rawContent === "string") {
       const text = rawContent.trim();
-      if (text.length > 0) {
+      if (text.length > 0 && !isClaudeTranscriptNoise(text)) {
         pushItem(
           collector,
           withTimestamp({
@@ -54658,7 +55152,7 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
       const record2 = block;
       if (record2.type === "text") {
         const text = readString3(block.text);
-        if (text === void 0) continue;
+        if (text === void 0 || isClaudeTranscriptNoise(text)) continue;
         pushItem(
           collector,
           withTimestamp({
@@ -54718,7 +55212,7 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
     };
     if (typeof content === "string") {
       const text = content.trim();
-      if (text.length > 0) {
+      if (text.length > 0 && !isClaudeTranscriptNoise(text)) {
         pushItem(
           collector,
           withTimestamp({
@@ -54738,7 +55232,7 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
       const record2 = block;
       if (record2.type === "text") {
         const text = readString3(block.text);
-        if (text !== void 0) texts.push(await restoreBlock(text));
+        if (text !== void 0 && !isClaudeTranscriptNoise(text)) texts.push(await restoreBlock(text));
       } else if (record2.type === "tool_result") {
         const result = block;
         if (typeof result.tool_use_id !== "string") continue;
@@ -54755,6 +55249,19 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
             detail: describeFinishedTool(name, collector.toolInputs.get(result.tool_use_id), output2)
           })
         );
+        if (Array.isArray(result.content)) {
+          for (const [index, block2] of result.content.entries()) {
+            if (typeof block2 !== "object" || block2 === null || block2.type !== "image") continue;
+            const source = block2.source;
+            if (source?.type !== "base64" || typeof source.data !== "string" || typeof source.media_type !== "string") continue;
+            const image = materializeImageOutput(source.data, source.media_type);
+            pushItem(collector, withTimestamp({
+              type: "assistant_message",
+              id: `${result.tool_use_id}-image-${index}`,
+              text: image ? renderImageOutputMarkdown(image.uri) : "Image output was omitted because it was not available as a file path or URL."
+            }));
+          }
+        }
       }
     }
     if (texts.length > 0) {
@@ -54806,7 +55313,7 @@ async function readClaudeReplay(cwd, claudeSessionId, restore, configDir) {
 }
 async function readReplayInner(cwd, claudeSessionId, restore, configDir) {
   const projectDir = claudeProjectDir(cwd, configDir);
-  const entries = await readJsonLines((0, import_node_path5.join)(projectDir, `${claudeSessionId}.jsonl`));
+  const entries = await readJsonLines((0, import_node_path6.join)(projectDir, `${claudeSessionId}.jsonl`));
   if (entries.length === 0) return { rootItems: [], children: [] };
   const root = createCollector(null);
   let seed = 0;
@@ -54816,27 +55323,13 @@ async function readReplayInner(cwd, claudeSessionId, restore, configDir) {
     }
     await collectEntry(root, entry, `replay-${seed++}`, restore?.restoreRootBlock);
   }
-  truncateTail(root);
   const children = await readReplayChildren(projectDir, claudeSessionId, root, restore);
-  let remaining = MAX_REPLAY_CHILD_ITEMS;
-  for (let index = children.length - 1; index >= 0; index--) {
-    const child = children[index];
-    if (child === void 0) continue;
-    if (remaining <= 0) {
-      child.items = [];
-      continue;
-    }
-    if (child.items.length > remaining) {
-      child.items = child.items.slice(-remaining);
-    }
-    remaining -= child.items.length;
-  }
   return { rootItems: root.items, children };
 }
 async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   let files;
   try {
-    files = await (0, import_promises13.readdir)((0, import_node_path5.join)(projectDir, claudeSessionId, "subagents"));
+    files = await (0, import_promises14.readdir)((0, import_node_path6.join)(projectDir, claudeSessionId, "subagents"));
   } catch {
     return [];
   }
@@ -54845,7 +55338,7 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
     sidecars.map(async (file2) => {
       let mtimeMs = 0;
       try {
-        const fileStat = await (0, import_promises13.stat)((0, import_node_path5.join)(projectDir, claudeSessionId, "subagents", file2));
+        const fileStat = await (0, import_promises14.stat)((0, import_node_path6.join)(projectDir, claudeSessionId, "subagents", file2));
         if (Number.isFinite(fileStat.mtimeMs)) mtimeMs = fileStat.mtimeMs;
       } catch {
         mtimeMs = 0;
@@ -54854,9 +55347,8 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
     })
   );
   byAge.sort((a, b) => a.mtimeMs - b.mtimeMs);
-  const stagedFiles = byAge.length > MAX_REPLAY_SIDECARS ? byAge.slice(-MAX_REPLAY_SIDECARS) : byAge;
   const staged = [];
-  for (const { file: file2 } of stagedFiles) {
+  for (const { file: file2 } of byAge) {
     try {
       const agentId = file2.slice("agent-".length, -".jsonl".length);
       const stagedChild = await stageReplayChild(
@@ -54890,10 +55382,10 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   });
 }
 async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUserBlock) {
-  const base = (0, import_node_path5.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
+  const base = (0, import_node_path6.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
   let meta3 = null;
   try {
-    const raw = await (0, import_promises13.readFile)(`${base}.meta.json`, "utf8");
+    const raw = await (0, import_promises14.readFile)(`${base}.meta.json`, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null) {
       meta3 = parsed;
@@ -54910,7 +55402,6 @@ async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUse
   for (const entry of entries) {
     await collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`, restoreUserBlock);
   }
-  truncateTail(collector);
   return { canonicalId, meta: meta3 ?? {}, collector };
 }
 
@@ -54955,13 +55446,6 @@ var CAPABILITIES = [
   "session.revert.conversation",
   "session.revert.both"
 ];
-var STATIC_MODES = [
-  { id: "plan", label: "Plan Mode", description: "Analyze the codebase without executing tools or edits" },
-  { id: "default", label: "Always Ask", description: "Prompts for permission the first time a tool is used" },
-  { id: "acceptEdits", label: "Accept File Edits", description: "Automatically approves edit-focused tools without prompting" },
-  { id: "bypassPermissions", label: "Bypass", description: "Skip all permission prompts (use with caution)" }
-];
-var VALID_MODES = new Set(STATIC_MODES.map((mode) => mode.id));
 var START_EFFORT = /* @__PURE__ */ new Set(["low", "medium", "high", "xhigh"]);
 function scanPathForClaude(pathValue, platform) {
   const isWindows = platform === "win32";
@@ -54971,7 +55455,7 @@ function scanPathForClaude(pathValue, platform) {
   for (const name of names) {
     for (const directory of directories) {
       if (directory.length === 0) continue;
-      const candidate = import_node_path6.default.join(directory, name);
+      const candidate = import_node_path7.default.join(directory, name);
       try {
         (0, import_node_fs4.accessSync)(candidate, import_node_fs4.constants.X_OK);
         return candidate;
@@ -54999,6 +55483,13 @@ function createTranslateClaudeProvider(deps) {
     sessions,
     translator,
     queryFactory,
+    resolveVersion: deps.resolveVersion ?? (async (executable) => {
+      try {
+        return (await (0, import_server.execCommand)(executable ?? "claude", ["--version"], { shell: false, timeout: 5e3 })).stdout;
+      } catch {
+        return void 0;
+      }
+    }),
     forkClaudeSession,
     forkCoordinator: deps.forkCoordinator,
     unregisterForks,
@@ -55186,14 +55677,21 @@ async function revertSession(input2, context) {
     });
   }
 }
-async function rewindFilesOnce(session, messageId, context) {
-  await ensureQuery(session, context);
-  if (session.query?.rewindFiles === void 0) {
-    throw new Error("This Claude build does not expose file rewind");
-  }
-  const result = await session.query.rewindFiles(messageId, { dryRun: false });
-  if (!result.canRewind) {
-    throw new Error(result.error ?? `No file checkpoint found for message ${messageId}`);
+async function rewindFilesOnce(session, messageId, context, localTurn = null) {
+  if (session.query) await resetQuery(session, context.emit, localTurn);
+  if (localTurn && session.active !== localTurn) throw new Error("Rewind canceled");
+  await ensureQuery(session, context, localTurn ?? void 0);
+  if (localTurn && session.active !== localTurn) throw new Error("Rewind canceled");
+  const query = session.query;
+  if (!query?.rewindFiles) throw new Error("This Claude build does not expose file rewind");
+  try {
+    const result = await query.rewindFiles(messageId, { dryRun: false });
+    if (!result.canRewind) throw new Error(result.error ?? `No file checkpoint found for message ${messageId}`);
+  } catch (error62) {
+    if (session.query === query && (!localTurn || session.active === localTurn)) {
+      await resetQuery(session, context.emit, localTurn);
+    }
+    throw error62;
   }
 }
 async function rewindConversationOnce(session, messageId, context) {
@@ -55212,7 +55710,7 @@ async function rewindConversationOnce(session, messageId, context) {
     persistence: claudePersistence(session)
   });
 }
-async function resetQuery(session, emit, preservePreparing = false) {
+async function resetQuery(session, emit, preserveActive = null) {
   session.detached = true;
   session.sink.close();
   session.abort.abort();
@@ -55231,7 +55729,7 @@ async function resetQuery(session, emit, preservePreparing = false) {
   const pump = session.pump;
   session.query = null;
   session.pump = null;
-  const active = preservePreparing && session.active?.announced === false ? null : session.active;
+  const active = session.active === preserveActive ? null : session.active;
   if (active) session.active = null;
   await pump?.catch(() => void 0);
   session.subagents?.finishProcessTasks();
@@ -55297,10 +55795,11 @@ async function openSession(input2, context, capabilities) {
     translatedSystemPrompt,
     desiredModel: input2.config.model === "default" ? null : readConfigured(input2.config.model),
     runtimeModel: null,
-    desiredMode: readConfigured(input2.config.mode),
+    desiredMode: readConfigured(input2.config.mode) ?? claudeModeCatalog({ ...process.env, ...input2.config.env }).defaultMode,
     desiredThinking: readConfigured(input2.config.thinkingOption),
     sink: new ClaudeMessageInput(),
     messages: new ClaudeMessageStream(),
+    toolStream: new ClaudeToolStream(),
     query: null,
     abort: new AbortController(),
     pump: null,
@@ -55311,7 +55810,7 @@ async function openSession(input2, context, capabilities) {
     cancellationEpoch: 0,
     permissionClearingEpoch: 0,
     compacting: false,
-    restartForThinking: false,
+    queryRestartNeeded: false,
     autonomous: null,
     interrupted: false,
     pendingInterruptedResults: 0,
@@ -55351,7 +55850,7 @@ async function openSession(input2, context, capabilities) {
       if (session.query) await resetQuery(session, context.emit);
       return {
         claudeSessionId: session.claudeSessionId,
-        configDir: import_node_path6.default.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
+        configDir: import_node_path7.default.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
         config: {
           ...session.config,
           model: session.desiredModel ?? void 0,
@@ -55372,6 +55871,11 @@ async function openSession(input2, context, capabilities) {
     title: input2.config.title,
     cwd: input2.config.cwd
   });
+  context.emit({ type: "session.commands", sessionId: session.id, commands: [{
+    name: "rewind",
+    description: "Rewind tracked files to a previous user message",
+    argumentHint: "[user_message_uuid]"
+  }] });
   await replayHistory(session, input2.history, context);
   context.emit({ type: "session.ready", requestId: input2.requestId, sessionId: input2.sessionId });
   context.emit({
@@ -55413,6 +55917,7 @@ async function replayHistory(session, history, context) {
   const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore, session.config.env["CLAUDE_CONFIG_DIR"]);
   for (const item of replay.rootItems) {
     if (session.closed) return;
+    if (item.type === "user_message" && typeof item.revertToken === "string") session.rewindUserMessageIds.push(item.revertToken);
     context.emit({ type: "timeline.item", sessionId: session.id, item });
   }
   for (const child of orderReplayedChildren(replay.children)) {
@@ -55524,7 +56029,7 @@ function configStateFor(session) {
     ...session.desiredMode !== null ? { mode: session.desiredMode } : {},
     ...session.desiredThinking !== null ? { thinkingOption: session.desiredThinking } : {},
     models: catalogModelsCache ?? [],
-    modes: STATIC_MODES,
+    modes: claudeModeCatalog({ ...process.env, ...session.config.env }).modes,
     thinkingOptions: [],
     // The Fast toggle is offered only for models whose manifest row allows it.
     settings: session.fastModeSupported ? [
@@ -55578,9 +56083,25 @@ function rawPromptText(content) {
   const joined = parts.join("\n").trim();
   return joined.length > 0 ? joined : "[attachment]";
 }
+function localRewindArguments(input2) {
+  if (input2.type === "command") return input2.name === "rewind" ? input2.arguments : void 0;
+  if (!input2.content.every((block) => block.type === "text")) return void 0;
+  const match = /^\s*\/rewind(?:\s+([\s\S]*))?\s*$/.exec(rawPromptText(input2.content));
+  return match ? match[1] ?? "" : void 0;
+}
 async function promptSession(input2, context) {
   const session = context.sessions.get(input2.sessionId);
   if (session === void 0 || session.closed) throw new Error(`Unknown session: ${input2.sessionId}`);
+  const command = localRewindArguments(input2.prompt.input);
+  if (input2.prompt.delivery === "steer" && command !== void 0) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: session.id,
+      clientMessageId: input2.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "Local /rewind commands cannot steer a running turn" } }
+    });
+    return;
+  }
   if (input2.prompt.delivery === "steer") {
     await steerSession(input2, context, session);
     return;
@@ -55597,6 +56118,7 @@ async function promptSession(input2, context) {
       return void 0;
     }
     const active2 = {
+      kind: command === void 0 ? "prompt" : "rewind",
       clientMessageId: input2.prompt.clientMessageId,
       turnId: (0, import_node_crypto6.randomUUID)(),
       messageUuid: (0, import_node_crypto6.randomUUID)(),
@@ -55610,6 +56132,10 @@ async function promptSession(input2, context) {
   if (!active) return;
   try {
     const prompt = input2.prompt.input;
+    if (command !== void 0) {
+      await executeLocalRewind(session, input2, active, context, command);
+      return;
+    }
     let blocks;
     let original;
     if (prompt.type === "command") {
@@ -55666,6 +56192,50 @@ async function promptSession(input2, context) {
     }
   }
 }
+async function executeLocalRewind(session, input2, active, context, args) {
+  const requested = args.trim();
+  let error62 = "No prior user message available to rewind. Use /rewind <user_message_uuid>.";
+  let target;
+  if (requested && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requested)) {
+    throw new Error("Invalid message UUID. Usage: /rewind <user_message_uuid> or /rewind");
+  }
+  if (!requested && session.claudeSessionId && session.rewindUserMessageIds.length === 0) {
+    const history = await readClaudeReplay(session.config.cwd, session.claudeSessionId, void 0, session.config.env.CLAUDE_CONFIG_DIR);
+    session.rewindUserMessageIds = history.rootItems.flatMap((item) => item.type === "user_message" && typeof item.revertToken === "string" ? [item.revertToken] : []);
+  }
+  const candidates = requested ? [requested] : [...new Set(session.rewindUserMessageIds)].reverse();
+  if (session.closed || session.active !== active) return;
+  if (candidates.length === 0) throw new Error(error62);
+  if (session.query) await resetQuery(session, context.emit, active);
+  if (session.closed || session.active !== active) return;
+  active.announced = true;
+  context.emit({
+    type: "session.prompt_result",
+    sessionId: session.id,
+    clientMessageId: input2.prompt.clientMessageId,
+    result: { type: "turn", turnId: active.turnId }
+  });
+  context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "started" });
+  for (const candidate of candidates) {
+    if (session.closed || session.active !== active) return;
+    try {
+      await rewindFilesOnce(session, candidate, context, active);
+      target = candidate;
+      break;
+    } catch (failure2) {
+      error62 = describe3(failure2);
+    }
+  }
+  if (session.closed || session.active !== active) return;
+  if (!target) throw new Error(error62);
+  context.emit({
+    type: "timeline.item",
+    sessionId: session.id,
+    item: { type: "assistant_message", id: `rewind-${active.turnId}`, text: `Rewound tracked files to message ${target}.` }
+  });
+  session.active = null;
+  context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "completed" });
+}
 async function interruptSession(session, context) {
   session.cancellationEpoch += 1;
   const active = session.active;
@@ -55673,6 +56243,24 @@ async function interruptSession(session, context) {
   const sink = session.sink;
   const mainTurnOrdinal = session.mainTurnOrdinal;
   const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid));
+  if (active?.kind === "rewind") {
+    session.active = null;
+    session.queryRestartNeeded = true;
+    session.interrupted = true;
+    session.abort.abort();
+    if (!query) session.abort = new AbortController();
+    settleAutonomousTurn(session, context.emit, "canceled");
+    denyPendingPermissions(session, context.emit, "Interrupted");
+    settleRootTools(session, context.emit, "canceled", "Interrupted");
+    if (active.announced) context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
+    else context.emit({
+      type: "session.prompt_result",
+      sessionId: session.id,
+      clientMessageId: active.clientMessageId,
+      result: { type: "failed", error: { message: "Prompt canceled before delivery" } }
+    });
+    return;
+  }
   session.active = null;
   settleAutonomousTurn(session, context.emit, "completed");
   if (active) {
@@ -55834,9 +56422,9 @@ async function buildMessageBlocks(content, context, contextKey) {
   return blocks;
 }
 async function ensureQuery(session, context, preparing) {
-  if (session.query !== null && session.restartForThinking) {
-    session.restartForThinking = false;
-    await resetQuery(session, context.emit, true);
+  if (session.queryRestartNeeded) {
+    session.queryRestartNeeded = false;
+    if (session.query !== null) await resetQuery(session, context.emit, preparing ?? null);
   }
   if (session.query !== null) return;
   if (session.closed) throw new Error("Claude session is closed");
@@ -55845,7 +56433,8 @@ async function ensureQuery(session, context, preparing) {
   if (session.closed || preparing && session.active !== preparing) throw new Error("Claude prompt was canceled during startup");
   if (session.query !== null) return;
   const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
-  const permissionMode = session.desiredMode ?? void 0;
+  const permissionMode = session.desiredMode ?? "default";
+  assertClaudeMode(permissionMode, { ...process.env, ...session.config.env });
   const providerOptions = resolveProviderOptions(session);
   validateThinking(session.desiredThinking, session.desiredModel);
   const thinking = thinkingStartOptions(session.desiredThinking);
@@ -55923,6 +56512,7 @@ async function ensureQuery(session, context, preparing) {
   if (servers !== void 0) options.mcpServers = servers;
   session.sink.close();
   session.messages.clear();
+  session.toolStream.clear();
   session.sink = new ClaudeMessageInput();
   session.mainTurnInFlight = false;
   session.compacting = false;
@@ -55970,6 +56560,7 @@ function resolveProviderOptions(session) {
   const additionalDirectories = [];
   const settings = {};
   let sandbox;
+  const extraArgs = {};
   const raw = session.config.providerOptions;
   if (typeof raw === "object" && raw !== null) {
     for (const key of ["allowedTools", "disallowedTools", "additionalDirectories"]) {
@@ -55980,6 +56571,12 @@ function resolveProviderOptions(session) {
         if (key === "allowedTools") allowedTools.push(entry);
         else if (key === "disallowedTools") disallowedTools.push(entry);
         else additionalDirectories.push(entry);
+      }
+    }
+    const rawArgs = raw["extraArgs"];
+    if (typeof rawArgs === "object" && rawArgs !== null) {
+      for (const [flag, value] of Object.entries(rawArgs)) {
+        if (typeof value === "string" || value === null) extraArgs[flag] = value;
       }
     }
     const rawSettings = raw["settings"];
@@ -55993,6 +56590,7 @@ function resolveProviderOptions(session) {
   }
   return {
     spread: {
+      ...Object.keys(extraArgs).length ? { extraArgs } : {},
       ...allowedTools.length > 0 ? { allowedTools: [...new Set(allowedTools)] } : {},
       ...disallowedTools.length > 0 ? { disallowedTools: [...new Set(disallowedTools)] } : {},
       ...additionalDirectories.length > 0 ? { additionalDirectories: [...new Set(additionalDirectories)] } : {},
@@ -56020,7 +56618,7 @@ async function publishCommands(session, context) {
     );
     if (session.closed) return;
     session.commandsPublished = true;
-    const seen = /* @__PURE__ */ new Map();
+    const seen = /* @__PURE__ */ new Map([["rewind", { name: "rewind", description: "Rewind tracked files to a previous user message", argumentHint: "[user_message_uuid]" }]]);
     for (const command of commands) {
       if (command === null || typeof command !== "object") continue;
       const info = command;
@@ -56051,7 +56649,7 @@ function thinkingStartOptions(thinking) {
 }
 function observePermissionMode(session, mode) {
   const previous = session.desiredMode ?? "default";
-  session.desiredMode = mode === "default" ? null : mode;
+  session.desiredMode = mode;
   if (mode === "plan") {
     if (previous !== "plan") session.planResumeMode = previous;
   } else session.planResumeMode = mode;
@@ -56068,7 +56666,7 @@ async function applyConfigChanges(session, changes) {
   const thinking = Object.hasOwn(changes, "thinkingOption") ? readConfigured(changes.thinkingOption ?? void 0) : session.desiredThinking;
   const nextThinking = thinking === "default" ? null : thinking ?? null;
   if (Object.hasOwn(changes, "thinkingOption")) validateThinking(nextThinking, nextModel);
-  if (Object.hasOwn(changes, "mode") && changes.mode && !VALID_MODES.has(changes.mode)) throw new Error(`Unknown Claude mode: ${changes.mode}`);
+  if (Object.hasOwn(changes, "mode")) assertClaudeMode(changes.mode ?? "default", { ...process.env, ...session.config.env });
   if (Object.hasOwn(changes, "model")) {
     if (session.query) {
       if (!session.query.setModel) throw new Error("Claude does not support live model changes");
@@ -56080,7 +56678,7 @@ async function applyConfigChanges(session, changes) {
     session.contextWindowMaxTokens = findClaudeModel(nextModel)?.contextWindowMaxTokens ?? null;
     if (session.desiredThinking === "off" && findClaudeModel(nextModel)?.supportsThinkingDisabled !== true) {
       session.desiredThinking = findClaudeModel(nextModel)?.defaultThinkingOption ?? null;
-      session.restartForThinking = true;
+      session.queryRestartNeeded = true;
     }
     if (session.fastMode && !session.fastModeSupported) {
       if (session.query) {
@@ -56100,7 +56698,7 @@ async function applyConfigChanges(session, changes) {
   }
   if (Object.hasOwn(changes, "thinkingOption") && session.desiredThinking !== nextThinking) {
     session.desiredThinking = nextThinking;
-    session.restartForThinking = session.query !== null;
+    session.queryRestartNeeded = session.query !== null;
   }
   if (changes.settings && Object.hasOwn(changes.settings, "fast_mode")) {
     const enabled = changes.settings.fast_mode === true;
@@ -56115,38 +56713,40 @@ async function applyConfigChanges(session, changes) {
 var catalogModelsCache = null;
 async function probeCatalog(context) {
   const models = await probeModels(context);
-  return { models, modes: STATIC_MODES, defaultMode: "default" };
+  return { models, ...claudeModeCatalog(process.env) };
 }
 async function probeModels(context) {
   const values = await context.loadValues();
   const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const abort = new AbortController();
-  const query = context.queryFactory({
-    prompt: new ClaudeMessageInput().iterable,
-    options: {
-      cwd: process.cwd(),
+  const version2 = context.resolveVersion(executable).catch(() => void 0);
+  const sink = new ClaudeMessageInput();
+  let models = [];
+  try {
+    const query = context.queryFactory({ prompt: sink.iterable, options: {
+      cwd: process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(),
       env: { ...process.env },
       abortController: abort,
+      persistSession: false,
+      tools: [],
+      mcpServers: {},
+      strictMcpConfig: true,
+      settingSources: ["user"],
+      settings: { disableAllHooks: true },
       ...executable !== null ? { pathToClaudeCodeExecutable: executable } : {}
+    } });
+    if (query.supportedModels) {
+      const infos = await withTimeout(query.supportedModels(), 5e3, "model probe timed out");
+      models = infos.map(modelInfoToProviderModel);
     }
-  });
-  try {
-    if (query.supportedModels === void 0) return fallbackModels();
-    const infos = await withTimeout(query.supportedModels(), 2e4, "model probe timed out");
-    const mapped = infos.map(modelInfoToProviderModel);
-    if (mapped.length === 0) return fallbackModels();
-    catalogModelsCache = mapped;
-    return mapped;
   } catch {
-    return fallbackModels();
   } finally {
+    sink.close();
     abort.abort();
   }
-}
-function fallbackModels() {
-  return [
-    { id: "default", label: "Claude (CLI default)", isDefault: true }
-  ];
+  const catalog = await completeClaudeCatalog(models, resolveClaudeConfigDir(), await version2);
+  catalogModelsCache = catalog;
+  return catalog;
 }
 function modelInfoToProviderModel(info) {
   const thinkingOptions = thinkingOptionsForModel(info);
@@ -56245,11 +56845,14 @@ function requestToolPermission(session, toolName, input2, toolOptions, context) 
       ...toolOptions.suggestions !== void 0 ? { suggestions: JSON.parse(JSON.stringify(toolOptions.suggestions)) } : {},
       ...kind === "plan" ? {
         metadata: {
+          ...toolOptions.toolUseID ? { toolUseId: toolOptions.toolUseID } : {},
           ...typeof input2.plan === "string" && input2.plan.length > 0 ? { planText: input2.plan } : {}
         },
         actions: buildPlanPermissionActions(session.planResumeMode)
       } : {},
+      ...kind !== "plan" && toolOptions.toolUseID ? { metadata: { toolUseId: toolOptions.toolUseID } } : {},
       ...kind === "tool" ? {
+        detail: describeRunningTool(toolName, input2),
         actions: [
           { id: "allow", label: "Allow", behavior: "allow" },
           { id: "deny", label: "Deny", behavior: "deny" }
@@ -56386,7 +56989,7 @@ async function pumpQuery(session, query, context) {
   const emit = (event) => context.emit(event);
   try {
     for await (const message of query) {
-      if (session.closed) return;
+      if (session.closed || session.detached || session.query !== query) return;
       handleSdkMessage(session, message, context);
     }
   } catch (error62) {
@@ -56430,6 +57033,7 @@ function finishDeadQuery(session, message, emit) {
   session.abort = new AbortController();
   session.sink.close();
   session.messages.clear();
+  session.toolStream.clear();
   session.pendingUserAnchors = [];
   session.mainTurnInFlight = false;
   session.compacting = false;
@@ -56520,7 +57124,7 @@ function handleSdkMessage(session, message, context) {
       session.runtimeModel = message.model;
       session.contextWindowMaxTokens = findClaudeModel(message.model)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
     }
-    if (VALID_MODES.has(message.permissionMode)) observePermissionMode(session, message.permissionMode);
+    if (isClaudeMode(message.permissionMode)) observePermissionMode(session, message.permissionMode);
     emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
   }
   if (message.type === "system" && message.subtype === "session_state_changed") {
@@ -56537,7 +57141,7 @@ function handleSdkMessage(session, message, context) {
   if (message.type === "system") {
     if (message.subtype === "init") void publishCommands(session, context);
     if (message.subtype === "status") {
-      if (message.permissionMode && VALID_MODES.has(message.permissionMode)) {
+      if (message.permissionMode && isClaudeMode(message.permissionMode)) {
         observePermissionMode(session, message.permissionMode);
         emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
       }
@@ -56559,6 +57163,10 @@ function handleSdkMessage(session, message, context) {
   }
   if (message.type === "stream_event") {
     noteStreamEventUsage(session, message, emit);
+    for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
+      if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
+      emit({ type: "timeline.item", sessionId: session.id, item });
+    }
     for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
     return;
   }

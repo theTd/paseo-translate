@@ -4,15 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  MAX_REPLAY_CHILD_ITEMS,
-  MAX_REPLAY_ITEMS,
-  MAX_REPLAY_LINES,
-  MAX_REPLAY_SIDECARS,
   readClaudeReplay,
   type ReplayResult,
   type ReplayUserTextRestore,
 } from "./claude-transcript";
 
+const FORMER_MAX_REPLAY_ITEMS = 2_000;
+const FORMER_MAX_REPLAY_LINES = 10_000;
+const FORMER_MAX_REPLAY_CHILD_ITEMS = 2_000;
+const FORMER_MAX_REPLAY_SIDECARS = 50;
 const tempRoots: string[] = [];
 
 afterEach(() => {
@@ -60,7 +60,6 @@ function writeRootSession(fixture: Fixture, lines: string[]): void {
   const projectDir = projectDirOf(fixture);
   mkdirSync(projectDir, { recursive: true });
   // No trailing newline: split("\n") then yields exactly lines.length
-  // elements, so window arithmetic in the assertions below is exact.
   writeFileSync(path.join(projectDir, `${fixture.sessionId}.jsonl`), lines.join("\n"), "utf8");
 }
 
@@ -109,9 +108,9 @@ function textsOf(items: ReplayResult["rootItems"]): string[] {
   return items.map((item) => ("text" in item ? String(item.text) : ""));
 }
 
-describe("claude transcript replay windows", () => {
-  it("keeps the most recent items beyond the item window", async () => {
-    const total = MAX_REPLAY_ITEMS + 500;
+describe("complete Claude transcript replay", () => {
+  it("keeps all items beyond the former item window", async () => {
+    const total = FORMER_MAX_REPLAY_ITEMS + 500;
     const lines: string[] = [];
     for (let i = 0; i < total; i++) {
       lines.push(assistantText(`msg-${String(i).padStart(4, "0")}`));
@@ -120,40 +119,35 @@ describe("claude transcript replay windows", () => {
     writeRootSession(fixture, lines);
     const result = await replay(fixture);
     const texts = textsOf(result.rootItems);
-    expect(texts).toHaveLength(MAX_REPLAY_ITEMS);
-    // The head falls off; the tail — including the final response — survives, in order.
-    expect(texts[0]).toBe(`msg-${String(total - MAX_REPLAY_ITEMS).padStart(4, "0")}`);
+    expect(texts).toHaveLength(total);
+    expect(texts[0]).toBe("msg-0000");
     expect(texts[texts.length - 1]).toBe(`msg-${String(total - 1).padStart(4, "0")}`);
-    expect(texts).not.toContain("msg-0000");
+    expect(texts).toContain("msg-0000");
   });
 
-  it("keeps the most recent lines beyond the line window", async () => {
-    // 500 early texts + 9500 itemless attachments + 500 late texts: the
-    // line window drops exactly the 500 head lines, and the surviving 500
-    // late texts fit the item window untouched, so this test isolates the
-    // LINE window (the item-window test above isolates the item window).
+  it("keeps early and late messages beyond the former line window", async () => {
     const lines: string[] = [];
     for (let i = 0; i < 500; i++) {
       lines.push(assistantText(`early-${String(i).padStart(3, "0")}`));
     }
-    for (let i = 0; i < MAX_REPLAY_LINES - 500; i++) {
+    for (let i = 0; i < FORMER_MAX_REPLAY_LINES - 500; i++) {
       lines.push(JSON.stringify({ type: "attachment", text: `filler-${i}` }));
     }
     for (let i = 0; i < 500; i++) {
       lines.push(assistantText(`late-${String(i).padStart(3, "0")}`));
     }
-    expect(lines).toHaveLength(MAX_REPLAY_LINES + 500);
+    expect(lines).toHaveLength(FORMER_MAX_REPLAY_LINES + 500);
     const fixture = createFixture();
     writeRootSession(fixture, lines);
     const result = await replay(fixture);
     const texts = textsOf(result.rootItems);
-    expect(texts).toHaveLength(500);
-    expect(texts[0]).toBe("late-000");
+    expect(texts).toHaveLength(1000);
+    expect(texts[0]).toBe("early-000");
     expect(texts[texts.length - 1]).toBe("late-499");
-    expect(texts).not.toContain("early-000");
+    expect(texts).toContain("early-000");
   });
 
-  it("replays a tail tool_result with the generic tool name when its tool_use fell outside the line window", async () => {
+  it("retains tool identity when its tool_use predates the former line window", async () => {
     const lines: string[] = [];
     lines.push(
       JSON.stringify({
@@ -163,7 +157,7 @@ describe("claude transcript replay windows", () => {
         },
       }),
     );
-    for (let i = 0; i < MAX_REPLAY_LINES; i++) {
+    for (let i = 0; i < FORMER_MAX_REPLAY_LINES; i++) {
       lines.push(userText(`filler-${i}`));
     }
     lines.push(
@@ -178,8 +172,8 @@ describe("claude transcript replay windows", () => {
     writeRootSession(fixture, lines);
     const result = await replay(fixture);
     const toolCalls = result.rootItems.filter((item) => item.type === "tool_call");
-    expect(toolCalls).toHaveLength(1);
-    expect(toolCalls[0]).toMatchObject({ id: "tu-old", callId: "tu-old", name: "tool" });
+    expect(toolCalls).toHaveLength(2);
+    expect(toolCalls[1]).toMatchObject({ id: "tu-old", callId: "tu-old", name: "Bash", detail: { command: "old", output: "done" } });
   });
 
   it("marks replayed screenshot blocks without leaking base64", async () => {
@@ -209,12 +203,13 @@ describe("claude transcript replay windows", () => {
     expect(toolCalls).toHaveLength(1);
     expect(JSON.stringify(toolCalls[0])).toContain("[image]");
     expect(JSON.stringify(result)).not.toContain("base64");
+    expect(result.rootItems).toContainEqual(expect.objectContaining({ type: "assistant_message", text: expect.stringContaining("paseo-attachments") }));
   });
 
-  it("bounds sidecar items by the shared child budget, newest children first", async () => {
+  it("preserves every child timeline beyond the former shared budget", async () => {
     const fixture = createFixture();
     writeRootSession(fixture, [userText("hello")]);
-    const perChild = Math.floor(MAX_REPLAY_CHILD_ITEMS / 2) + 500;
+    const perChild = Math.floor(FORMER_MAX_REPLAY_CHILD_ITEMS / 2) + 500;
     const childLines = (prefix: string): string[] => {
       const lines: string[] = [];
       for (let i = 0; i < perChild; i++) {
@@ -227,36 +222,32 @@ describe("claude transcript replay windows", () => {
     const result = await replay(fixture);
     expect(result.children).toHaveLength(2);
     const total = result.children.reduce((sum, child) => sum + child.items.length, 0);
-    expect(total).toBe(MAX_REPLAY_CHILD_ITEMS);
-    // Root window is untouched by the child budget.
+    expect(total).toBe(perChild * 2);
     expect(textsOf(result.rootItems)).toEqual(["hello"]);
-    // Mtime order decides priority: the newer sidecar survives whole, the
-    // older one is trimmed to its own tail (which keeps its final item).
     const byId = new Map(result.children.map((child) => [child.canonicalId, child]));
     expect(textsOf(byId.get("tu-bbb")?.items ?? [])).toHaveLength(perChild);
     const olderTexts = textsOf(byId.get("tu-aaa")?.items ?? []);
-    expect(olderTexts).toHaveLength(MAX_REPLAY_CHILD_ITEMS - perChild);
+    expect(olderTexts).toHaveLength(perChild);
     expect(olderTexts[olderTexts.length - 1]).toBe(
       `child-a-${String(perChild - 1).padStart(4, "0")}`,
     );
   });
 
-  it("stages only the newest sidecars beyond the sidecar window", async () => {
+  it("replays every sidecar beyond the former sidecar window", async () => {
     const fixture = createFixture();
     writeRootSession(fixture, [userText("hello")]);
-    const total = MAX_REPLAY_SIDECARS + 3;
+    const total = FORMER_MAX_REPLAY_SIDECARS + 3;
     const base = Date.now() - total * 1000;
     for (let i = 0; i < total; i++) {
       const id = `s${String(i).padStart(2, "0")}`;
       writeSidecar(fixture, id, `tu-${id}`, [assistantText(`sidecar-${id}`)], base + i * 1000);
     }
     const result = await replay(fixture);
-    expect(result.children).toHaveLength(MAX_REPLAY_SIDECARS);
+    expect(result.children).toHaveLength(total);
     const ids = new Set(result.children.map((child) => child.canonicalId));
-    // The three oldest sidecars fall outside the window; the newest stays.
-    expect(ids.has("tu-s00")).toBe(false);
-    expect(ids.has("tu-s01")).toBe(false);
-    expect(ids.has("tu-s02")).toBe(false);
+    expect(ids.has("tu-s00")).toBe(true);
+    expect(ids.has("tu-s01")).toBe(true);
+    expect(ids.has("tu-s02")).toBe(true);
     expect(ids.has(`tu-s${String(total - 1).padStart(2, "0")}`)).toBe(true);
   });
 });
@@ -374,4 +365,25 @@ describe("user text restoration", () => {
       revertToken: "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f",
     });
   });
+});
+
+
+it("replays compaction markers while filtering summaries, synthetic text and placeholders", async () => {
+  const fixture = createFixture();
+  const restoreRootBlock = vi.fn((text: string) => text);
+  writeRootSession(fixture, [
+    JSON.stringify({ type: "system", subtype: "compact_boundary", compactMetadata: { trigger: "manual", preTokens: 42 } }),
+    JSON.stringify({ type: "user", isCompactSummary: true, message: { content: "internal summary" } }),
+    JSON.stringify({ type: "user", isMeta: true, message: { content: "internal metadata" } }),
+    assistantText("No response requested."), assistantText("[Request interrupted by user for tool use]"),
+    userText("<local-command-stdout>internal</local-command-stdout>"),
+    userText("Visible user"), assistantText("Visible assistant"),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "r", name: "Read", input: { file_path: "/a" } }] } }),
+    JSON.stringify({ type: "user", toolUseResult: {}, message: { content: [{ type: "tool_result", tool_use_id: "r", content: "File contents" }] } }),
+  ]);
+  const result = await replay(fixture, { restoreRootBlock, restoreChildBlock: (text) => text });
+  expect(result.rootItems[0]).toMatchObject({ type: "compaction", status: "completed", trigger: "manual", preTokens: 42 });
+  expect(textsOf(result.rootItems).filter(Boolean)).toEqual(["Visible user", "Visible assistant"]);
+  expect(restoreRootBlock).toHaveBeenCalledTimes(1);
+  expect(result.rootItems.at(-1)).toMatchObject({ type: "tool_call", status: "completed", detail: { type: "read", content: "File contents" } });
 });

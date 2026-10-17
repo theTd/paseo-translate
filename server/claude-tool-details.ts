@@ -49,6 +49,12 @@ function readString(input: unknown, key: string): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function readNumber(input: unknown, key: string): number | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const value = (input as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function readInputJson(input: unknown): string {
   try {
     return JSON.stringify(input ?? {});
@@ -88,6 +94,8 @@ export function describeRunningTool(name: string, input: unknown): ProviderToolC
     return {
       type: "read",
       filePath: readString(input, "file_path") ?? readString(input, "path") ?? trimmed,
+      ...(readNumber(input, "offset") !== undefined ? { offset: readNumber(input, "offset") } : {}),
+      ...(readNumber(input, "limit") !== undefined ? { limit: readNumber(input, "limit") } : {}),
     };
   }
   if (WRITE_NAMES.has(trimmed)) {
@@ -103,11 +111,14 @@ export function describeRunningTool(name: string, input: unknown): ProviderToolC
     return {
       type: "edit",
       filePath: readString(input, "file_path") ?? readString(input, "path") ?? trimmed,
-      ...(readString(input, "old_string") !== undefined
-        ? { oldString: readString(input, "old_string") }
+      ...(readString(input, "old_string") ?? readString(input, "old_str")
+        ? { oldString: readString(input, "old_string") ?? readString(input, "old_str") }
         : {}),
-      ...(readString(input, "new_string") !== undefined
-        ? { newString: readString(input, "new_string") }
+      ...(readString(input, "new_string") ?? readString(input, "new_str")
+        ? { newString: readString(input, "new_string") ?? readString(input, "new_str") }
+        : {}),
+      ...(readString(input, "patch") ?? readString(input, "diff")
+        ? { unifiedDiff: readString(input, "patch") ?? readString(input, "diff") }
         : {}),
     };
   }
@@ -154,6 +165,7 @@ export function describeFinishedTool(
     case "plan":
       return running;
     case "read":
+      return { ...running, content: output };
     case "write":
     case "edit":
       return running;

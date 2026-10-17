@@ -31,10 +31,10 @@ vi.mock("./streaming-translation", () => ({
   },
 }));
 
-function render(text = "Hallo") {
+function render(text = "Hallo", originalPreserved?: boolean) {
   return TranslatedUserMessage({
     agentId: "agent-1",
-    item: { data: { text, phase: "complete", messageId: "u-1" } },
+    item: { data: { text, phase: "complete", messageId: "u-1", originalPreserved } },
     theme: { colors: { foreground: "#fff", foregroundMuted: "#aaa", accent: "#0f0", surface2: "#333" } },
   } as PluginTimelineItemProps<TranslatedUserMessageData>);
 }
@@ -55,7 +55,7 @@ beforeEach(() => {
 
 describe("bilingual user bubble", () => {
   it("renders both languages in its own right-aligned bubble without a host wrapper", () => {
-    const result = render();
+    const result = render()!;
     expect(result.props.style.alignItems).toBe("flex-end");
     expect(result.props.children.props.style.backgroundColor).toBe("#333");
     expect(texts(result)).toEqual(["Hallo", "Hello"]);
@@ -81,4 +81,10 @@ describe("bilingual user bubble", () => {
   it("preserves slash-command prefixes in both languages", () => {
     expect(texts(render("/model Hallo"))).toEqual(["/model Hallo", "/model Hello"]);
   });
+});
+
+it("renders only the translation beside the preserved native row", () => {
+  expect(texts(render("Hallo", true))).toEqual(["Hello"]);
+  state.stream.text = "Hallo";
+  expect(render("Hallo", true)).toBeNull();
 });

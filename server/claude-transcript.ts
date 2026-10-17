@@ -3,6 +3,8 @@ import { join } from "node:path";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { claudeProjectDir } from "./claude-project-dir";
+import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
+import { isClaudeSyntheticUserEntry, isClaudeTranscriptNoise } from "./claude-transcript-content";
 
 /**
  * Best-effort history replay for the Translate (Claude Code) provider.
@@ -27,32 +29,6 @@ import { claudeProjectDir } from "./claude-project-dir";
  * LAST assistant entry's usage sum — a context-size reading, not cumulative
  * spend).
  */
-
-/**
- * Replay windows, all tail-kept: a long session replays its MOST RECENT
- * lines/items, never its oldest. The daemon renders the bottom of the
- * timeline, so dropping the head only loses scrollback while dropping the
- * tail would lose the final response itself (seen live: a 2972-line /
- * 1319-item session came back without its last ~819 items after a restart).
- *
- * The daemon's timeline store appends replayed items without a count cap
- * (verified against the installed 0.9.1 daemon bundle's timeline store:
- * appends are uncapped, the projection only merges adjacent rows, and
- * history fetches page from the tail with a cursor — re-run
- * `node scripts/verify-daemon-replay-cap.mjs` after daemon upgrades to
- * confirm the bound still holds; a live session with 747 items was also
- * observed with no truncation. Note the 0.9.0 in package.json is only this
- * repo's plugin-SDK dev dependency, not the daemon version), so these
- * plugin-side windows are the only replay bound. Per timeline: the root keeps the
- * newest MAX_REPLAY_ITEMS, all sidecars together keep the newest
- * MAX_REPLAY_CHILD_ITEMS on top, i.e. at most
- * MAX_REPLAY_ITEMS + MAX_REPLAY_CHILD_ITEMS emitted items per session open.
- */
-export const MAX_REPLAY_LINES = 10_000;
-export const MAX_REPLAY_ITEMS = 2_000;
-export const MAX_REPLAY_CHILD_ITEMS = 2_000;
-/** Maximum sidecar files staged per session open (newest win). */
-export const MAX_REPLAY_SIDECARS = 50;
 
 interface ReplayEntry {
   type?: unknown;
@@ -112,15 +88,8 @@ function readString(value: unknown): string | undefined {
 
 async function readJsonLines(path: string): Promise<ReplayEntry[]> {
   const raw = await readFile(path, "utf8");
-  // Slice the raw lines BEFORE parsing so a huge transcript never pays
-  // JSON.parse for entries that fall outside the window. The raw file
-  // itself (~8 MB for a 3000-line session) is the only full-size transient;
-  // parsed entries stay bounded by MAX_REPLAY_LINES.
-  const rawLines = raw.split("\n");
-  const windowed =
-    rawLines.length > MAX_REPLAY_LINES ? rawLines.slice(-MAX_REPLAY_LINES) : rawLines;
   const entries: ReplayEntry[] = [];
-  for (const line of windowed) {
+  for (const line of raw.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
     try {
       const parsed: unknown = JSON.parse(line);
@@ -184,27 +153,27 @@ function pushItem(collector: Collector, item: ProviderTimelineItem): void {
   collector.items.push(item);
 }
 
-/**
- * Tail-kept item window, applied once per collector after the full scan.
- * Name maps (toolNames/toolInputs/owner links) are built from every scanned
- * entry, so they stay complete within the scanned window; only the emitted
- * items are cut. Note the two windows differ: the LINE window slices before
- * scanning (a tail `tool_result` whose `tool_use` fell outside the lines
- * replays with the generic name "tool"), while the ITEM window truncates
- * after scanning (maps stay whole).
- */
-function truncateTail(collector: Collector): void {
-  if (collector.items.length > MAX_REPLAY_ITEMS) {
-    collector.items = collector.items.slice(-MAX_REPLAY_ITEMS);
-  }
-}
-
 async function collectEntry(
   collector: Collector,
   entry: ReplayEntry,
   idSeed: string,
   restoreUserBlock?: (translatedBlock: string) => Promise<string> | string,
 ): Promise<void> {
+  if (entry.type === "system" && entry.subtype === "compact_boundary") {
+    const metadata = (entry.compaction ?? entry.metadata ?? entry.compactMetadata) as
+      { trigger?: unknown; preTokens?: unknown; pre_tokens?: unknown } | undefined;
+    const preTokens = metadata?.preTokens ?? metadata?.pre_tokens;
+    pushItem(collector, { type: "compaction", id: idSeed, status: "completed",
+      trigger: metadata?.trigger === "manual" ? "manual" : "auto",
+      ...(typeof preTokens === "number" ? { preTokens } : {}) });
+    return;
+  }
+  if (entry.isCompactSummary) return;
+  if (entry.type === "user" && isClaudeSyntheticUserEntry(entry)) {
+    const content = entry.message?.content;
+    if (!Array.isArray(content) || !content.some((block) =>
+      typeof block === "object" && block !== null && block.type === "tool_result")) return;
+  }
   const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : undefined;
   const withTimestamp = <T extends object>(item: T): T =>
     timestamp !== undefined ? { ...item, timestamp } : item;
@@ -214,7 +183,7 @@ async function collectEntry(
     const rawContent = entry.message?.content;
     if (typeof rawContent === "string") {
       const text = rawContent.trim();
-      if (text.length > 0) {
+      if (text.length > 0 && !isClaudeTranscriptNoise(text)) {
         pushItem(
           collector,
           withTimestamp({
@@ -234,7 +203,7 @@ async function collectEntry(
       const record = block as { type?: unknown };
       if (record.type === "text") {
         const text = readString((block as { text?: unknown }).text);
-        if (text === undefined) continue;
+        if (text === undefined || isClaudeTranscriptNoise(text)) continue;
         pushItem(
           collector,
           withTimestamp({
@@ -299,7 +268,7 @@ async function collectEntry(
     // Sidecar prompts serialize as a bare string rather than a block array.
     if (typeof content === "string") {
       const text = content.trim();
-      if (text.length > 0) {
+      if (text.length > 0 && !isClaudeTranscriptNoise(text)) {
         pushItem(
           collector,
           withTimestamp({
@@ -322,7 +291,7 @@ async function collectEntry(
         // Per-block restore BEFORE joining: forward translation ran per
         // block, so block boundaries are the only exact lookup keys. A
         // joined-string lookup would miss every multi-block turn.
-        if (text !== undefined) texts.push(await restoreBlock(text));
+        if (text !== undefined && !isClaudeTranscriptNoise(text)) texts.push(await restoreBlock(text));
       } else if (record.type === "tool_result") {
         const result = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
         if (typeof result.tool_use_id !== "string") continue;
@@ -341,6 +310,17 @@ async function collectEntry(
             detail: describeFinishedTool(name, collector.toolInputs.get(result.tool_use_id), output),
           } satisfies ProviderTimelineItem),
         );
+        if (Array.isArray(result.content)) {
+          for (const [index, block] of result.content.entries()) {
+            if (typeof block !== "object" || block === null || block.type !== "image") continue;
+            const source = block.source;
+            if (source?.type !== "base64" || typeof source.data !== "string" || typeof source.media_type !== "string") continue;
+            const image = materializeImageOutput(source.data, source.media_type);
+            pushItem(collector, withTimestamp({ type: "assistant_message",
+              id: `${result.tool_use_id}-image-${index}`,
+              text: image ? renderImageOutputMarkdown(image.uri) : "Image output was omitted because it was not available as a file path or URL." }));
+          }
+        }
       }
     }
     if (texts.length > 0) {
@@ -442,27 +422,8 @@ async function readReplayInner(
     }
     await collectEntry(root, entry, `replay-${seed++}`, restore?.restoreRootBlock);
   }
-  truncateTail(root);
 
   const children = await readReplayChildren(projectDir, claudeSessionId, root, restore);
-  // Global bound: sidecars share one tail budget on top of the root window
-  // so many sidecars can never emit collectors × cap items. The walk runs
-  // from the newest child backwards, so the oldest children shrink first
-  // and the newest sidecars (closest to the final response) survive whole.
-  let remaining = MAX_REPLAY_CHILD_ITEMS;
-  for (let index = children.length - 1; index >= 0; index--) {
-    const child = children[index];
-    if (child === undefined) continue;
-    // Guard first: slice(-0) is slice(0) and would keep everything.
-    if (remaining <= 0) {
-      child.items = [];
-      continue;
-    }
-    if (child.items.length > remaining) {
-      child.items = child.items.slice(-remaining);
-    }
-    remaining -= child.items.length;
-  }
   return { rootItems: root.items, children };
 }
 
@@ -479,10 +440,7 @@ async function readReplayChildren(
     return [];
   }
   const sidecars = files.filter((file) => file.startsWith("agent-") && file.endsWith(".jsonl"));
-  // Oldest sidecars first (best-effort by file mtime): the global tail
-  // budget below then shrinks the oldest children first, so the newest
-  // sidecars — closest to the final response — survive whole. Unreadable
-  // mtimes sort as oldest rather than failing the replay.
+  // Replay every sidecar in activity order. An unreadable mtime sorts first.
   const byAge = await Promise.all(
     sidecars.map(async (file) => {
       let mtimeMs = 0;
@@ -496,10 +454,6 @@ async function readReplayChildren(
     }),
   );
   byAge.sort((a, b) => a.mtimeMs - b.mtimeMs);
-  // Newest sidecars win the staging slots; the survivors stay oldest-first
-  // so the global tail budget below still shrinks the oldest children first.
-  const stagedFiles =
-    byAge.length > MAX_REPLAY_SIDECARS ? byAge.slice(-MAX_REPLAY_SIDECARS) : byAge;
   // Two passes: every sidecar's Task tool_use evidence merges first, so a
   // grandchild processed before its parent still resolves nesting.
   const staged: Array<{
@@ -507,7 +461,7 @@ async function readReplayChildren(
     meta: { agentType?: unknown; description?: unknown };
     collector: Collector;
   }> = [];
-  for (const { file } of stagedFiles) {
+  for (const { file } of byAge) {
     try {
       const agentId = file.slice("agent-".length, -".jsonl".length);
       const stagedChild = await stageReplayChild(
@@ -574,6 +528,5 @@ async function stageReplayChild(
   for (const entry of entries) {
     await collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`, restoreUserBlock);
   }
-  truncateTail(collector);
   return { canonicalId, meta: meta ?? {}, collector };
 }

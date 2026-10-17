@@ -138,3 +138,13 @@ describe("translate user transformer", () => {
     ).toBeUndefined();
   });
 });
+
+
+it("keeps native user-message controls when the host supports preserving source rows", () => {
+  const result = transformUserMessage({ item: { text: "Hallo", messageId: "u-1" },
+    phase: "complete", supportsPreserveOriginal: true });
+  expect(result?.preserveOriginal).toBe(true);
+  expect(translatedUserMessageDataSchema.parse(result?.items[0].data)).toMatchObject({
+    text: "Hallo", messageId: "u-1", originalPreserved: true,
+  });
+});

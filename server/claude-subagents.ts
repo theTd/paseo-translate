@@ -7,6 +7,7 @@ import type {
 } from "@getpaseo/plugin/server/provider";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { ClaudeMessageStream } from "./claude-message-stream";
+import { ClaudeToolStream } from "./claude-tool-stream";
 import { readClaudeWorkflowResultFile } from "./claude-workflow-output";
 import { findClaudeModel } from "./claude-model-manifest";
 
@@ -80,6 +81,7 @@ interface ChildState {
   toolNames: Map<string, string>;
   toolInputs: Map<string, unknown>;
   messages: ClaudeMessageStream;
+  toolStream: ClaudeToolStream;
   model?: string;
   effort?: string;
   totalTokens?: number;
@@ -299,6 +301,10 @@ export class ClaudeSubagentTracker {
         ? this.children.get(this.ownerCanonicalByToolUseId.get(parentToolUseId) as string)
         : undefined);
     if (!child) return;
+    for (const item of child.toolStream.observe(message, child.toolNames, child.toolInputs)) {
+      if (item.type === "tool_call") this.ownerCanonicalByToolUseId.set(item.callId, child.canonicalId);
+      this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
+    }
     for (const item of child.messages.observe(message)) {
       this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
     }
@@ -428,7 +434,7 @@ export class ClaudeSubagentTracker {
       turnOpen: true,
       toolNames: new Map(),
       toolInputs: new Map(),
-      messages: new ClaudeMessageStream(),
+      messages: new ClaudeMessageStream(), toolStream: new ClaudeToolStream(),
     };
     this.children.set(id, child);
     this.lastStatusById.set(id, "running");

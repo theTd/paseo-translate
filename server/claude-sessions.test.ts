@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm, utimes } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
@@ -36,4 +36,31 @@ it("keeps managed forks out of generic import regardless of their mutable persis
     expect(listed.some(({ persistence }) =>
       (persistence.data as { claudeSessionId: string }).claudeSessionId === forkHandle.data.claudeSessionId)).toBe(false);
   }
+});
+
+
+it("orders by recent activity and prefers custom titles over AI titles and real prompts", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "claude-list-parity-"));
+  roots.push(root);
+  vi.stubEnv("CLAUDE_CONFIG_DIR", path.join(root, "config"));
+  const cwd = path.join(root, "project");
+  await mkdir(cwd);
+  const project = claudeProjectDir(cwd);
+  await mkdir(project, { recursive: true });
+  const ids = [randomUUID(), randomUUID()];
+  for (const [index, id] of ids.entries()) {
+    const file = path.join(project, `${id}.jsonl`);
+    const lines = [
+      { type: "user", isMeta: true, message: { content: "internal title" } },
+      { type: "user", timestamp: index === 0 ? "2025-01-01" : "2026-01-01", message: { content: "First prompt" } },
+      { type: "ai-title", aiTitle: `AI title ${index}` },
+      ...(index === 0 ? [{ type: "custom-title", customTitle: "Custom title" }] : []),
+    ];
+    await writeFile(file, lines.map((line) => JSON.stringify(line)).join("\n"));
+    const time = new Date(index === 0 ? "2026-10-18" : "2026-10-01");
+    await utimes(file, time, time);
+  }
+  const listed = await listClaudeTranscriptSummaries(cwd, 10);
+  expect(listed.map((entry) => entry.title)).toEqual(["Custom title", "AI title 1"]);
+  expect(listed.map((entry) => entry.updatedAt)).toEqual(["2026-10-18T00:00:00.000Z", "2026-10-01T00:00:00.000Z"]);
 });

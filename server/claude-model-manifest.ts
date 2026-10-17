@@ -1,162 +1,174 @@
-/**
- * Static manifest of known Claude models, mirroring the host app's claude
- * model manifest (packages/server/.../claude/model-manifest.ts). The SDK's
- * `supportedModels()` probe does not expose context windows or fast-mode
- * support, so the ring denominator and the Fast toggle consult this table.
- * Older CLIs that list models absent from this table simply get no initial
- * denominator until the first `modelUsage` arrives.
- */
+/** Curated capabilities and availability rules aligned with Paseo 0.11.2. */
+type ClaudeEffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface ClaudeManifestModel {
   id: string;
   aliases?: readonly string[];
   label: string;
   description: string;
+  minimumClaudeCodeVersion?: string;
+  requiresDiscovery?: boolean;
   contextWindowMaxTokens?: number;
-  supportsFastMode?: boolean;
+  effortLevels?: readonly ClaudeEffortLevel[];
+  defaultThinkingOption?: ClaudeEffortLevel;
   supportsThinkingDisabled?: boolean;
-  defaultThinkingOption?: string;
+  supportsFastMode?: boolean;
 }
+
+const CLAUDE_EFFORT_LEVELS = {
+  standard: ["low", "medium", "high", "max"],
+  xhigh: ["low", "medium", "high", "xhigh", "max"],
+} as const satisfies Record<string, readonly ClaudeEffortLevel[]>;
 
 export const CLAUDE_MODEL_MANIFEST: readonly ClaudeManifestModel[] = [
   {
     id: "claude-opus-5-5",
     label: "Opus 5.5",
     description: "Opus 5.5 · Latest release",
-    contextWindowMaxTokens: 1_000_000,
-    supportsFastMode: true,
+    minimumClaudeCodeVersion: "2.1.280",
     defaultThinkingOption: "medium",
+    contextWindowMaxTokens: 1_000_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    supportsFastMode: true,
   },
   {
     id: "claude-opus-5",
     label: "Opus 5",
     description: "Opus 5 · Previous release",
+    minimumClaudeCodeVersion: "2.1.219",
     contextWindowMaxTokens: 1_000_000,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
+    supportsFastMode: true,
   },
   {
     id: "claude-mythos-5-1",
     label: "Mythos 5.1",
+    requiresDiscovery: true,
     description: "Mythos 5.1 · Requires verified access",
     contextWindowMaxTokens: 1_000_000,
-    defaultThinkingOption: "high",
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
   },
   {
     id: "claude-fable-5-1",
     label: "Fable 5.1",
     description: "Fable 5.1 · Most powerful model",
     contextWindowMaxTokens: 1_000_000,
-    defaultThinkingOption: "high",
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
   },
   {
     id: "claude-fable-5",
     aliases: ["claude-fable-5[1m]"],
     label: "Fable 5",
     description: "Fable 5 · Previous release",
+    minimumClaudeCodeVersion: "2.1.169",
     contextWindowMaxTokens: 1_000_000,
-    defaultThinkingOption: "high",
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
   },
   {
     id: "claude-opus-4-8[1m]",
     label: "Opus 4.8 1M",
     description: "Opus 4.8 with 1M context window",
     contextWindowMaxTokens: 1_000_000,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
+    supportsFastMode: true,
   },
   {
     id: "claude-opus-4-8",
     label: "Opus 4.8",
     description: "Opus 4.8 · Previous release",
     contextWindowMaxTokens: 200_000,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
+    supportsFastMode: true,
   },
   {
     id: "claude-sonnet-5-5",
     label: "Sonnet 5.5",
     description: "Sonnet 5.5 · Best for everyday tasks",
-    contextWindowMaxTokens: 1_000_000,
+    minimumClaudeCodeVersion: "2.1.284",
     defaultThinkingOption: "medium",
+    contextWindowMaxTokens: 1_000_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
   },
   {
     id: "claude-sonnet-5",
     label: "Sonnet 5",
     description: "Sonnet 5 · Previous release",
     contextWindowMaxTokens: 200_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
   },
   {
     id: "claude-sonnet-5[1m]",
     label: "Sonnet 5 1M",
     description: "Sonnet 5 with 1M context window",
     contextWindowMaxTokens: 1_000_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
   },
   {
     id: "claude-opus-4-7[1m]",
     label: "Opus 4.7 1M",
     description: "Opus 4.7 with 1M context window",
     contextWindowMaxTokens: 1_000_000,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
+    supportsFastMode: true,
   },
   {
     id: "claude-opus-4-7",
     label: "Opus 4.7",
     description: "Opus 4.7 · Previous release",
     contextWindowMaxTokens: 200_000,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
+    supportsFastMode: true,
   },
   {
     id: "claude-opus-4-6[1m]",
     label: "Opus 4.6 1M",
     description: "Opus 4.6 with 1M context window",
     contextWindowMaxTokens: 1_000_000,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
+    supportsFastMode: true,
   },
   {
     id: "claude-opus-4-6",
     label: "Opus 4.6",
     description: "Opus 4.6 · Most capable for complex work",
     contextWindowMaxTokens: 200_000,
-    supportsFastMode: true,
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
+    supportsFastMode: true,
   },
   {
     id: "claude-sonnet-4-6[1m]",
     label: "Sonnet 4.6 1M",
     description: "Sonnet 4.6 with 1M context window",
     contextWindowMaxTokens: 1_000_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
   },
   {
     id: "claude-sonnet-4-6",
     label: "Sonnet 4.6",
     description: "Sonnet 4.6 · Best for everyday tasks",
     contextWindowMaxTokens: 200_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.standard,
     supportsThinkingDisabled: true,
-    defaultThinkingOption: "high",
   },
   {
     id: "claude-haiku-5-5",
     label: "Haiku 5.5",
     description: "Haiku 5.5 · Fastest for quick answers",
-    contextWindowMaxTokens: 1_000_000,
-    supportsThinkingDisabled: true,
+    minimumClaudeCodeVersion: "2.1.293",
     defaultThinkingOption: "medium",
+    contextWindowMaxTokens: 1_000_000,
+    effortLevels: CLAUDE_EFFORT_LEVELS.xhigh,
+    supportsThinkingDisabled: true,
   },
   {
     id: "claude-haiku-4-5",

@@ -96,12 +96,13 @@ export function TranslatedUserMessage(props: PluginTimelineItemProps<TranslatedU
   const showTranslation = eligible && hasVisibleTranslation(stream.text) &&
     translatedText.trim() !== data.text.trim();
 
+  if (data.originalPreserved && !showTranslation && !attemptRunning && !stream.error) return null;
   return (
     <View style={styles.row}>
       <View style={styles.bubble}>
-        <Text selectable style={styles.body}>
+        {!data.originalPreserved ? <Text selectable style={styles.body}>
           {data.text}
-        </Text>
+        </Text> : null}
         {showTranslation ? (
           <Text selectable style={styles.translation}>{translatedText}</Text>
         ) : null}

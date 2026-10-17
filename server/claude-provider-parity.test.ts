@@ -8,8 +8,9 @@ import { translateSettings, type TranslateSettingsValues } from "../shared/trans
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 class SdkOutput implements AsyncIterable<SDKMessage> {
@@ -32,6 +33,7 @@ class ControlledQuery {
   readonly output = new SdkOutput();
   readonly received: SDKUserMessage[] = [];
   readonly interrupt = vi.fn(async () => undefined);
+  readonly rewindFiles = vi.fn(async (_id: string, _options?: { dryRun?: boolean }) => ({ canRewind: true, error: undefined as string | undefined }));
   readonly cancelAsyncMessage = vi.fn(async (_uuid: string) => true);
   readonly setPermissionMode = vi.fn(async (_mode: string) => undefined);
   readonly setModel = vi.fn(async (_model?: string) => undefined);
@@ -76,13 +78,14 @@ function lifecycle(uuid: string, state: "started" | "cancelled"): SDKMessage {
   return { type: "command_lifecycle", command_uuid: uuid, state } as unknown as SDKMessage;
 }
 
-async function harness(settings: Partial<TranslateSettingsValues> = {}, deps: Partial<ClaudeProviderDeps> = {}, config: Partial<ProviderSessionConfig> = {}, consume = true) {
+async function harness(settings: Partial<TranslateSettingsValues> = {}, deps: Partial<ClaudeProviderDeps> = {}, config: Partial<ProviderSessionConfig> = {}, consume = true, prepareQuery?: (query: ControlledQuery, index: number) => void) {
   const runs: ControlledQuery[] = [];
   const values = translateSettings.schema.parse({ translatePrompts: false, translationContextEnabled: false, ...settings });
   const provider = createTranslateClaudeProvider({ loadConfig: async () => values, ...deps,
     queryFactory: ({ prompt, options }) => {
       const query = new ControlledQuery(prompt, options, consume);
       runs.push(query);
+      prepareQuery?.(query, runs.length - 1);
       return query;
     } });
   const connection = await provider.connect({ versions: [1], capabilities: [...PROVIDER_CAPABILITIES] });
@@ -307,7 +310,7 @@ describe("Claude native-provider parity regressions", () => {
     query.output.push(init("plan"));
     await vi.waitFor(() => expect(h.events.filter((event) => event.type === "session.config").at(-1)).toMatchObject({ config: { mode: "plan", model: "claude-sonnet-5" } }));
     query.output.push({ type: "system", subtype: "status", status: null, permissionMode: "default" } as SDKMessage);
-    await vi.waitFor(() => expect(h.events.filter((event) => event.type === "session.config").at(-1)).not.toHaveProperty("config.mode"));
+    await vi.waitFor(() => expect(h.events.filter((event) => event.type === "session.config").at(-1)).toHaveProperty("config.mode", "default"));
     expect(query.options.forwardSubagentText).toBe(true);
     expect(query.options.perTaskStopAffordance).toBe(true);
   });
@@ -469,4 +472,203 @@ describe("Claude native-provider parity regressions", () => {
     expect(h.runs[1].options.effort).toBe("max");
     expect(h.runs[1].options.thinking).toEqual({ type: "adaptive" });
   });
+});
+
+
+describe("Claude remaining native surfaces", () => {
+  it("forwards extra CLI arguments including valueless flags", async () => {
+    const h = await harness({}, {}, { providerOptions: { extraArgs: { "max-turns": "2", debug: null } } });
+    const query = await h.start();
+    expect(query.options.extraArgs).toEqual({ "max-turns": "2", debug: null });
+  });
+
+  it("includes structured permission detail and tool identity", async () => {
+    const h = await harness();
+    const query = await h.start();
+    const result = query.options.canUseTool!("Bash", { command: "git status" }, {
+      requestId: "shell", toolUseID: "shell-tool", signal: new AbortController().signal,
+    });
+    expect(h.events.find((event) => event.type === "session.permission")).toMatchObject({ request: {
+      detail: { type: "shell", command: "git status" }, metadata: { toolUseId: "shell-tool" },
+    } });
+    await h.send({ type: "session.permission", sessionId: "s", permissionId: "shell", response: { behavior: "deny" } });
+    await result;
+  });
+
+  it("switches Auto mode live on the API transport", async () => {
+    const h = await harness({}, {}, { env: { CLAUDE_CODE_USE_BEDROCK: "false", CLAUDE_CODE_USE_VERTEX: "0" } });
+    const query = await h.start();
+    expect(query.options.permissionMode).toBe("auto");
+    expect(h.events.filter((event) => event.type === "session.config").at(-1)).toMatchObject({ config: { mode: "default" } });
+    await h.send({ type: "session.configure", sessionId: "s", requestId: "auto", changes: { mode: "auto" } });
+    expect(query.setPermissionMode).toHaveBeenCalledWith("auto");
+    expect(h.events.filter((event) => event.type === "session.config").at(-1)).toMatchObject({ config: {
+      mode: "auto", modes: expect.arrayContaining([expect.objectContaining({ id: "auto" })]),
+    } });
+  });
+
+  it.each(["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"])("gates Auto mode for %s", async (flag) => {
+    const h = await harness({}, {}, { env: { [flag]: "true" } });
+    const query = await h.start();
+    expect(query.options.permissionMode).toBe("default");
+    await h.send({ type: "session.configure", sessionId: "s", requestId: "auto", changes: { mode: "auto" } });
+    expect(query.setPermissionMode).not.toHaveBeenCalled();
+    expect(h.events.find((event) => event.type === "request.failed" && event.requestId === "auto"))
+      .toMatchObject({ error: { message: expect.stringContaining("requires the Anthropic API") } });
+    const config = h.events.filter((event) => event.type === "session.config").at(-1);
+    if (config?.type !== "session.config") throw new Error("config missing");
+    expect(config.config.modes.some((mode) => mode.id === "auto")).toBe(false);
+  });
+
+  it("shows tool cards and completed argument fields before the final assistant frame", async () => {
+    const h = await harness();
+    const query = await h.start();
+    const frame = (event: unknown) => ({ type: "stream_event", parent_tool_use_id: null, event } as SDKMessage);
+    query.output.push(frame({ type: "message_start", message: { id: "api-tool" } }));
+    query.output.push(frame({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "read-tool", name: "Read", input: {} } }));
+    query.output.push(frame({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"file_path":"/repo/a.ts","offset":' } }));
+    await vi.waitFor(() => expect(h.events.filter((event) => event.type === "timeline.item" && event.item.id === "read-tool").at(-1))
+      .toMatchObject({ item: { status: "running", detail: { type: "read", filePath: "/repo/a.ts" } } }));
+    query.output.push({ type: "user", parent_tool_use_id: null, message: { content: [
+      { type: "tool_result", tool_use_id: "read-tool", content: "actual file content" },
+    ] } } as unknown as SDKMessage);
+    await vi.waitFor(() => expect(h.events.filter((event) => event.type === "timeline.item" && event.item.id === "read-tool").at(-1))
+      .toMatchObject({ item: { status: "completed", detail: { type: "read", filePath: "/repo/a.ts", content: "actual file content" } } }));
+  });
+
+  it("handles /rewind locally without sending a prompt to Claude", async () => {
+    const h = await harness();
+    const query = await h.start();
+    const uuid = query.received[0].uuid!;
+    query.output.push({ type: "user", uuid, parent_tool_use_id: null, message: { content: [{ type: "text", text: "work" }] } } as SDKMessage);
+    query.output.push(success());
+    await vi.waitFor(() => expect(h.events.some((event) => event.type === "session.turn" && event.state === "completed")).toBe(true));
+    await h.send(message("/rewind", "local-rewind"));
+    expect(h.runs[1].rewindFiles).toHaveBeenCalledWith(uuid, { dryRun: false });
+    expect(query.received).toHaveLength(1);
+    expect(h.events.filter((event) => event.type === "session.turn").at(-1)).toMatchObject({ state: "completed" });
+    await h.send(message("/rewind invalid", "invalid-rewind"));
+    expect(h.runs.flatMap((run) => run.rewindFiles.mock.calls)).toHaveLength(1);
+    expect(h.events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "invalid-rewind"))
+      .toMatchObject({ result: { type: "failed", error: { message: expect.stringContaining("Invalid message UUID") } } });
+    expect(h.runs[1].options.abortController!.signal.aborted).toBe(false);
+    expect(query.received).toHaveLength(1);
+  });
+});
+
+
+it("rejects a plain-text /rewind steer without translating or enqueueing it", async () => {
+  const h = await harness();
+  const query = await h.start();
+  await h.send(message(`/rewind ${randomUUID()}`, "rewind-steer", "steer"));
+  expect(query.received).toHaveLength(1);
+  expect(query.rewindFiles).not.toHaveBeenCalled();
+  expect(h.events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "rewind-steer"))
+    .toMatchObject({ result: { type: "failed", error: { message: expect.stringContaining("cannot steer") } } });
+});
+
+
+it("rejects structured /rewind steering without invoking a checkpoint", async () => {
+  const h = await harness();
+  const query = await h.start();
+  await h.send({ type: "session.prompt", sessionId: "s", prompt: { clientMessageId: "command-steer",
+    delivery: "steer", input: { type: "command", name: "rewind", arguments: randomUUID() } } });
+  expect(query.received).toHaveLength(1);
+  expect(query.rewindFiles).not.toHaveBeenCalled();
+  expect(h.events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "command-steer"))
+    .toMatchObject({ result: { type: "failed" } });
+});
+
+it("quiesces autonomous work before rewind and ignores old results and a stopped local command", async () => {
+  const release = deferred<{ canRewind: boolean; error: undefined }>();
+  const h = await harness({}, {}, {}, true, (query, index) => {
+    if (index === 1) query.rewindFiles.mockImplementationOnce(() => release.promise);
+  });
+  const old = await h.start();
+  old.output.push(success());
+  await vi.waitFor(() => expect(h.events.some((event) => event.type === "session.turn" && event.state === "completed")).toBe(true));
+  old.output.push(init());
+  await vi.waitFor(() => expect(h.events.filter((event) => event.type === "session.turn" && event.state === "started")).toHaveLength(2));
+  old.options.abortController!.signal.addEventListener("abort", () => old.output.push(success()), { once: true });
+  const running = h.send(message(`/rewind ${randomUUID()}`, "local"));
+  await vi.waitFor(() => expect(h.runs[1]?.rewindFiles).toHaveBeenCalledTimes(1));
+  expect(old.options.abortController!.signal.aborted).toBe(true);
+  const ack = h.events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "local");
+  if (ack?.type !== "session.prompt_result" || ack.result.type !== "turn") throw new Error("local turn missing");
+  const turnId = ack.result.turnId;
+  expect(h.events.flatMap((event) => event.type === "session.turn" && event.turnId === turnId ? [event.state] : [])).toEqual(["started"]);
+  expect(h.events.filter((event) => event.type === "session.turn" && event.state === "canceled")).toHaveLength(1);
+  await h.stop();
+  release.resolve({ canRewind: true, error: undefined });
+  await running;
+  expect(h.events.flatMap((event) => event.type === "session.turn" && event.turnId === turnId ? [event.state] : [])).toEqual(["started", "canceled"]);
+});
+
+it("cancels rewind while its fresh query is preparing", async () => {
+  const waiting = deferred<void>();
+  const release = deferred<void>();
+  let block = false;
+  const values = translateSettings.schema.parse({ translatePrompts: false, translationContextEnabled: false });
+  const h = await harness({}, { loadConfig: async () => { if (block) { waiting.resolve(); await release.promise; } return values; } });
+  const query = await h.start();
+  query.output.push(success());
+  await vi.waitFor(() => expect(h.events.some((event) => event.type === "session.turn" && event.state === "completed")).toBe(true));
+  block = true;
+  const running = h.send(message(`/rewind ${randomUUID()}`, "preparing-rewind"));
+  await waiting.promise;
+  await h.stop();
+  release.resolve();
+  await running;
+  expect(h.runs).toHaveLength(1);
+  expect(query.rewindFiles).not.toHaveBeenCalled();
+  expect(h.events.filter((event) => event.type === "session.turn").at(-1)).toMatchObject({ state: "canceled" });
+});
+
+it("recreates a failed rewind transport before trying an older checkpoint", async () => {
+  const h = await harness({}, {}, {}, true, (query, index) => {
+    if (index === 1) query.rewindFiles.mockRejectedValueOnce(new Error("transport closed"));
+  });
+  const query = await h.start();
+  const older = query.received[0].uuid!;
+  const newer = randomUUID();
+  for (const uuid of [older, newer]) query.output.push({ type: "user", uuid, parent_tool_use_id: null,
+    message: { content: [{ type: "text", text: "work" }] } } as SDKMessage);
+  query.output.push(success());
+  await vi.waitFor(() => expect(h.events.some((event) => event.type === "session.turn" && event.state === "completed")).toBe(true));
+  await h.send(message("/rewind", "fallback-rewind"));
+  expect(h.runs).toHaveLength(3);
+  expect(h.runs[1].rewindFiles).toHaveBeenCalledWith(newer, { dryRun: false });
+  expect(h.runs[1].options.abortController!.signal.aborted).toBe(true);
+  expect(h.runs[2].rewindFiles).toHaveBeenCalledWith(older, { dryRun: false });
+  expect(h.events.filter((event) => event.type === "session.turn").at(-1)).toMatchObject({ state: "completed" });
+  expect(h.events.some((event) => event.type === "session.runtime_failed")).toBe(false);
+});
+
+
+it.each(["missing checkpoint", "transport error"])("keeps replacement work alive after a stopped rewind reports %s", async (failure) => {
+  const release = deferred<{ canRewind: boolean; error: string | undefined }>();
+  const h = await harness({}, {}, {}, true, (query, index) => {
+    if (index === 1) query.rewindFiles.mockImplementationOnce(() => release.promise);
+  });
+  const original = await h.start();
+  original.output.push(success());
+  await vi.waitFor(() => expect(h.events.some((event) => event.type === "session.turn" && event.state === "completed")).toBe(true));
+  const rewinding = h.send(message(`/rewind ${randomUUID()}`, "old-rewind"));
+  await vi.waitFor(() => expect(h.runs[1]?.rewindFiles).toHaveBeenCalledTimes(1));
+  const checkpointQuery = h.runs[1];
+  await h.stop();
+  expect(checkpointQuery.options.abortController!.signal.aborted).toBe(true);
+  await h.send(message("Replacement work", "replacement"));
+  const replacement = h.runs[2];
+  await vi.waitFor(() => expect(replacement.received).toHaveLength(1));
+  if (failure === "transport error") release.reject(new Error("transport closed"));
+  else release.resolve({ canRewind: false, error: "No checkpoint" });
+  await rewinding;
+  expect(replacement.options.abortController!.signal.aborted).toBe(false);
+  const ack = h.events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "replacement");
+  if (ack?.type !== "session.prompt_result" || ack.result.type !== "turn") throw new Error("replacement missing");
+  const turnId = ack.result.turnId;
+  expect(h.events.flatMap((event) => event.type === "session.turn" && event.turnId === turnId ? [event.state] : [])).toEqual(["started"]);
+  replacement.output.push(success());
+  await vi.waitFor(() => expect(h.events.filter((event) => event.type === "session.turn").at(-1)).toMatchObject({ state: "completed" }));
 });

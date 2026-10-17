@@ -1,3 +1,4 @@
+import { isClaudeTranscriptNoise } from "./claude-transcript-content";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 
@@ -69,7 +70,7 @@ export class ClaudeMessageStream {
     const blocks = [...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
     const text = blocks.filter((block) => block.kind === "text").map((block) => block.text).join("");
     const thinking = blocks.filter((block) => block.kind === "thinking").map((block) => block.text).join("");
-    if (text && text !== state.text && text !== "[Request interrupted by user]") {
+    if (text && text !== state.text && !isClaudeTranscriptNoise(text)) {
       items.push({ type: "assistant_message", id: state.id, messageId: state.id, text });
       state.text = text;
     }

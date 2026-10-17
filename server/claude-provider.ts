@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
 import path from "node:path";
+import { execCommand } from "@getpaseo/plugin/server";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import type {
   Options,
@@ -25,6 +26,7 @@ import {
   type ProviderUsage,
 } from "@getpaseo/plugin/server/provider";
 import { createTranslator, type TranslatorDeps } from "./translate";
+import { completeClaudeCatalog } from "./claude-model-catalog";
 import { claudeModelSupportsFastMode, findClaudeModel } from "./claude-model-manifest";
 import { translateSessionTitlesForDisplay } from "./session-titles";
 import { listClaudeTranscriptSummaries, markManagedClaudeFork } from "./claude-sessions";
@@ -47,6 +49,8 @@ import {
 import { ClaudeSubagentTracker, flattenSubagentItemForParent } from "./claude-subagents";
 import { ClaudeMessageInput } from "./claude-message-input";
 import { ClaudeMessageStream } from "./claude-message-stream";
+import { ClaudeToolStream } from "./claude-tool-stream";
+import { assertClaudeMode, claudeModeCatalog, isClaudeMode } from "./claude-permission-modes";
 import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
@@ -101,6 +105,7 @@ export type ClaudeQueryFactory = (params: {
 
 export interface ClaudeProviderDeps extends TranslatorDeps {
   forkCoordinator?: ClaudeForkCoordinator;
+  resolveVersion?: (executable: string | null) => Promise<string | undefined>;
   /** Test seam; defaults to the real claude-agent-sdk query. */
   queryFactory?: ClaudeQueryFactory;
   /** Test seam; defaults to the real SDK forkSession (conversation rewind). */
@@ -122,15 +127,6 @@ const CAPABILITIES = [
   "session.revert.conversation",
   "session.revert.both",
 ] as const;
-
-/** Mirrors the native Claude provider's modes (auto requires the API transport). */
-const STATIC_MODES: ProviderMode[] = [
-  { id: "plan", label: "Plan Mode", description: "Analyze the codebase without executing tools or edits" },
-  { id: "default", label: "Always Ask", description: "Prompts for permission the first time a tool is used" },
-  { id: "acceptEdits", label: "Accept File Edits", description: "Automatically approves edit-focused tools without prompting" },
-  { id: "bypassPermissions", label: "Bypass", description: "Skip all permission prompts (use with caution)" },
-];
-const VALID_MODES = new Set(STATIC_MODES.map((mode) => mode.id));
 
 /** Effort levels the SDK's Settings.effortLevel accepts at query start. */
 const START_EFFORT = new Set(["low", "medium", "high", "xhigh"]);
@@ -217,17 +213,18 @@ interface ClaudeSession {
   desiredThinking: string | null;
   sink: ClaudeMessageInput;
   messages: ClaudeMessageStream;
+  toolStream: ClaudeToolStream;
   query: ClaudeQueryHandle | null;
   abort: AbortController;
   pump: Promise<void> | null;
   claudeSessionId: string | null;
-  active: { clientMessageId: string; turnId: string; messageUuid: string; announced: boolean; sent: boolean } | null;
+  active: { kind: "prompt" | "rewind"; clientMessageId: string; turnId: string; messageUuid: NonNullable<SDKUserMessage["uuid"]>; announced: boolean; sent: boolean } | null;
   mainTurnInFlight: boolean;
   mainTurnOrdinal: number;
   cancellationEpoch: number;
   permissionClearingEpoch: number;
   compacting: boolean;
-  restartForThinking: boolean;
+  queryRestartNeeded: boolean;
   /**
    * Claude's main loop can wake without a user prompt after background
    * work finishes. Its system/init opens this turn; its result or an idle
@@ -311,6 +308,11 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
     sessions,
     translator,
     queryFactory,
+    resolveVersion: deps.resolveVersion ?? (async (executable) => {
+      try {
+        return (await execCommand(executable ?? "claude", ["--version"], { shell: false, timeout: 5_000 })).stdout;
+      } catch { return undefined; }
+    }),
     forkClaudeSession,
     forkCoordinator: deps.forkCoordinator,
     unregisterForks,
@@ -384,6 +386,7 @@ interface DispatchContext {
   sessions: Map<string, ClaudeSession>;
   translator: ReturnType<typeof createTranslator>;
   queryFactory: ClaudeQueryFactory;
+  resolveVersion(executable: string | null): Promise<string | undefined>;
   forkClaudeSession: (
     sessionId: string,
     options: { upToMessageId: string },
@@ -552,17 +555,24 @@ async function rewindFilesOnce(
   session: ClaudeSession,
   messageId: string,
   context: DispatchContext,
+  localTurn: ClaudeSession["active"] = null,
 ): Promise<void> {
-  // Native parity: checkpoints live on the running query. Conversation
-  // rewind tears that query down, so a later files-only rewind must
-  // rebuild it first (and a never-prompted session must start one).
-  await ensureQuery(session, context);
-  if (session.query?.rewindFiles === undefined) {
-    throw new Error("This Claude build does not expose file rewind");
-  }
-  const result = await session.query.rewindFiles(messageId, { dryRun: false });
-  if (!result.canRewind) {
-    throw new Error(result.error ?? `No file checkpoint found for message ${messageId}`);
+  // Checkpoints are restored on a fresh, idle process. Old main-loop results
+  // cannot own the local command, and failed transports never serve retries.
+  if (session.query) await resetQuery(session, context.emit, localTurn);
+  if (localTurn && session.active !== localTurn) throw new Error("Rewind canceled");
+  await ensureQuery(session, context, localTurn ?? undefined);
+  if (localTurn && session.active !== localTurn) throw new Error("Rewind canceled");
+  const query = session.query;
+  if (!query?.rewindFiles) throw new Error("This Claude build does not expose file rewind");
+  try {
+    const result = await query.rewindFiles(messageId, { dryRun: false });
+    if (!result.canRewind) throw new Error(result.error ?? `No file checkpoint found for message ${messageId}`);
+  } catch (error) {
+    if (session.query === query && (!localTurn || session.active === localTurn)) {
+      await resetQuery(session, context.emit, localTurn);
+    }
+    throw error;
   }
 }
 
@@ -600,7 +610,7 @@ async function rewindConversationOnce(
 async function resetQuery(
   session: ClaudeSession,
   emit: (event: ProviderEvent) => void,
-  preservePreparing = false,
+  preserveActive: ClaudeSession["active"] = null,
 ): Promise<void> {
   session.detached = true;
   session.sink.close();
@@ -622,7 +632,7 @@ async function resetQuery(
   const pump = session.pump;
   session.query = null;
   session.pump = null;
-  const active = preservePreparing && session.active?.announced === false ? null : session.active;
+  const active = session.active === preserveActive ? null : session.active;
   if (active) session.active = null;
   await pump?.catch(() => undefined);
   session.subagents?.finishProcessTasks();
@@ -687,10 +697,11 @@ async function openSession(
     translatedSystemPrompt,
     desiredModel: input.config.model === "default" ? null : readConfigured(input.config.model),
     runtimeModel: null,
-    desiredMode: readConfigured(input.config.mode),
+    desiredMode: readConfigured(input.config.mode) ?? claudeModeCatalog({ ...process.env, ...input.config.env }).defaultMode,
     desiredThinking: readConfigured(input.config.thinkingOption),
     sink: new ClaudeMessageInput(),
     messages: new ClaudeMessageStream(),
+    toolStream: new ClaudeToolStream(),
     query: null,
     abort: new AbortController(),
     pump: null,
@@ -701,7 +712,7 @@ async function openSession(
     cancellationEpoch: 0,
     permissionClearingEpoch: 0,
     compacting: false,
-    restartForThinking: false,
+    queryRestartNeeded: false,
     autonomous: null,
     interrupted: false,
     pendingInterruptedResults: 0,
@@ -760,6 +771,8 @@ async function openSession(
     title: input.config.title,
     cwd: input.config.cwd,
   });
+  context.emit({ type: "session.commands", sessionId: session.id, commands: [{ name: "rewind",
+    description: "Rewind tracked files to a previous user message", argumentHint: "[user_message_uuid]" }] });
   await replayHistory(session, input.history, context);
   context.emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
   context.emit({
@@ -822,6 +835,7 @@ async function replayHistory(
   const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore, session.config.env["CLAUDE_CONFIG_DIR"]);
   for (const item of replay.rootItems) {
     if (session.closed) return;
+    if (item.type === "user_message" && typeof item.revertToken === "string") session.rewindUserMessageIds.push(item.revertToken);
     context.emit({ type: "timeline.item", sessionId: session.id, item });
   }
   for (const child of orderReplayedChildren(replay.children)) {
@@ -982,7 +996,7 @@ function configStateFor(session: ClaudeSession): {
     ...(session.desiredMode !== null ? { mode: session.desiredMode } : {}),
     ...(session.desiredThinking !== null ? { thinkingOption: session.desiredThinking } : {}),
     models: catalogModelsCache ?? [],
-    modes: STATIC_MODES,
+    modes: claudeModeCatalog({ ...process.env, ...session.config.env }).modes,
     thinkingOptions: [],
     // The Fast toggle is offered only for models whose manifest row allows it.
     settings: session.fastModeSupported
@@ -1054,12 +1068,26 @@ function rawPromptText(
   return joined.length > 0 ? joined : "[attachment]";
 }
 
+function localRewindArguments(input: Extract<ProviderInput, { type: "session.prompt" }>["prompt"]["input"]): string | undefined {
+  if (input.type === "command") return input.name === "rewind" ? input.arguments : undefined;
+  if (!input.content.every((block) => block.type === "text")) return undefined;
+  const match = /^\s*\/rewind(?:\s+([\s\S]*))?\s*$/.exec(rawPromptText(input.content));
+  return match ? match[1] ?? "" : undefined;
+}
+
 async function promptSession(
   input: Extract<ProviderInput, { type: "session.prompt" }>,
   context: DispatchContext,
 ): Promise<void> {
   const session = context.sessions.get(input.sessionId);
   if (session === undefined || session.closed) throw new Error(`Unknown session: ${input.sessionId}`);
+  const command = localRewindArguments(input.prompt.input);
+  if (input.prompt.delivery === "steer" && command !== undefined) {
+    context.emit({ type: "session.prompt_result", sessionId: session.id,
+      clientMessageId: input.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "Local /rewind commands cannot steer a running turn" } } });
+    return;
+  }
   if (input.prompt.delivery === "steer") {
     await steerSession(input, context, session);
     return;
@@ -1073,7 +1101,8 @@ async function promptSession(
           ? "Prompt canceled before delivery" : "A turn is already running on this session" } } });
       return undefined;
     }
-    const active = { clientMessageId: input.prompt.clientMessageId, turnId: randomUUID(),
+    const active: NonNullable<ClaudeSession["active"]> = { kind: command === undefined ? "prompt" : "rewind",
+      clientMessageId: input.prompt.clientMessageId, turnId: randomUUID(),
       messageUuid: randomUUID(), announced: false, sent: false };
     session.active = active;
     return active;
@@ -1086,6 +1115,10 @@ async function promptSession(
   if (!active) return;
   try {
     const prompt = input.prompt.input;
+    if (command !== undefined) {
+      await executeLocalRewind(session, input, active, context, command);
+      return;
+    }
     let blocks: SdkContentBlock[];
     let original: string;
     if (prompt.type === "command") {
@@ -1129,6 +1162,47 @@ async function promptSession(
   }
 }
 
+/** /rewind is Paseo's local file-checkpoint command, never an LLM prompt. */
+async function executeLocalRewind(
+  session: ClaudeSession,
+  input: Extract<ProviderInput, { type: "session.prompt" }>,
+  active: NonNullable<ClaudeSession["active"]>,
+  context: DispatchContext,
+  args: string,
+): Promise<void> {
+  const requested = args.trim();
+  let error = "No prior user message available to rewind. Use /rewind <user_message_uuid>.";
+  let target: string | undefined;
+  if (requested && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(requested)) {
+    throw new Error("Invalid message UUID. Usage: /rewind <user_message_uuid> or /rewind");
+  }
+  if (!requested && session.claudeSessionId && session.rewindUserMessageIds.length === 0) {
+    const history = await readClaudeReplay(session.config.cwd, session.claudeSessionId, undefined, session.config.env.CLAUDE_CONFIG_DIR);
+    session.rewindUserMessageIds = history.rootItems.flatMap((item) =>
+      item.type === "user_message" && typeof item.revertToken === "string" ? [item.revertToken] : []);
+  }
+  const candidates = requested ? [requested] : [...new Set(session.rewindUserMessageIds)].reverse();
+  if (session.closed || session.active !== active) return;
+  if (candidates.length === 0) throw new Error(error);
+  if (session.query) await resetQuery(session, context.emit, active);
+  if (session.closed || session.active !== active) return;
+  active.announced = true;
+  context.emit({ type: "session.prompt_result", sessionId: session.id,
+    clientMessageId: input.prompt.clientMessageId, result: { type: "turn", turnId: active.turnId } });
+  context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "started" });
+  for (const candidate of candidates) {
+    if (session.closed || session.active !== active) return;
+    try { await rewindFilesOnce(session, candidate, context, active); target = candidate; break; }
+    catch (failure) { error = describe(failure); }
+  }
+  if (session.closed || session.active !== active) return;
+  if (!target) throw new Error(error);
+  context.emit({ type: "timeline.item", sessionId: session.id,
+    item: { type: "assistant_message", id: `rewind-${active.turnId}`, text: `Rewound tracked files to message ${target}.` } });
+  session.active = null;
+  context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "completed" });
+}
+
 async function interruptSession(session: ClaudeSession, context: DispatchContext): Promise<void> {
   session.cancellationEpoch += 1;
   const active = session.active;
@@ -1136,6 +1210,23 @@ async function interruptSession(session: ClaudeSession, context: DispatchContext
   const sink = session.sink;
   const mainTurnOrdinal = session.mainTurnOrdinal;
   const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid));
+  if (active?.kind === "rewind") {
+    // A checkpoint control request cannot steer or share a process with its
+    // replacement. Abort before publishing cancellation so a reentrant prompt
+    // must obtain a fresh query; late control failures retain no ownership.
+    session.active = null;
+    session.queryRestartNeeded = true;
+    session.interrupted = true;
+    session.abort.abort();
+    if (!query) session.abort = new AbortController();
+    settleAutonomousTurn(session, context.emit, "canceled");
+    denyPendingPermissions(session, context.emit, "Interrupted");
+    settleRootTools(session, context.emit, "canceled", "Interrupted");
+    if (active.announced) context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
+    else context.emit({ type: "session.prompt_result", sessionId: session.id,
+      clientMessageId: active.clientMessageId, result: { type: "failed", error: { message: "Prompt canceled before delivery" } } });
+    return;
+  }
   session.active = null;
   settleAutonomousTurn(session, context.emit, "completed");
   if (active) {
@@ -1353,9 +1444,9 @@ async function buildMessageBlocks(
 }
 
 async function ensureQuery(session: ClaudeSession, context: DispatchContext, preparing?: NonNullable<ClaudeSession["active"]>): Promise<void> {
-  if (session.query !== null && session.restartForThinking) {
-    session.restartForThinking = false;
-    await resetQuery(session, context.emit, true);
+  if (session.queryRestartNeeded) {
+    session.queryRestartNeeded = false;
+    if (session.query !== null) await resetQuery(session, context.emit, preparing ?? null);
   }
   if (session.query !== null) return;
   if (session.closed) throw new Error("Claude session is closed");
@@ -1367,7 +1458,8 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext, pre
   // install and login); the daemon-bundled CLI is only the last resort.
   const executable =
     values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
-  const permissionMode = session.desiredMode ?? undefined;
+  const permissionMode = session.desiredMode ?? "default";
+  assertClaudeMode(permissionMode, { ...process.env, ...session.config.env });
   const providerOptions = resolveProviderOptions(session);
   validateThinking(session.desiredThinking, session.desiredModel);
   const thinking = thinkingStartOptions(session.desiredThinking);
@@ -1448,6 +1540,7 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext, pre
   if (servers !== undefined) options.mcpServers = servers;
   session.sink.close();
   session.messages.clear();
+  session.toolStream.clear();
   session.sink = new ClaudeMessageInput();
   session.mainTurnInFlight = false;
   session.compacting = false;
@@ -1513,7 +1606,7 @@ function toolPolicyAllowedTools(toolPolicy: ProviderSessionConfig["toolPolicy"])
  * degrades to "not applied" instead of breaking the session.
  */
 function resolveProviderOptions(session: ClaudeSession): {
-  spread: Pick<Options, "allowedTools" | "disallowedTools" | "sandbox" | "additionalDirectories">;
+  spread: Pick<Options, "allowedTools" | "disallowedTools" | "sandbox" | "additionalDirectories" | "extraArgs">;
   settings: Record<string, unknown>;
 } {
   const allowedTools = toolPolicyAllowedTools(session.config.toolPolicy);
@@ -1521,6 +1614,7 @@ function resolveProviderOptions(session: ClaudeSession): {
   const additionalDirectories: string[] = [];
   const settings: Record<string, unknown> = {};
   let sandbox: unknown;
+  const extraArgs: Record<string, string | null> = {};
   const raw = session.config.providerOptions;
   if (typeof raw === "object" && raw !== null) {
     for (const key of ["allowedTools", "disallowedTools", "additionalDirectories"] as const) {
@@ -1531,6 +1625,12 @@ function resolveProviderOptions(session: ClaudeSession): {
         if (key === "allowedTools") allowedTools.push(entry);
         else if (key === "disallowedTools") disallowedTools.push(entry);
         else additionalDirectories.push(entry);
+      }
+    }
+    const rawArgs = (raw as Record<string, unknown>)["extraArgs"];
+    if (typeof rawArgs === "object" && rawArgs !== null) {
+      for (const [flag, value] of Object.entries(rawArgs)) {
+        if (typeof value === "string" || value === null) extraArgs[flag] = value;
       }
     }
     const rawSettings = (raw as Record<string, unknown>)["settings"];
@@ -1544,6 +1644,7 @@ function resolveProviderOptions(session: ClaudeSession): {
   }
   return {
     spread: {
+      ...(Object.keys(extraArgs).length ? { extraArgs } : {}),
       ...(allowedTools.length > 0 ? { allowedTools: [...new Set(allowedTools)] } : {}),
       ...(disallowedTools.length > 0 ? { disallowedTools: [...new Set(disallowedTools)] } : {}),
       ...(additionalDirectories.length > 0
@@ -1579,7 +1680,7 @@ async function publishCommands(session: ClaudeSession, context: DispatchContext)
     );
     if (session.closed) return;
     session.commandsPublished = true;
-    const seen = new Map<string, ProviderCommand>();
+    const seen = new Map<string, ProviderCommand>([["rewind", { name: "rewind", description: "Rewind tracked files to a previous user message", argumentHint: "[user_message_uuid]" }]]);
     for (const command of commands) {
       if (command === null || typeof command !== "object") continue;
       const info = command as { name?: unknown; description?: unknown; argumentHint?: unknown };
@@ -1616,7 +1717,7 @@ function thinkingStartOptions(thinking: string | null): Pick<Options, "thinking"
 
 function observePermissionMode(session: ClaudeSession, mode: string): void {
   const previous = session.desiredMode ?? "default";
-  session.desiredMode = mode === "default" ? null : mode;
+  session.desiredMode = mode;
   if (mode === "plan") {
     if (previous !== "plan") session.planResumeMode = previous;
   } else session.planResumeMode = mode;
@@ -1639,7 +1740,7 @@ async function applyConfigChanges(
   const thinking = Object.hasOwn(changes, "thinkingOption") ? readConfigured(changes.thinkingOption ?? undefined) : session.desiredThinking;
   const nextThinking = thinking === "default" ? null : thinking ?? null;
   if (Object.hasOwn(changes, "thinkingOption")) validateThinking(nextThinking, nextModel);
-  if (Object.hasOwn(changes, "mode") && changes.mode && !VALID_MODES.has(changes.mode)) throw new Error(`Unknown Claude mode: ${changes.mode}`);
+  if (Object.hasOwn(changes, "mode")) assertClaudeMode(changes.mode ?? "default", { ...process.env, ...session.config.env });
   if (Object.hasOwn(changes, "model")) {
     if (session.query) {
       if (!session.query.setModel) throw new Error("Claude does not support live model changes");
@@ -1651,7 +1752,7 @@ async function applyConfigChanges(
     session.contextWindowMaxTokens = findClaudeModel(nextModel)?.contextWindowMaxTokens ?? null;
     if (session.desiredThinking === "off" && findClaudeModel(nextModel)?.supportsThinkingDisabled !== true) {
       session.desiredThinking = findClaudeModel(nextModel)?.defaultThinkingOption ?? null;
-      session.restartForThinking = true;
+      session.queryRestartNeeded = true;
     }
     if (session.fastMode && !session.fastModeSupported) {
       if (session.query) {
@@ -1673,7 +1774,7 @@ async function applyConfigChanges(
     session.desiredThinking = nextThinking;
     // Constructor-level thinking options must be rebuilt at the next turn;
     // flag settings cannot override a query launched with thinking disabled.
-    session.restartForThinking = session.query !== null;
+    session.queryRestartNeeded = session.query !== null;
   }
   if (changes.settings && Object.hasOwn(changes.settings, "fast_mode")) {
     const enabled = changes.settings.fast_mode === true;
@@ -1699,7 +1800,7 @@ async function probeCatalog(context: DispatchContext): Promise<{
   defaultMode: string;
 }> {
   const models = await probeModels(context);
-  return { models, modes: STATIC_MODES, defaultMode: "default" };
+  return { models, ...claudeModeCatalog(process.env) };
 }
 
 async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
@@ -1707,33 +1808,30 @@ async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
   const executable =
     values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const abort = new AbortController();
-  const query = context.queryFactory({
-    prompt: new ClaudeMessageInput().iterable,
-    options: {
-      cwd: process.cwd(),
-      env: { ...process.env },
-      abortController: abort,
-      ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
-    },
-  });
+  const version = context.resolveVersion(executable).catch(() => undefined);
+  const sink = new ClaudeMessageInput();
+  let models: ProviderModel[] = [];
   try {
-    if (query.supportedModels === undefined) return fallbackModels();
-    const infos = await withTimeout(query.supportedModels(), 20_000, "model probe timed out");
-    const mapped = infos.map(modelInfoToProviderModel);
-    if (mapped.length === 0) return fallbackModels();
-    catalogModelsCache = mapped;
-    return mapped;
+    const query = context.queryFactory({ prompt: sink.iterable, options: {
+      cwd: process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(),
+      env: { ...process.env }, abortController: abort,
+      persistSession: false, tools: [], mcpServers: {}, strictMcpConfig: true,
+      settingSources: ["user"], settings: { disableAllHooks: true },
+      ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
+    } });
+    if (query.supportedModels) {
+      const infos = await withTimeout(query.supportedModels(), 5_000, "model probe timed out");
+      models = infos.map(modelInfoToProviderModel);
+    }
   } catch {
-    return fallbackModels();
+    // A failed probe does not remove curated or configured model choices.
   } finally {
+    sink.close();
     abort.abort();
   }
-}
-
-function fallbackModels(): ProviderModel[] {
-  return [
-    { id: "default", label: "Claude (CLI default)", isDefault: true },
-  ];
+  const catalog = await completeClaudeCatalog(models, resolveClaudeConfigDir(), await version);
+  catalogModelsCache = catalog;
+  return catalog;
 }
 
 function modelInfoToProviderModel(info: ModelInfoLike): ProviderModel {
@@ -1796,6 +1894,7 @@ interface CanUseToolOptions {
   /** SDK permission suggestions (e.g. always-allow rules) for the card. */
   suggestions?: unknown;
   requestId: string;
+  toolUseID?: string;
 }
 
 function requestPermission(
@@ -1879,6 +1978,7 @@ function requestToolPermission(
       ...(kind === "plan"
         ? {
             metadata: {
+              ...(toolOptions.toolUseID ? { toolUseId: toolOptions.toolUseID } : {}),
               ...(typeof input.plan === "string" && input.plan.length > 0
                 ? { planText: input.plan }
                 : {}),
@@ -1886,8 +1986,10 @@ function requestToolPermission(
             actions: buildPlanPermissionActions(session.planResumeMode),
           }
         : {}),
+      ...(kind !== "plan" && toolOptions.toolUseID ? { metadata: { toolUseId: toolOptions.toolUseID } } : {}),
       ...(kind === "tool"
         ? {
+            detail: describeRunningTool(toolName, input),
             actions: [
               { id: "allow", label: "Allow", behavior: "allow" },
               { id: "deny", label: "Deny", behavior: "deny" },
@@ -2093,7 +2195,7 @@ async function pumpQuery(
   const emit = (event: ProviderEvent) => context.emit(event);
   try {
     for await (const message of query) {
-      if (session.closed) return;
+      if (session.closed || session.detached || session.query !== query) return;
       handleSdkMessage(session, message, context);
     }
   } catch (error) {
@@ -2147,6 +2249,7 @@ function finishDeadQuery(
   session.abort = new AbortController();
   session.sink.close();
   session.messages.clear();
+  session.toolStream.clear();
   session.pendingUserAnchors = [];
   session.mainTurnInFlight = false;
   session.compacting = false;
@@ -2257,7 +2360,7 @@ function handleSdkMessage(
       session.runtimeModel = message.model;
       session.contextWindowMaxTokens = findClaudeModel(message.model)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
     }
-    if (VALID_MODES.has(message.permissionMode)) observePermissionMode(session, message.permissionMode);
+    if (isClaudeMode(message.permissionMode)) observePermissionMode(session, message.permissionMode);
     emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
   }
   // Session state includes background children: "running" never opens a
@@ -2287,7 +2390,7 @@ function handleSdkMessage(
   if (message.type === "system") {
     if (message.subtype === "init") void publishCommands(session, context);
     if (message.subtype === "status") {
-      if (message.permissionMode && VALID_MODES.has(message.permissionMode)) {
+      if (message.permissionMode && isClaudeMode(message.permissionMode)) {
         observePermissionMode(session, message.permissionMode);
         emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
       }
@@ -2312,6 +2415,10 @@ function handleSdkMessage(
     // rendering complete messages. Sidechain frames already returned above
     // so they never move the parent ring.
     noteStreamEventUsage(session, message, emit);
+    for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
+      if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
+      emit({ type: "timeline.item", sessionId: session.id, item });
+    }
     for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
     return;
   }

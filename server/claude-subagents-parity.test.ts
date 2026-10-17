@@ -61,3 +61,17 @@ describe("Claude child parity", () => {
     expect(parseClaudeWorkflowResult(" ".repeat(1024 * 1024 + 1))).toBeUndefined();
   });
 });
+
+
+it("streams child tool arguments before the final assistant frame", () => {
+  const { tracker, events } = harness();
+  tracker.observeSystemMessage(started(false));
+  const frame = (event: unknown) => ({ type: "stream_event", parent_tool_use_id: "tool", event } as SDKMessage);
+  tracker.handleSidechainMessage(frame({ type: "message_start", message: { id: "child-api" } }), "tool");
+  tracker.handleSidechainMessage(frame({ type: "content_block_start", index: 0,
+    content_block: { type: "tool_use", id: "child-read", name: "Read", input: {} } }), "tool");
+  tracker.handleSidechainMessage(frame({ type: "content_block_delta", index: 0,
+    delta: { type: "input_json_delta", partial_json: '{"file_path":"/child.ts",' } }), "tool");
+  expect(events.filter((event) => event.type === "timeline.item" && event.item.id === "child-read").at(-1))
+    .toMatchObject({ sessionId: "subagent:root:tool", item: { status: "running", detail: { type: "read", filePath: "/child.ts" } } });
+});

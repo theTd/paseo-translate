@@ -1,3 +1,4 @@
+import { completeClaudeCatalog } from "./claude-model-catalog";
 import { describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -254,6 +255,7 @@ async function createHarness(
 ) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
+    resolveVersion: async () => undefined,
     loadConfig: async () => ({ ...values, ...overrides }),
     fetchFn,
     queryFactory: fake.factory,
@@ -644,6 +646,7 @@ describe("translate claude provider", () => {
     }) as typeof fetch;
     const fake = createFakeFactory();
     const provider = createTranslateClaudeProvider({
+    resolveVersion: async () => undefined,
       loadConfig: async () => values,
       fetchFn: gatedFetch,
       queryFactory: fake.factory,
@@ -985,29 +988,30 @@ describe("translate claude provider", () => {
     const catalogEvent = events.find((event) => event.type === "catalog");
     if (catalogEvent?.type !== "catalog") throw new Error("catalog event missing");
     expect(catalogEvent.requestId).toBe("r-cat");
-    expect(catalogEvent.catalog.defaultMode).toBe("default");
+    expect(catalogEvent.catalog.defaultMode).toBe("auto");
     expect(catalogEvent.catalog.modes.map((mode) => mode.id)).toEqual([
       "plan",
       "default",
       "acceptEdits",
+      "auto",
       "bypassPermissions",
     ]);
     const models = catalogEvent.catalog.models;
-    expect(models.map((model) => model.id)).toEqual(["claude-opus-5", "claude-haiku-4-5"]);
-    const opus = models[0];
+    expect(models.map((model) => model.id)).toEqual(expect.arrayContaining(["default", "claude-opus-5", "claude-haiku-4-5", "claude-sonnet-5"]));
+    const opus = models.find((model) => model.id === "claude-opus-5")!;
     expect(opus.label).toBe("Opus 5");
-    expect(opus.defaultThinkingOptionId).toBe("default");
+    expect(opus.defaultThinkingOptionId).toBe("high");
     expect(opus.thinkingOptions?.map((option) => option.id)).toEqual([
-      "default",
       "off",
-      "adaptive",
       "low",
+      "medium",
       "high",
       "xhigh",
+      "max",
       "ultracode",
     ]);
     expect(opus.thinkingOptions?.find((option) => option.id === "xhigh")?.label).toBe("Extra high");
-    expect(models[1].thinkingOptions?.map((option) => option.id)).toEqual(["default"]);
+    expect(models.find((model) => model.id === "claude-haiku-4-5")?.thinkingOptions?.map((option) => option.id)).toEqual(["default"]);
     // The probe query is discarded immediately.
     expect(fake.state.options?.abortController?.signal.aborted).toBe(true);
   });
@@ -2270,6 +2274,7 @@ describe("translate claude provider extended protocol", () => {
     const { fake } = await createHarness();
     const events: ProviderEvent[] = [];
     const provider = createTranslateClaudeProvider({
+    resolveVersion: async () => undefined,
       loadConfig: async () => values,
       fetchFn: translatingFetch(),
       queryFactory: fake.factory,
@@ -2451,6 +2456,8 @@ describe("translate claude provider extended protocol", () => {
           timestamp: "2025-06-01T00:00:00Z",
         })}\n`,
       );
+      fs.utimesSync(path.join(projectDir, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl"), new Date("2025-01-01"), new Date("2025-01-01"));
+      fs.utimesSync(path.join(projectDir, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl"), new Date("2025-06-01"), new Date("2025-06-01"));
       const { events, send } = await createHarness();
       await send(openInput);
       await send({ type: "sessions", requestId: "r-list", cwd: `${cwd}\\`, limit: 1 });
@@ -2855,10 +2862,10 @@ describe("translate claude provider extended protocol", () => {
       yield resultSuccess("cs-1", "ok");
     });
     await send(promptInput("Hi"));
-    await waitFor(events, (event) => event.type === "session.commands");
-    expect(events.find((event) => event.type === "session.commands")).toMatchObject({
+    await waitFor(events, (event) => event.type === "session.commands" && event.commands.some((command) => command.name === "review"));
+    expect(events.filter((event) => event.type === "session.commands").at(-1)).toMatchObject({
       sessionId: "s",
-      commands: [{ name: "review", description: "Review code" }],
+      commands: expect.arrayContaining([{ name: "review", description: "Review code" }, expect.objectContaining({ name: "rewind" })]),
     });
   });
 
@@ -3344,6 +3351,7 @@ describe("translate claude provider extended protocol", () => {
       // the original with zero endpoint calls — the fetch rejects on any use.
       const fake2 = createFakeFactory();
       const provider2 = createTranslateClaudeProvider({
+    resolveVersion: async () => undefined,
         loadConfig: async () => values,
         fetchFn: (async () => {
           throw new Error("endpoint must not be billed on exact restore");
@@ -3585,4 +3593,65 @@ describe("translatePromptFragment (shared prompt-text handling)", () => {
     });
     expect(called).toBe(false);
   });
+});
+
+
+it("keeps curated models and Claude settings models when discovery fails", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "claude-catalog-parity-"));
+  try {
+    await fs.writeFile(path.join(directory, "settings.json"), JSON.stringify({ model: "gateway-model",
+      env: { ANTHROPIC_DEFAULT_OPUS_MODEL: "custom-opus" } }));
+    const models = await completeClaudeCatalog([], directory, "2.1.280 (Claude Code)");
+    expect(models.map((model) => model.id)).toEqual(expect.arrayContaining(["default", "claude-opus-5-5", "gateway-model", "custom-opus"]));
+    expect(models.some((model) => model.id === "claude-mythos-5-1")).toBe(false);
+    expect(models.some((model) => model.id === "claude-sonnet-5-5")).toBe(false);
+    expect(models.find((model) => model.id === "claude-opus-5-5")).toMatchObject({
+      contextWindowMaxTokens: 1_000_000, defaultThinkingOptionId: "medium",
+      thinkingOptions: expect.arrayContaining([expect.objectContaining({ id: "ultracode" }), expect.objectContaining({ id: "medium", isDefault: true })]),
+    });
+    await fs.writeFile(path.join(directory, "settings.json"), "{malformed");
+    expect(await completeClaudeCatalog([], directory)).toEqual(expect.arrayContaining([expect.objectContaining({ id: "claude-opus-5" })]));
+  } finally { await fs.rm(directory, { recursive: true, force: true }); }
+});
+
+it("isolates catalog discovery from persistence, hooks and MCP servers", async () => {
+  const { fake, events, send } = await createHarness();
+  await send({ type: "catalog", requestId: "fallback-catalog" });
+  expect(fake.state.options).toMatchObject({ persistSession: false, tools: [], mcpServers: {},
+    strictMcpConfig: true, settingSources: ["user"], settings: { disableAllHooks: true } });
+  expect(events.find((event) => event.type === "catalog")).toMatchObject({ catalog: {
+    models: expect.arrayContaining([expect.objectContaining({ id: "claude-opus-5" })]),
+  } });
+});
+
+
+it("keeps curated effort controls when SDK discovery supplies no effort metadata", async () => {
+  const models = await completeClaudeCatalog([{ id: "claude-opus-5", label: "Opus", thinkingOptions: [
+    { id: "default", label: "Default", isDefault: true },
+  ], defaultThinkingOptionId: "default" }]);
+  expect(models.find((model) => model.id === "claude-opus-5")).toMatchObject({
+    defaultThinkingOptionId: "high", thinkingOptions: expect.arrayContaining([
+      expect.objectContaining({ id: "max" }), expect.objectContaining({ id: "ultracode" }),
+      expect.objectContaining({ id: "high", isDefault: true }),
+    ]),
+  });
+});
+
+
+it("does not re-add a discovered known model excluded by the CLI version", async () => {
+  const { join } = await import("node:path");
+  const { tmpdir } = await import("node:os");
+  const models = await completeClaudeCatalog([{ id: "claude-sonnet-5-5", label: "Sonnet 5.5" }], join(tmpdir(), randomUUID()), "2.1.280 (Claude Code)");
+  expect(models.some((model) => model.id === "claude-sonnet-5-5")).toBe(false);
+});
+
+
+it.each(["claude-opus-5-20260101", "claude-fable-5[1m]"])("inherits curated controls for discovered known spelling %s", async (id) => {
+  const models = await completeClaudeCatalog([{ id, label: id, thinkingOptions: [{ id: "default", label: "Default" }], defaultThinkingOptionId: "default" }]);
+  expect(models.find((model) => model.id === id)).toMatchObject({ defaultThinkingOptionId: "high", thinkingOptions: expect.arrayContaining([
+    expect.objectContaining({ id: "max" }), expect.objectContaining({ id: "ultracode" }),
+  ]) });
 });
