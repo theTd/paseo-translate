@@ -1,7 +1,7 @@
 import * as React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import type { TranslatedUserMessageData } from "../shared/translate";
+import { translatedUserMessageDataSchema, type TranslatedUserMessageData } from "../shared/translate";
 import { TranslatedUserMessage } from "./translated-user-message";
 
 const state = vi.hoisted(() => ({
@@ -34,7 +34,7 @@ vi.mock("./streaming-translation", () => ({
 function render(text = "Hallo", originalPreserved?: boolean) {
   return TranslatedUserMessage({
     agentId: "agent-1",
-    item: { data: { text, phase: "complete", messageId: "u-1", originalPreserved } },
+    item: { data: translatedUserMessageDataSchema.parse({ text, phase: "complete", messageId: "u-1", originalPreserved }) },
     theme: { colors: { foreground: "#fff", foregroundMuted: "#aaa", accent: "#0f0", surface2: "#333" } },
   } as PluginTimelineItemProps<TranslatedUserMessageData>);
 }
@@ -83,8 +83,8 @@ describe("bilingual user bubble", () => {
   });
 });
 
-it("renders only the translation beside the preserved native row", () => {
-  expect(texts(render("Hallo", true))).toEqual(["Hello"]);
+it("keeps the original visible for legacy annotation data without a preserved native row", () => {
+  expect(texts(render("Hallo", true))).toEqual(["Hallo", "Hello"]);
   state.stream.text = "Hallo";
-  expect(render("Hallo", true)).toBeNull();
+  expect(texts(render("Hallo", true))).toEqual(["Hallo"]);
 });

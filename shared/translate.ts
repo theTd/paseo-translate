@@ -365,7 +365,6 @@ export type TranslatedReasoningData = z.output<typeof translatedReasoningDataSch
  */
 export const translatedUserMessageDataSchema = z.object({
   text: z.string(),
-  originalPreserved: z.boolean().optional(),
   phase: z.enum(["streaming", "complete"]),
   messageId: z.string().nullable(),
 });

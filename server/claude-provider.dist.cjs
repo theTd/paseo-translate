@@ -52617,7 +52617,6 @@ var translatedReasoningDataSchema = external_exports.object({
 });
 var translatedUserMessageDataSchema = external_exports.object({
   text: external_exports.string(),
-  originalPreserved: external_exports.boolean().optional(),
   phase: external_exports.enum(["streaming", "complete"]),
   messageId: external_exports.string().nullable()
 });

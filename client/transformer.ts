@@ -80,13 +80,11 @@ export function transformReasoningMessage(input: {
 export function transformUserMessage(input: {
   item: { text: string; messageId?: string };
   phase: "streaming" | "complete";
-  supportsPreserveOriginal?: true;
-}): (PluginTimelineTransformResult & { preserveOriginal?: boolean }) | undefined {
+}): PluginTimelineTransformResult | undefined {
   if (isProviderImageMarkdown(input.item.text)) return undefined;
   if (isDataUriImageOnlyText(input.item.text)) return undefined;
   if (promptTranslationParts(input.item.text) === null) return undefined;
   return {
-    ...(input.supportsPreserveOriginal ? { preserveOriginal: true } : {}),
     items: [
       {
         type: "plugin",
@@ -94,7 +92,6 @@ export function transformUserMessage(input: {
         version: TRANSLATED_USER_MESSAGE_VERSION,
         data: {
           text: input.item.text,
-          ...(input.supportsPreserveOriginal ? { originalPreserved: true } : {}),
           phase: input.phase,
           messageId: input.item.messageId ?? null,
         },
