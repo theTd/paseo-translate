@@ -34,7 +34,7 @@ describe("Codex executable identity", () => {
     const run = versionOutput("codex-cli 0.114.0-alpha.2\n", "a harmless warning");
     await expect(validateCodexExecutable({
       command: "/Applications/Codex CLI/codex", cwd: os.tmpdir(), env: { CODEX_TEST: "yes" },
-    })).resolves.toBeUndefined();
+    })).resolves.toBe("0.114.0-alpha.2");
     expect(run).toHaveBeenCalledWith("/Applications/Codex CLI/codex", ["--version"],
       expect.objectContaining({
         cwd: os.tmpdir(), env: expect.objectContaining({ CODEX_TEST: "yes" }), timeout: 10_000,
@@ -208,7 +208,7 @@ describe("Codex app-server transport", () => {
     );
   });
 
-  it("ACKs unknown inbound methods with an empty result", async () => {
+  it("rejects unsupported inbound methods with a JSON-RPC error", async () => {
     const fake = createFakeProcess();
     const inbound: string[] = [];
     fake.stdin.on("data", (chunk: Buffer) => inbound.push(chunk.toString()));
@@ -218,8 +218,8 @@ describe("Codex app-server transport", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(inbound.join("")).toContain('"id":7');
-    expect(inbound.join("")).toContain('"result":{}');
-    expect(inbound.join("")).not.toContain('"error"');
+    expect(inbound.join("")).toContain('"code":-32601');
+    expect(inbound.join("")).not.toContain('"result"');
     await client.dispose();
   });
 

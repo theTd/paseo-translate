@@ -9,6 +9,9 @@ import type {
   ProviderTimelineItem,
   ProviderToolCallDetail,
 } from "@getpaseo/plugin/server/provider";
+import { pathToFileURL } from "node:url";
+import path from "node:path";
+import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -108,9 +111,10 @@ function toolStatus(
   error: unknown,
 ): Extract<ProviderTimelineItem, { type: "tool_call" }>["status"] {
   if (error != null && status !== "canceled") return "failed";
-  if (status === "failed") return "failed";
-  if (status === "canceled" || status === "interrupted") return "canceled";
-  if (status === "completed" || status === "success") return "completed";
+  const normalized = typeof status === "string" ? status.toLowerCase() : "";
+  if (["failed", "failure", "error", "errored", "rejected", "denied", "declined"].includes(normalized)) return "failed";
+  if (["canceled", "cancelled", "interrupted", "aborted"].includes(normalized)) return "canceled";
+  if (["completed", "complete", "done", "success", "succeeded"].includes(normalized)) return "completed";
   return "running";
 }
 
@@ -232,7 +236,7 @@ function mapMcpToolCall(item: Record<string, unknown>): ProviderTimelineItem | n
     {
       type: "plain_text",
       label: name,
-      text: stringifyUnknown({ input: item.arguments, output: item.result }),
+      text: stringifyUnknown({ input: item.arguments, output: stripImages(item.result) }),
     },
     error,
   );
@@ -297,11 +301,11 @@ function toolItem(
 
 export function threadItemToTimeline(
   item: unknown,
-  options?: { includeUserMessage?: boolean },
+  options?: { includeUserMessage?: boolean; cwd?: string },
 ): ProviderTimelineItem | null {
   const record = toObjectRecord(item);
   if (record === null) return null;
-  const type = typeof record.type === "string" ? record.type : "";
+  const type = normalizeCodexItemType(record.type);
   const id = nonEmptyString(record.id);
 
   if (type === "userMessage") {
@@ -321,6 +325,7 @@ export function threadItemToTimeline(
     };
   }
   if (type === "agentMessage") {
+    if (record.delivery === "async" && Array.isArray(record.questions)) return null;
     const text = typeof record.text === "string" ? record.text : "";
     return {
       type: "assistant_message",
@@ -338,6 +343,10 @@ export function threadItemToTimeline(
   if (type === "contextCompaction") {
     return { type: "compaction", id: id ?? "compaction", status: "completed" };
   }
+  if (type === "imageView" || type === "imageGeneration") {
+    const uri = imageUri(record.path ?? record.imagePath ?? record.savedPath ?? record.result ?? record.url, options?.cwd, type === "imageGeneration" && record.path == null && record.imagePath == null && record.savedPath == null);
+    return uri ? { type: "assistant_message", id: id ?? "image", text: renderImageOutputMarkdown(uri) } : null;
+  }
   if (type === "commandExecution") return mapCommandExecution(record);
   if (type === "fileChange") return mapFileChange(record);
   if (type === "webSearch") return mapWebSearch(record);
@@ -347,7 +356,50 @@ export function threadItemToTimeline(
   if (TOOL_ITEM_TYPES.has(type)) {
     return mapMcpToolCall({ ...record, tool: type });
   }
+  if (type === "dynamicToolCall") return mapMcpToolCall({ ...record, tool: record.tool ?? record.name, result: record.contentItems ?? record.result });
   return null;
+}
+
+export function normalizeCodexItemType(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
+}
+
+function imageUri(value: unknown, cwd: string | undefined, base64: boolean): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  if (/^(https?:|file:)/i.test(value)) return value;
+  if (!base64 && !value.startsWith("data:")) return pathToFileURL(path.resolve(cwd ?? process.cwd(), value)).href;
+  const encoded = value.replace(/^data:image\/[\w.+-]+;base64,/, "");
+  if (encoded.length > 40_000_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 === 1) return null;
+  const materialized = materializeImageOutput(value, "image/png");
+  return materialized?.uri ?? null;
+}
+
+function stripImages(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripImages);
+  if (!isRecord(value)) return value;
+  if (value.type === "image" || value.type === "inputImage") return { type: "text", text: "[image]" };
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, stripImages(entry)]));
+}
+
+export function threadItemTimelineEntries(item: unknown, cwd?: string): ProviderTimelineItem[] {
+  const mapped = threadItemToTimeline(item, { cwd });
+  const result: ProviderTimelineItem[] = mapped ? [mapped] : [];
+  if (!isRecord(item) || !["mcpToolCall", "dynamicToolCall"].includes(normalizeCodexItemType(item.type))) return result;
+  let index = 0;
+  const collect = (value: unknown) => {
+    if (Array.isArray(value)) { value.forEach(collect); return; }
+    if (!isRecord(value)) return;
+    if (value.type === "image" && typeof value.data === "string") {
+      const image = materializeImageOutput(value.data, typeof value.mimeType === "string" ? value.mimeType : "image/png");
+      if (image) result.push({ type: "assistant_message", id: `${String(item.id)}:image:${index++}`, text: renderImageOutputMarkdown(image.uri) });
+    } else if (value.type === "inputImage" && typeof value.imageUrl === "string") {
+      const uri = imageUri(value.imageUrl, cwd, true);
+      if (uri) result.push({ type: "assistant_message", id: `${String(item.id)}:image:${index++}`, text: renderImageOutputMarkdown(uri) });
+    } else Object.values(value).forEach(collect);
+  };
+  collect(item.result ?? item.contentItems);
+  return result;
 }
 
 export function toCodexUsage(tokenUsage: unknown): {

@@ -221,7 +221,9 @@ app after each turn.
   and reload the plugin. Startup errors include the selected executable.
 - Model switching and thinking effort are probed live from `model/list`.
   Modes are Default Permissions / Auto-review / Full Access, matching the
-  native provider. Fast mode is offered for models that support it.
+  native provider. Service tiers come from model metadata, including Fast when
+  advertised. Plan mode uses the server collaboration modes and offers
+  Dismiss/Implement approval for completed proposals.
 - Session persistence uses Codex's thread id (resume survives daemon
   restarts). Permissions pass through Allow/Deny for commands and file
   changes; clarifying questions are translated for display and answers are
@@ -246,8 +248,19 @@ app after each turn.
   archive/unarchive and file rewind stay capability-gated off.
 - `turn/completed` statuses are read from both wire shapes Codex has used
   (`turn.status`/`turn.error` and the older flat `status`/`errorMessage`).
-- Slash commands listed from Codex skills keep the command word verbatim;
-  only free-text arguments are translated.
+- Child agents have their own nested session panes, streamed tools, text,
+  reasoning and usage; their telemetry does not overwrite the root session.
+- Ordinary and asynchronous questions translate their display/answers and
+  remain cancellation-aware. Async answers persist across resume. Supported
+  MCP elicitations use approval cards; URL prompts and forms requiring fields
+  are declined, matching native Paseo.
+- `/compact` and compatible CLI `/goal` commands use app-server control RPCs.
+  Enabled skills refresh when commands run; custom `prompts:*` templates support
+  positional/named arguments. Skill command words remain verbatim.
+- Tool output streams include legacy events, stdin interactions and materialized
+  images. Structured output schemas are normalized and forwarded per turn.
+- Replay supports legacy and paginated histories. Rewind preserves the original
+  thread, carries configuration to its fork, and rebuilds history and questions.
 
 ## Interface language
 

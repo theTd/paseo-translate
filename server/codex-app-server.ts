@@ -55,6 +55,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface CodexClientLike {
+  readonly version?: string;
   request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown>;
   notify(method: string, params?: unknown): void;
   setNotificationHandler(handler: CodexNotificationHandler): void;
@@ -105,13 +106,14 @@ export function resetPathCodexCache(): void {
 }
 
 export interface SpawnCodexOptions {
+  args?: readonly string[];
   command: string;
   cwd?: string;
   env?: NodeJS.ProcessEnv;
 }
 
 /** Reject unrelated programs named `codex` before speaking JSON-RPC to them. */
-export async function validateCodexExecutable(options: SpawnCodexOptions): Promise<void> {
+export async function validateCodexExecutable(options: SpawnCodexOptions): Promise<string> {
   const invocation = resolveCodexSpawnInvocation(options.command, ["--version"], process.platform);
   const output = await new Promise<string>((resolve, reject) => {
     execFile(invocation.command, invocation.args, {
@@ -138,6 +140,7 @@ export async function validateCodexExecutable(options: SpawnCodexOptions): Promi
       `("codex-cli <version>"). Received: ${JSON.stringify(output)}.\n${CODEX_INSTALL_HELP}`,
     );
   }
+  return output.replace(/^codex-cli\s+/, "");
 }
 
 const CODEX_INSTALL_HELP =
@@ -190,7 +193,7 @@ export function processTreeKillInvocation(
  * cannot be spawned without a shell, so those route through `cmd /c`.
  */
 export function spawnCodexAppServer(options: SpawnCodexOptions): ChildProcessWithoutNullStreams {
-  const invocation = resolveCodexSpawnInvocation(options.command, ["app-server"], process.platform);
+  const invocation = resolveCodexSpawnInvocation(options.command, options.args ?? ["app-server"], process.platform);
   const env = { ...process.env, ...options.env };
   const spawnOptions: SpawnOptions = {
     cwd: options.cwd,
@@ -207,6 +210,7 @@ export function spawnCodexAppServer(options: SpawnCodexOptions): ChildProcessWit
 }
 
 export class CodexAppServerClient implements CodexClientLike {
+  version?: string;
   private readonly rl: readline.Interface;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly requestHandlers = new Map<string, CodexRequestHandler>();
@@ -376,17 +380,14 @@ export class CodexAppServerClient implements CodexClientLike {
     if (typeof raw.id === "number" && typeof raw.method === "string") {
       const handler = this.requestHandlers.get(raw.method);
       if (handler === undefined) {
-        // Native Codex adapter ACKs unknown inbound methods with an empty
-        // result so experimental RPCs (elicitation, terminal interaction)
-        // do not fail the turn.
-        this.write({ id: raw.id, result: {} });
+        this.write({ id: raw.id, error: { code: -32601, message: `Unsupported Codex server request: ${raw.method}` } });
         return;
       }
       try {
         const result = await handler(raw.params, raw.id);
         this.write({ id: raw.id, result: result ?? {} });
       } catch (error) {
-        this.write({ id: raw.id, error: { message: describeError(error) } });
+        this.write({ id: raw.id, error: { code: -32603, message: describeError(error) } });
       }
       return;
     }

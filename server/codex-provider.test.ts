@@ -8,6 +8,7 @@ import { createTranslateCodexProvider, type CodexClientFactory } from "./codex-p
 import { createTranslateHandler } from "./translate";
 import { createMemoryTranslationCacheStore, type TranslationCacheStore } from "./translation-cache-store";
 import type { CodexClientLike, CodexRequestHandler } from "./codex-app-server";
+import { CodexAppServerRpcError } from "./codex-app-server";
 import { createTranslationContextManager } from "./translation-context";
 import {
   TRANSLATE_AGENT_ID_ENV,
@@ -57,6 +58,7 @@ function translatingFetch(): typeof fetch {
 
 function createFakeClient() {
   const state = {
+    version: "0.155.0",
     requests: [] as Array<{ method: string; params: unknown }>,
     options: null as { command: string; cwd: string; env: NodeJS.ProcessEnv } | null,
     disposed: 0,
@@ -66,6 +68,7 @@ function createFakeClient() {
   let terminationHandler: ((error: Error) => void) | null = null;
   const requestHandlers = new Map<string, CodexRequestHandler>();
   const client: CodexClientLike = {
+    get version() { return state.version; },
     async request(method, params) {
       state.requests.push({ method, params });
       if (state.handlers[method] !== undefined) return state.handlers[method](params);
@@ -132,6 +135,7 @@ function createFakeClient() {
   };
   return {
     factory,
+    client,
     state,
     emit(method: string, params: unknown) {
       notificationHandler?.(method, params);
@@ -139,10 +143,10 @@ function createFakeClient() {
     crash(error: Error) {
       terminationHandler?.(error);
     },
-    async serverRequest(method: string, params: unknown) {
+    async serverRequest(method: string, params: unknown, id = 1) {
       const handler = requestHandlers.get(method);
       if (handler === undefined) throw new Error(`no handler for ${method}`);
-      return handler(params, 1);
+      return handler(params, id);
     },
   };
 }
@@ -151,11 +155,12 @@ async function createHarness(
   overrides?: Partial<TranslateSettingsValues>,
   context?: import("./translation-context").TranslationContextManager,
   cacheStore?: TranslationCacheStore,
+  fetchOverride?: typeof fetch,
 ) {
   const fake = createFakeClient();
   const provider = createTranslateCodexProvider({
     loadConfig: async () => ({ ...values, ...overrides }),
-    fetchFn: translatingFetch(),
+    fetchFn: fetchOverride ?? translatingFetch(),
     createClient: fake.factory,
     ...(context !== undefined ? { context } : {}),
     ...(cacheStore !== undefined ? { cacheStore } : {}),
@@ -212,6 +217,390 @@ function promptInput(
     },
   };
 }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function gatedTranslation(fragment: string) {
+  const entered = deferred<void>();
+  const release = deferred<void>();
+  const base = translatingFetch();
+  const fetchFn: typeof fetch = async (input, init) => {
+    if (String(init?.body).includes(fragment)) { entered.resolve(); await release.promise; }
+    return base(input, init);
+  };
+  return { entered, release, fetchFn };
+}
+
+const questionParams = {
+  itemId: "ask-1", threadId: "thread-1", turnId: "native-1",
+  questions: [{ id: "q", header: "Choice", question: "Pick a direction", options: [{ label: "North" }] }],
+};
+
+function commandInput(name: string, args = ""): Extract<ProviderInput, { type: "session.prompt" }> {
+  return { type: "session.prompt", sessionId: "s", prompt: { clientMessageId: `command-${name}`, delivery: "auto", input: { type: "command", name, arguments: args } } };
+}
+
+describe("Codex parity regressions", () => {
+  it("owns admission before translation and cancels preparation on Stop", async () => {
+    const gate = gatedTranslation("delayed-admission");
+    const { send, fake, events } = await createHarness(undefined, undefined, undefined, gate.fetchFn);
+    await send(openInput);
+    const first = send(promptInput("delayed-admission"));
+    await gate.entered.promise;
+    await send(promptInput("concurrent", "m-2"));
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "m-2", result: expect.objectContaining({ type: "failed" }) }));
+    await send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    gate.release.resolve();
+    await first;
+    expect(fake.state.requests.filter((request) => request.method === "turn/start")).toHaveLength(0);
+    await send(promptInput("new admission", "m-3"));
+    expect(fake.state.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+  });
+
+  it("waits for a starting turn's identity and interrupts that turn", async () => {
+    const { send, fake } = await createHarness({ translatePrompts: false });
+    await send(openInput);
+    const started = deferred<void>();
+    const ack = deferred<unknown>();
+    fake.state.handlers["turn/start"] = () => { started.resolve(); return ack.promise; };
+    const prompt = send(promptInput("start"));
+    await started.promise;
+    const stop = send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "native-1" });
+    await stop;
+    expect(fake.state.requests.filter((request) => request.method === "turn/interrupt")).toEqual([{ method: "turn/interrupt", params: { threadId: "thread-1", turnId: "native-1" } }]);
+    ack.resolve({ turn: { id: "native-1" } });
+    await prompt;
+  });
+
+  it("does not attach idle Stop to future autonomous activity", async () => {
+    const { send, fake } = await createHarness({ translatePrompts: false });
+    await send(openInput);
+    await send(promptInput("first"));
+    fake.emit("turn/started", { turnId: "native-1" });
+    fake.emit("turn/completed", { turnId: "native-1" });
+    await send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "new-autonomous" });
+    expect(fake.state.requests.some((request) => request.method === "turn/interrupt")).toBe(false);
+  });
+
+  it("rejects a translated steer whose original turn ended", async () => {
+    const gate = gatedTranslation("delayed-followup");
+    const { send, fake, events } = await createHarness(undefined, undefined, undefined, gate.fetchFn);
+    await send(openInput);
+    await send(promptInput("first"));
+    fake.emit("turn/started", { turnId: "native-1" });
+    const followup = promptInput("delayed-followup", "followup"); followup.prompt.delivery = "steer";
+    const pending = send(followup);
+    await gate.entered.promise;
+    fake.emit("turn/completed", { turnId: "native-1" });
+    await send(promptInput("replacement", "m-2"));
+    fake.emit("turn/started", { turnId: "native-2" });
+    gate.release.resolve();
+    await pending;
+    expect(fake.state.requests.some((request) => request.method === "turn/steer")).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "followup", result: expect.objectContaining({ type: "failed" }) }));
+  });
+
+  it.each(["timeout", "empty-ack"])("propagates ambiguous steer %s and preserves approval ownership", async (failure) => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false });
+    await send(openInput); await send(promptInput("first"));
+    fake.emit("turn/started", { turnId: "native-1" });
+    const approval = fake.serverRequest("item/commandExecution/requestApproval", { itemId: "cmd" });
+    fake.state.handlers["turn/steer"] = () => { if (failure === "timeout") throw new Error("request timed out"); return {}; };
+    const followup = promptInput("followup", "steer"); followup.prompt.delivery = "steer"; followup.prompt.clearPendingPermissions = true;
+    await expect(send(followup)).rejects.toThrow(failure === "timeout" ? "timed out" : "acknowledgement");
+    expect(events.some((event) => event.type === "session.permission_resolved")).toBe(false);
+    expect(events.some((event) => event.type === "session.prompt_result" && event.clientMessageId === "steer")).toBe(false);
+    await send({ type: "session.permission", sessionId: "s", permissionId: "permission-cmd", response: { behavior: "allow" } });
+    expect(await approval).toEqual({ decision: "accept" });
+  });
+
+  it("reports definitive steer unavailability without hiding it as acceptance", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false });
+    await send(openInput); await send(promptInput("first")); fake.emit("turn/started", { turnId: "native-1" });
+    fake.state.handlers["turn/steer"] = () => { throw new CodexAppServerRpcError("Method not found", -32601, null); };
+    const followup = promptInput("followup", "steer"); followup.prompt.delivery = "steer";
+    await send(followup);
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.prompt_result", clientMessageId: "steer", result: expect.objectContaining({ type: "failed" }) }));
+  });
+
+  it("keeps multiple approval callbacks for one item independent", async () => {
+    const { send, fake, events } = await createHarness(); await send(openInput);
+    const first = fake.serverRequest("item/commandExecution/requestApproval", { itemId: "cmd", approvalId: "a" });
+    const second = fake.serverRequest("item/commandExecution/requestApproval", { itemId: "cmd", approvalId: "b" });
+    expect(events.filter((event) => event.type === "session.permission").map((event) => event.request.id)).toEqual(["permission-a", "permission-b"]);
+    await send({ type: "session.permission", sessionId: "s", permissionId: "permission-a", response: { behavior: "allow" } });
+    await send({ type: "session.permission", sessionId: "s", permissionId: "permission-b", response: { behavior: "deny" } });
+    expect(await first).toEqual({ decision: "accept" }); expect(await second).toEqual({ decision: "decline" });
+  });
+
+  it("does not publish a question whose display translation was canceled", async () => {
+    const gate = gatedTranslation("Pick a direction");
+    const { send, fake, events } = await createHarness(undefined, undefined, undefined, gate.fetchFn); await send(openInput);
+    const question = fake.serverRequest("item/tool/requestUserInput", questionParams);
+    await gate.entered.promise;
+    await send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    gate.release.resolve();
+    expect(await question).toEqual({ answers: {} });
+    expect(events.some((event) => event.type === "session.permission")).toBe(false);
+  });
+
+  it("cancels question answers while free-text translation is in flight", async () => {
+    const gate = gatedTranslation("delayed-answer");
+    const { send, fake, events } = await createHarness(undefined, undefined, undefined, gate.fetchFn); await send(openInput);
+    const question = fake.serverRequest("item/tool/requestUserInput", questionParams);
+    await waitFor(events, (event) => event.type === "session.permission");
+    const answer = send({ type: "session.permission", sessionId: "s", permissionId: "permission-ask-1", response: { behavior: "allow", updatedInput: { answers: { Choice: "delayed-answer" } } } });
+    await gate.entered.promise;
+    await send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    gate.release.resolve(); await answer;
+    expect(await question).toEqual({ answers: {} });
+    expect(events.filter((event) => event.type === "session.permission_resolved")).toHaveLength(1);
+  });
+
+  it("buffers early child prose, opens nested routes, and isolates token usage", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false }); await send(openInput); await send(promptInput("spawn"));
+    fake.emit("item/agentMessage/delta", { threadId: "child", itemId: "reply", delta: "early child text" });
+    fake.emit("item/completed", { threadId: "thread-1", item: { type: "collabAgentToolCall", id: "spawn", tool: "spawnAgent", receiverThreadIds: ["child"], status: "completed" } });
+    fake.emit("item/completed", { threadId: "child", item: { type: "subAgentActivity", id: "nested-spawn", agentThreadId: "grandchild", status: "running" } });
+    fake.emit("thread/tokenUsage/updated", { threadId: "child", tokenUsage: { last: { inputTokens: 98765 } } });
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.opened", sessionId: "s:codex:grandchild", parentSessionId: "s:codex:child", toolCallId: "nested-spawn" }));
+    expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", sessionId: "s:codex:child", item: expect.objectContaining({ text: "early child text" }) }));
+    expect(events.filter((event) => event.type === "session.usage").map((event) => event.sessionId)).toEqual(["s:codex:child"]);
+  });
+
+  it("renders the documented plan update payload", async () => {
+    const { send, fake, events } = await createHarness(); await send(openInput);
+    fake.emit("turn/plan/updated", { plan: [{ step: "Verify the fix", status: "inProgress" }] });
+    expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ type: "todo", items: [{ id: "0", text: "Verify the fix", status: "in_progress", completed: false }] }) }));
+  });
+
+  it("settles local work when Codex definitively reports already idle", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false }); await send(openInput); await send(promptInput("first"));
+    fake.emit("turn/started", { turnId: "native-1" });
+    fake.state.handlers["turn/interrupt"] = () => { throw new CodexAppServerRpcError("no active turn to interrupt", -32600, null); };
+    await send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    expect(events.filter((event) => event.type === "session.turn").at(-1)).toMatchObject({ state: "canceled" });
+    await send(promptInput("second", "next"));
+    expect(fake.state.requests.filter((request) => request.method === "turn/start")).toHaveLength(2);
+    fake.emit("turn/completed", { turnId: "native-1" });
+    expect(events.filter((event) => event.type === "session.turn").at(-1)).toMatchObject({ state: "started" });
+  });
+
+  it("also interrupts autonomous work that starts while a foreground prompt translates", async () => {
+    const gate = gatedTranslation("delayed-with-autonomous");
+    const { send, fake } = await createHarness(undefined, undefined, undefined, gate.fetchFn);
+    await send({ ...openInput, persistence: { version: 1, data: { threadId: "thread-1" } } });
+    const prompt = send(promptInput("delayed-with-autonomous"));
+    await gate.entered.promise;
+    fake.emit("turn/started", { threadId: "thread-1", turnId: "autonomous" });
+    await send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    gate.release.resolve(); await prompt;
+    expect(fake.state.requests.filter((request) => request.method === "turn/start")).toHaveLength(0);
+    expect(fake.state.requests).toContainEqual({ method: "turn/interrupt", params: { threadId: "thread-1", turnId: "autonomous" } });
+  });
+
+  it.each(["failed", "interrupted"])("settles outstanding child tools when a child turn is %s", async (status) => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false }); await send(openInput); await send(promptInput("spawn"));
+    fake.emit("item/completed", { threadId: "thread-1", item: { type: "collabAgentToolCall", id: "spawn", receiverThreadIds: ["child"] } });
+    fake.emit("turn/started", { threadId: "child", turnId: "child-turn" });
+    fake.emit("item/started", { threadId: "child", item: { type: "commandExecution", id: "child-tool", command: "work" } });
+    fake.emit("turn/completed", { threadId: "child", turn: { id: "child-turn", status } });
+    expect(events.filter((event) => event.type === "timeline.item" && event.sessionId === "s:codex:child").at(-1)).toMatchObject({ item: { id: "child-tool", status: status === "failed" ? "failed" : "canceled" } });
+  });
+
+  it("uses resolved workspace settings and resets the reviewer and service tier", async () => {
+    const { send, fake } = await createHarness({ translatePrompts: false });
+    fake.state.handlers["config/read"] = () => ({ config: { model: "arbitrary-model", model_reasoning_effort: "high", sandbox_workspace_write: { writable_roots: ["E:\\extra"], network_access: true, exclude_slash_tmp: true } } });
+    fake.state.handlers["model/list"] = () => ({ data: [{ id: "arbitrary-model", isDefault: true, serviceTiers: [{ id: "fast", name: "Fast" }] }] });
+    await send(openInput);
+    expect(fake.state.requests.find((request) => request.method === "config/read")?.params).toMatchObject({ cwd: "E:\\repo" });
+    await send({ type: "session.configure", sessionId: "s", requestId: "config", changes: { mode: "auto-review", settings: { service_tier: "fast" } } });
+    await send(promptInput("first"));
+    let params = fake.state.requests.filter((request) => request.method === "turn/start").at(-1)?.params;
+    expect(params).toMatchObject({ model: "arbitrary-model", effort: "high", approvalsReviewer: "auto_review", serviceTier: "fast", sandboxPolicy: { type: "workspaceWrite", writableRoots: ["E:\\extra"], networkAccess: true, excludeSlashTmp: true } });
+    fake.emit("turn/completed", {});
+    await send({ type: "session.configure", sessionId: "s", requestId: "reset", changes: { mode: "auto", settings: { service_tier: "default" } } });
+    await send(promptInput("second", "m-2"));
+    params = fake.state.requests.filter((request) => request.method === "turn/start").at(-1)?.params;
+    expect(params).toMatchObject({ approvalsReviewer: "user", serviceTier: "default" });
+  });
+
+  it("adopts resume configuration without replacing saved values with defaults", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false });
+    fake.state.handlers["thread/resume"] = () => ({ model: "saved-model", reasoningEffort: "high", approvalPolicy: "on-request", approvalsReviewer: "auto_review", sandbox: { type: "workspaceWrite", networkAccess: true, writableRoots: ["E:\\saved"] } });
+    await send({ ...openInput, persistence: { version: 1, data: { threadId: "saved" } } });
+    expect(fake.state.requests.find((request) => request.method === "thread/resume")?.params).not.toHaveProperty("model");
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.config", config: expect.objectContaining({ model: "saved-model", mode: "auto-review", thinkingOption: "high" }) }));
+    await send(promptInput("continue"));
+    expect(fake.state.requests.find((request) => request.method === "turn/start")?.params).not.toHaveProperty("sandboxPolicy");
+  });
+
+  it.each([false, true])("preserves provider workflow precedence on start and resume (resume=%s)", async (resume) => {
+    const { send, fake } = await createHarness({ translatePrompts: false });
+    await send({ ...openInput, ...(resume ? { persistence: { version: 1, data: { threadId: "saved" } } } : {}), config: { ...openInput.config, mode: "auto", providerOptions: { sandbox_mode: "read-only", approval_policy: "never" } } });
+    await send(promptInput("read only"));
+    const thread = fake.state.requests.find((request) => request.method === (resume ? "thread/resume" : "thread/start"))?.params;
+    const turn = fake.state.requests.find((request) => request.method === "turn/start")?.params;
+    expect(thread).not.toHaveProperty("approvalPolicy"); expect(thread).not.toHaveProperty("sandbox");
+    expect(thread).toMatchObject({ config: { sandbox_mode: "read-only", approval_policy: "never" } });
+    expect(turn).not.toHaveProperty("approvalPolicy"); expect(turn).toMatchObject({ sandboxPolicy: { type: "readOnly" } });
+  });
+
+  it("ignores repeated old completions and user items during a newer start", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false }); await send(openInput); await send(promptInput("first"));
+    fake.emit("turn/started", { turnId: "old" }); fake.emit("turn/completed", { turnId: "old" });
+    const started = deferred<void>(); const ack = deferred<unknown>();
+    fake.state.handlers["turn/start"] = () => { started.resolve(); return ack.promise; };
+    const next = send(promptInput("second", "new-message")); await started.promise;
+    fake.emit("turn/completed", { turnId: "old" }); fake.emit("turn/completed", { turnId: "old" });
+    fake.emit("item/started", { turnId: "old", item: { type: "userMessage", id: "late-old", content: [{ type: "text", text: "old text" }] } });
+    fake.emit("turn/started", { turnId: "new" });
+    fake.emit("item/started", { turnId: "new", item: { type: "userMessage", id: "new-user", content: [] } });
+    ack.resolve({ turn: { id: "new" } }); await next;
+    expect(events.filter((event) => event.type === "session.turn").map((event) => event.state)).toEqual(["started", "completed", "started"]);
+    expect(events.some((event) => event.type === "timeline.item" && event.item.type === "user_message" && event.item.messageId === "late-old")).toBe(false);
+    expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ messageId: "new-user", clientMessageId: "new-message", text: "second" }) }));
+  });
+
+  it("blocks prompt admission during rewind and retains the source if fork hydration fails", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false }); fake.state.version = "0.159.3";
+    await send(openInput); await send(promptInput("first")); fake.emit("turn/started", { turnId: "old" });
+    fake.emit("item/started", { turnId: "old", item: { id: "old-user", type: "userMessage", content: [] } }); fake.emit("turn/completed", { turnId: "old" });
+    const forking = deferred<void>(); const release = deferred<unknown>();
+    fake.state.handlers["thread/fork"] = () => { forking.resolve(); return release.promise; };
+    fake.state.handlers["thread/read"] = (params) => {
+      if ((params as { threadId: string }).threadId === "thread-fork") throw new Error("fork hydration failed");
+      return { thread: { turns: [{ id: "old", items: [] }] } };
+    };
+    const rewind = send({ type: "session.revert", sessionId: "s", requestId: "rewind", token: "old-user", scope: "conversation" });
+    await forking.promise;
+    await send(promptInput("during rewind", "blocked"));
+    expect(fake.state.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+    release.resolve({ thread: { id: "thread-fork" } }); await rewind;
+    expect(events).toContainEqual(expect.objectContaining({ type: "request.failed", requestId: "rewind", error: { message: "fork hydration failed" } }));
+    expect(events.filter((event) => event.type === "session.persistence").at(-1)).toMatchObject({ persistence: { data: { threadId: "thread-1" } } });
+    delete fake.state.handlers["turn/start"];
+    await send(promptInput("continue source", "continue"));
+    expect(fake.state.requests.filter((request) => request.method === "turn/start").at(-1)?.params).toMatchObject({ threadId: "thread-1" });
+  });
+
+  it("persists Stop dismissal even while async question display is translating", async () => {
+    const gate = gatedTranslation("async-question-in-translation");
+    const { send, fake, events } = await createHarness(undefined, undefined, undefined, gate.fetchFn);
+    await send(openInput); await send(promptInput("first"));
+    fake.emit("item/completed", { item: { type: "agentMessage", id: "async-q", delivery: "async", questions: [{ title: "async-question-in-translation" }] } });
+    await gate.entered.promise;
+    await send({ type: "session.interrupt", sessionId: "s", requestId: "stop" });
+    gate.release.resolve();
+    const persistence = events.filter((event) => event.type === "session.persistence").at(-1);
+    if (persistence?.type !== "session.persistence") throw new Error("No persistence");
+    await send({ type: "session.close", sessionId: "s", requestId: "close" });
+    events.length = 0;
+    await send({ ...openInput, persistence: persistence.persistence });
+    expect(events.some((event) => event.type === "session.permission")).toBe(false);
+    expect(JSON.stringify(persistence)).toContain('"answered":true');
+  });
+
+  it("offers plan approval and implements in Code mode with the approved text", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false });
+    fake.state.handlers["collaborationMode/list"] = () => ({ data: [{ name: "Plan", mode: "plan" }, { name: "Code", mode: "default" }] });
+    await send(openInput);
+    await send({ type: "session.configure", sessionId: "s", requestId: "plan", changes: { settings: { plan_mode: true } } });
+    await send(promptInput("make a plan"));
+    expect(fake.state.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ collaborationMode: { mode: "plan" } });
+    fake.emit("item/completed", { item: { type: "plan", id: "plan", text: "The approved plan text" } });
+    fake.emit("turn/completed", {});
+    const permission = events.find((event) => event.type === "session.permission");
+    if (permission?.type !== "session.permission") throw new Error("No plan approval");
+    await send(promptInput("a follow-up before approving", "followup"));
+    fake.emit("turn/completed", {});
+    await send({ type: "session.permission", sessionId: "s", permissionId: permission.request.id, response: { behavior: "allow" } });
+    const implementation = fake.state.requests.filter((request) => request.method === "turn/start").at(-1)?.params;
+    expect(implementation).toMatchObject({ collaborationMode: { mode: "default" } });
+    expect(JSON.stringify(implementation)).toContain("The approved plan text");
+  });
+
+  it("keeps async questions answerable after completion and persists their resolution", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false, translateResponses: false }); await send(openInput); await send(promptInput("ask"));
+    fake.emit("item/completed", { item: { type: "agentMessage", id: "async-q", delivery: "async", questions: [{ title: "Which option?", options: ["First", "Second"] }] } });
+    fake.emit("turn/completed", {});
+    await waitFor(events, (event) => event.type === "session.permission");
+    await send({ type: "session.permission", sessionId: "s", permissionId: "permission-async-q", response: { behavior: "allow", updatedInput: { answers: { "Question 1": "First" } } } });
+    const starts = fake.state.requests.filter((request) => request.method === "turn/start");
+    expect(starts).toHaveLength(2); expect(JSON.stringify(starts[1].params)).toContain("Answers to your questions");
+    const persistence = events.filter((event) => event.type === "session.persistence").at(-1);
+    expect(persistence).toMatchObject({ persistence: { data: { asyncQuestions: [{ answered: true, item: { id: "async-q" } }] } } });
+  });
+
+  it("restores pending async questions even when timeline replay is skipped", async () => {
+    const { send, events } = await createHarness({ translateResponses: false });
+    await send({ ...openInput, persistence: { version: 1, data: { threadId: "saved", asyncQuestions: [{ item: { type: "agentMessage", id: "saved-question", delivery: "async", questions: [{ title: "Continue?" }] }, answered: false }] } } });
+    await waitFor(events, (event) => event.type === "session.permission");
+    expect(events).toContainEqual(expect.objectContaining({ type: "session.permission", request: expect.objectContaining({ id: "permission-saved-question" }) }));
+  });
+
+  it("runs compact and goal commands outside the foreground turn", async () => {
+    const { send, fake } = await createHarness({ translatePrompts: false }); await send(openInput); await send(promptInput("work"));
+    await send(commandInput("compact")); await send(commandInput("goal", "finish parity")); await send(commandInput("goal", "pause"));
+    expect(fake.state.requests.filter((request) => request.method === "turn/start")).toHaveLength(1);
+    expect(fake.state.requests).toContainEqual({ method: "thread/compact/start", params: { threadId: "thread-1" } });
+    expect(fake.state.requests).toContainEqual({ method: "thread/goal/set", params: { threadId: "thread-1", objective: "finish parity", status: "active" } });
+    expect(fake.state.requests).toContainEqual({ method: "thread/goal/set", params: { threadId: "thread-1", status: "paused" } });
+    expect(fake.state.requests.some((request) => request.method === "turn/interrupt")).toBe(false);
+  });
+
+  it("declines unsupported MCP forms and owns supported elicitation until resolution", async () => {
+    const { send, fake, events } = await createHarness(); await send(openInput);
+    expect(await fake.serverRequest("mcpServer/elicitation/request", { mode: "url" })).toEqual({ action: "decline", content: null, _meta: null });
+    expect(await fake.serverRequest("mcpServer/elicitation/request", { mode: "form", requestedSchema: { required: ["secret"] } })).toEqual({ action: "decline", content: null, _meta: null });
+    const form = fake.serverRequest("mcpServer/elicitation/request", { mode: "form", serverName: "test", message: "Approve?" }, 3);
+    await send({ type: "session.permission", sessionId: "s", permissionId: "permission-mcp-3", response: { behavior: "allow" } });
+    expect(await form).toEqual({ action: "accept", content: {}, _meta: null });
+    const canceled = fake.serverRequest("mcpServer/elicitation/request", { mode: "form", serverName: "test" }, 4);
+    fake.emit("serverRequest/resolved", { requestId: 4 });
+    expect(await canceled).toEqual({ action: "cancel", content: null, _meta: null });
+    expect(events).toContainEqual({ type: "session.permission_resolved", sessionId: "s", permissionId: "permission-mcp-4" });
+  });
+
+  it("refreshes enabled skills before dispatching a command", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false }); await send(openInput);
+    fake.state.handlers["skills/list"] = () => ({ data: [{ skills: [{ name: "review", enabled: false, path: "/disabled" }, { name: "new-skill", enabled: true, path: "/new" }] }] });
+    await send(commandInput("review"));
+    expect(fake.state.requests.some((request) => request.method === "turn/start")).toBe(false);
+    await send(commandInput("new-skill"));
+    expect(fake.state.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ input: [{ type: "skill", name: "new-skill", path: "/new" }, expect.anything()] });
+    expect(events.filter((event) => event.type === "session.commands").at(-1)?.commands.some((command) => command.name === "review")).toBe(false);
+  });
+
+  it("normalizes and forwards output schemas without making them sticky", async () => {
+    const { send, fake, registration } = await createHarness({ translatePrompts: false }); await send(openInput);
+    expect(registration.capabilities).toContain("prompt.output_schema");
+    const structured = promptInput("structured"); structured.prompt.outputSchema = { type: "object", properties: { result: { type: "string" } } };
+    await send(structured);
+    expect(fake.state.requests.find((request) => request.method === "turn/start")?.params).toMatchObject({ outputSchema: { type: "object", additionalProperties: false, required: ["result"] } });
+    fake.emit("turn/completed", {}); await send(promptInput("ordinary", "m-2"));
+    expect(fake.state.requests.filter((request) => request.method === "turn/start").at(-1)?.params).not.toHaveProperty("outputSchema");
+  });
+
+  it("hydrates paginated item envelopes and rewinds modern Codex on a configured fork", async () => {
+    const { send, fake, events } = await createHarness({ translatePrompts: false }); fake.state.version = "0.159.3";
+    fake.state.handlers["thread/read"] = () => ({ thread: { historyMode: "paginated" } });
+    fake.state.handlers["thread/turns/list"] = (params) => ({ data: (params as { threadId: string }).threadId === "saved" ? [{ id: "turn-old" }] : [], nextCursor: null });
+    fake.state.handlers["thread/items/list"] = () => ({ data: [{ turnId: "turn-old", item: { id: "user-old", type: "userMessage", content: [{ type: "text", text: "Original" }] } }], nextCursor: null });
+    await send({ ...openInput, history: "replay", persistence: { version: 1, data: { threadId: "saved" } }, config: { ...openInput.config, providerOptions: { model_provider: "custom" } } });
+    expect(events).toContainEqual(expect.objectContaining({ type: "timeline.item", item: expect.objectContaining({ messageId: "user-old" }) }));
+    await send({ type: "session.revert", sessionId: "s", requestId: "rewind", token: "user-old", scope: "conversation" });
+    expect(fake.state.requests.find((request) => request.method === "thread/fork")?.params).toMatchObject({ cwd: "E:\\repo", model: "gpt-5.4", serviceTier: "default", config: { model_provider: "custom" }, persistExtendedHistory: true });
+    expect(fake.state.requests).toContainEqual({ method: "thread/revert", params: { threadId: "thread-fork", beforeTurnId: "turn-old" } });
+    expect(events).toContainEqual({ type: "request.completed", requestId: "rewind" });
+  });
+});
 
 describe("translate Codex provider", () => {
   it("registers as translate-codex", async () => {
@@ -394,12 +783,12 @@ describe("translate Codex provider", () => {
     // The child thread finishing must not settle the still-running root turn.
     fake.emit("turn/completed", { threadId: "child-thread-1", turn: { status: "completed" } });
     const turnStates = events
-      .filter((event) => event.type === "session.turn")
+      .filter((event) => event.type === "session.turn" && event.sessionId === "s")
       .map((event) => (event.type === "session.turn" ? event.state : ""));
     expect(turnStates).toEqual(["started"]);
     // Sub-agent text never surfaces as root rows, but the spawn card does.
     const items = events.flatMap((event) =>
-      event.type === "timeline.item" ? [event.item] : [],
+      event.type === "timeline.item" && event.sessionId === "s" ? [event.item] : [],
     );
     expect(items.some((item) => item.type === "assistant_message")).toBe(false);
     expect(items.some((item) => item.type === "user_message")).toBe(false);
@@ -412,7 +801,7 @@ describe("translate Codex provider", () => {
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "canceled");
     expect(
       events
-        .filter((event) => event.type === "session.turn")
+        .filter((event) => event.type === "session.turn" && event.sessionId === "s")
         .map((event) => (event.type === "session.turn" ? event.state : "")),
     ).toEqual(["started", "canceled"]);
   });
@@ -652,6 +1041,7 @@ describe("translate Codex provider", () => {
       // renders them for display through the agent-to-user endpoint stub.
       sessions: [{ persistence: { data: { threadId: "thread-old" } }, title: "DE(Yesterday)" }],
     });
+    fake.state.handlers["thread/read"] = () => ({ thread: { turns: [{ id: "native-1", items: [] }] } });
     await send({
       type: "session.revert",
       requestId: "r-rewind",
