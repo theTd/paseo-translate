@@ -10,6 +10,7 @@ export function normalizeCodexNotification(method: string, params: unknown): { m
     turnId: record.turnId ?? record.turn_id ?? msg.turnId ?? msg.turn_id };
   if (method === "codex/event/item_started" || method === "codex/event/item_completed") return { method: method.endsWith("item_started") ? "item/started" : "item/completed", params: { ...normalized, item: msg.item } };
   if (method === "codex/event/task_complete" || method === "codex/event/turn_aborted") return { method: "turn/completed", params: { ...normalized, status: method.endsWith("turn_aborted") ? "interrupted" : "completed" } };
+  if (method === "codex/event/context_compacted") return { method: "thread/compacted", params: normalized };
   return { method, params: normalized };
 }
 
@@ -29,12 +30,55 @@ export class CodexItemStream {
   private readonly tools = new Map<string, Record<string, unknown>>();
   private readonly completed = new Set<string>();
   private boundary = false;
+  private readonly compactions = new Map<string, "auto" | "manual">();
+  private readonly completedCompactions = new Set<string>();
+  private readonly manualCompactions = new Set<symbol>();
+  private compactionOrdinal = 0;
+  private unpairedCompactionItems = 0;
+  private unpairedCompactionNotifications = 0;
 
-  clear(): void { this.text.clear(); this.reasoning.clear(); this.plan.clear(); this.tools.clear(); this.completed.clear(); this.boundary = false; }
+  clear(): void {
+    this.text.clear(); this.reasoning.clear(); this.plan.clear(); this.tools.clear(); this.completed.clear(); this.boundary = false;
+    this.compactions.clear(); this.completedCompactions.clear();
+    this.unpairedCompactionItems = 0; this.unpairedCompactionNotifications = 0;
+  }
+
+  expectManualCompaction(): () => void {
+    const token = Symbol();
+    this.manualCompactions.add(token);
+    return () => { this.manualCompactions.delete(token); };
+  }
+
+  private compactionTrigger(): "auto" | "manual" {
+    const token = this.manualCompactions.values().next().value;
+    if (token === undefined) return "auto";
+    this.manualCompactions.delete(token);
+    return "manual";
+  }
+
+  private completeCompaction(id: string): ProviderTimelineItem {
+    const trigger = this.compactions.get(id) ?? this.compactionTrigger();
+    this.compactions.delete(id);
+    this.completedCompactions.add(id);
+    return { type: "compaction", id, status: "completed", trigger };
+  }
+
+  finishCompactions(): ProviderTimelineItem[] {
+    return [...this.compactions.keys()].map((id) => {
+      this.unpairedCompactionItems += 1;
+      return this.completeCompaction(id);
+    });
+  }
 
   observe(method: string, params: unknown): ProviderTimelineItem[] {
     ({ method, params } = normalizeCodexNotification(method, params));
     const record = toObjectRecord(params) ?? {};
+    if (method === "thread/compacted") {
+      if (this.unpairedCompactionItems > 0) { this.unpairedCompactionItems -= 1; return []; }
+      const id = this.compactions.keys().next().value ?? `compaction-${++this.compactionOrdinal}`;
+      this.unpairedCompactionNotifications += 1;
+      return [this.completeCompaction(id)];
+    }
     if (method === "item/plan/delta" && typeof record.itemId === "string" && typeof record.delta === "string") {
       const text = (this.plan.get(record.itemId) ?? "") + record.delta;
       this.plan.set(record.itemId, text);
@@ -87,9 +131,26 @@ export class CodexItemStream {
     if (!isRecord(record.item)) return [];
     const item = record.item;
     const id = nonEmptyString(item.id);
-    if (!id || this.completed.has(id)) return [];
     const type = normalizeCodexItemType(item.type);
     const done = method === "item/completed";
+    if (type === "contextCompaction") {
+      const key = id ?? this.compactions.keys().next().value ?? `compaction-${++this.compactionOrdinal}`;
+      if (done && this.unpairedCompactionNotifications > 0 && !this.compactions.has(key)) {
+        this.unpairedCompactionNotifications -= 1;
+        this.completedCompactions.add(key);
+        return [];
+      }
+      if (this.completedCompactions.has(key)) return [];
+      if (done) {
+        this.unpairedCompactionItems += 1;
+        return [this.completeCompaction(key)];
+      }
+      if (this.compactions.has(key)) return [];
+      const trigger = this.compactionTrigger();
+      this.compactions.set(key, trigger);
+      return [{ type: "compaction", id: key, status: "loading", trigger }];
+    }
+    if (!id || this.completed.has(id)) return [];
     if (type === "agentMessage" || type === "reasoning") {
       if (item.delivery === "async") return [];
       const entries = threadItemTimelineEntries(item, this.cwd);
@@ -116,7 +177,7 @@ export class CodexItemStream {
   }
 
   settle(status: "failed" | "canceled", message: string): ProviderTimelineItem[] {
-    const items: ProviderTimelineItem[] = [];
+    const items: ProviderTimelineItem[] = this.finishCompactions();
     for (const [id, tool] of this.tools) if (!this.completed.has(id)) {
       items.push(...threadItemTimelineEntries({ ...tool, status, ...(status === "failed" ? { error: { message } } : {}) }, this.cwd));
       this.completed.add(id);

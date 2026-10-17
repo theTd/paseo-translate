@@ -118,25 +118,30 @@ function toolStatus(
   return "running";
 }
 
+function stripCommandQuotes(value: string): string {
+  return (value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))
+    ? value.slice(1, -1) : value;
+}
+
 function unwrapShellCommand(command: string): string {
   const trimmed = command.trim();
   const unix = trimmed.match(/^(?:(?:\/[^/\s]+)*\/)?(?:zsh|bash|sh)\s+-(?:lc|c)\s+([\s\S]+)$/);
-  if (unix?.[1]) return unix[1].trim().replace(/^(['"])(.*)\1$/s, "$2");
-  return trimmed;
+  if (unix?.[1]) return stripCommandQuotes(unix[1].trim());
+  const windows = trimmed.match(/^(?:"[^"]*\\)?(?:pwsh|powershell|cmd)(?:\.exe)?"?(?:\s+-[A-Za-z]+(?:\s+[^-\s][^\s]*)?)*\s+(?:-Command|-c|\/c)\s+([\s\S]+)$/i);
+  return windows?.[1] ? stripCommandQuotes(windows[1].trim()) : trimmed;
 }
 
 function commandFromItem(item: Record<string, unknown>): string | undefined {
   const value = item.command;
-  if (typeof value === "string") {
-    const normalized = unwrapShellCommand(value);
-    return normalized.length > 0 ? normalized : undefined;
-  }
+  if (typeof value === "string") return unwrapShellCommand(value) || undefined;
   if (!Array.isArray(value)) return undefined;
-  const parts = value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
-  if (parts.length >= 3 && (parts[1] === "-lc" || parts[1] === "-c")) {
-    return parts[2];
+  const parts = value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean);
+  if (parts.length >= 3 && (parts[1] === "-lc" || parts[1] === "-c")) return parts[2];
+  if (parts.length >= 3 && /(?:^|[\\/])(?:pwsh|powershell|cmd)(?:\.exe)?$/i.test(parts[0].replace(/^["']|["']$/g, ""))) {
+    const flag = parts.findIndex((part) => /^(?:-command|-c|\/c)$/i.test(part));
+    if (flag > 0 && flag < parts.length - 1) return stripCommandQuotes(parts.slice(flag + 1).join(" "));
   }
-  return parts.length > 0 ? parts.join(" ") : undefined;
+  return parts.join(" ") || undefined;
 }
 
 function mapCommandExecution(item: Record<string, unknown>): ProviderTimelineItem | null {
@@ -343,6 +348,12 @@ export function threadItemToTimeline(
   if (type === "contextCompaction") {
     return { type: "compaction", id: id ?? "compaction", status: "completed" };
   }
+  if (type === "imageGeneration" && record.status === "failed") {
+    return toolItem(id ?? "image-generation", "image_generation", "failed", {
+      type: "plain_text", label: "image_generation",
+      ...(typeof record.revisedPrompt === "string" ? { text: record.revisedPrompt } : {}),
+    }, record.failure ?? record.error ?? { message: "Image generation failed" });
+  }
   if (type === "imageView" || type === "imageGeneration") {
     const uri = imageUri(record.path ?? record.imagePath ?? record.savedPath ?? record.result ?? record.url, options?.cwd, type === "imageGeneration" && record.path == null && record.imagePath == null && record.savedPath == null);
     return uri ? { type: "assistant_message", id: id ?? "image", text: renderImageOutputMarkdown(uri) } : null;
@@ -365,13 +376,20 @@ export function normalizeCodexItemType(value: unknown): string {
   return value.replace(/_([a-z])/g, (_match, letter: string) => letter.toUpperCase());
 }
 
-function imageUri(value: unknown, cwd: string | undefined, base64: boolean): string | null {
+function imageUri(value: unknown, cwd: string | undefined, base64: boolean, mimeType = "image/png"): string | null {
+  if (isRecord(value)) {
+    const file = nonEmptyString(value.path) ?? nonEmptyString(value.savedPath) ?? nonEmptyString(value.saved_path);
+    if (file) return imageUri(file, cwd, false);
+    const url = nonEmptyString(value.url);
+    if (url) return imageUri(url, cwd, false);
+    return imageUri(value.data, cwd, true, nonEmptyString(value.mimeType) ?? nonEmptyString(value.mime_type) ?? mimeType);
+  }
   if (typeof value !== "string" || !value.trim()) return null;
   if (/^(https?:|file:)/i.test(value)) return value;
   if (!base64 && !value.startsWith("data:")) return pathToFileURL(path.resolve(cwd ?? process.cwd(), value)).href;
   const encoded = value.replace(/^data:image\/[\w.+-]+;base64,/, "");
   if (encoded.length > 40_000_000 || !/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 === 1) return null;
-  const materialized = materializeImageOutput(value, "image/png");
+  const materialized = materializeImageOutput(value, mimeType);
   return materialized?.uri ?? null;
 }
 

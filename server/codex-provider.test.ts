@@ -540,9 +540,11 @@ describe("Codex parity regressions", () => {
 
   it("restores pending async questions even when timeline replay is skipped", async () => {
     const { send, events } = await createHarness({ translateResponses: false });
-    await send({ ...openInput, persistence: { version: 1, data: { threadId: "saved", asyncQuestions: [{ item: { type: "agentMessage", id: "saved-question", delivery: "async", questions: [{ title: "Continue?" }] }, answered: false }] } } });
+    await send({ ...openInput, persistence: { version: 1, data: { threadId: "saved", asyncQuestions: [{ item: { type: "agentMessage", id: "saved-question", timestamp: "2025-01-01T00:00:00Z", delivery: "async", questions: [{ title: "Continue?" }] }, answered: false }] } } });
     await waitFor(events, (event) => event.type === "session.permission");
     expect(events).toContainEqual(expect.objectContaining({ type: "session.permission", request: expect.objectContaining({ id: "permission-saved-question" }) }));
+    expect(events.find((event) => event.type === "timeline.item" && event.item.id === "saved-question"))
+      .toMatchObject({ timestamp: "2025-01-01T00:00:00.000Z" });
   });
 
   it("runs compact and goal commands outside the foreground turn", async () => {
@@ -1143,7 +1145,7 @@ describe("translate Codex provider", () => {
     expect(events.find((event) => event.type === "catalog")).toMatchObject({
       catalog: {
         defaultModel: "gpt-5.4",
-        defaultMode: "auto",
+        defaultMode: "auto-review",
         models: [{ id: "gpt-5.4", label: "GPT-5.4", isDefault: true }],
       },
     });
@@ -1433,4 +1435,154 @@ describe("translate Codex provider", () => {
     fake.emit("turn/completed", { status: "completed" });
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
   });
+});
+
+
+it.each([false, true])("honors MCP preapprovals on %s resume", async (resume) => {
+  const { fake, send, registration } = await createHarness();
+  await send({ ...openInput, ...(resume ? { persistence: { version: 1, data: { threadId: "saved" } } } : {}),
+    config: { ...openInput.config, mcpServers: { paseo: { type: "stdio", command: "paseo-mcp", args: ["serve"] } },
+      toolPolicy: { preapproved: [{ kind: "mcp", server: "paseo", tool: "read" }, { kind: "mcp", server: "paseo", tool: "read" }] } } });
+  if (!resume) await send(promptInput("Work"));
+  expect(registration.capabilities).toContain("permission.tool_policy");
+  expect(fake.state.requests.find((request) => request.method === (resume ? "thread/resume" : "thread/start")))
+    .toMatchObject({ params: { config: { mcp_servers: { paseo: { command: "paseo-mcp", args: ["serve"], enabled_tools: ["read"],
+      default_tools_approval_mode: "prompt", tools: { read: { approval_mode: "approve" } } } } } } });
+  await registration.close();
+});
+
+it("uses configured model and reasoning defaults in the catalog and session", async () => {
+  const { fake, send, events, registration } = await createHarness();
+  fake.state.handlers["model/list"] = () => ({ data: [
+    { id: "advertised", isDefault: true, defaultReasoningEffort: "medium", supportedReasoningEfforts: ["medium", "high"] },
+    { id: "configured", defaultReasoningEffort: "medium", supportedReasoningEfforts: ["medium", "high"] },
+  ] });
+  fake.state.handlers["config/read"] = () => ({ config: { model: "configured", model_reasoning_effort: "high" } });
+  await send({ type: "catalog", requestId: "configured-catalog" });
+  const catalog = events.find((event) => event.type === "catalog");
+  expect(catalog).toMatchObject({ catalog: { defaultModel: "configured", defaultThinkingOption: "high",
+    models: [expect.objectContaining({ id: "advertised", isDefault: false }), expect.objectContaining({ id: "configured", isDefault: true,
+      defaultThinkingOptionId: "high", thinkingOptions: expect.arrayContaining([expect.objectContaining({ id: "high", isDefault: true })]) })] } });
+  await send(openInput);
+  expect(events.filter((event) => event.type === "session.config").at(-1)).toMatchObject({ config: { model: "configured", thinkingOption: "high" } });
+  await registration.close();
+});
+
+it.each(["0.114.9", "0.115.0", "0.155.0"])("gates Auto-review with Codex %s", async (version) => {
+  const { fake, send, events, registration } = await createHarness();
+  fake.state.version = version;
+  const supported = version !== "0.114.9";
+  await send({ type: "catalog", requestId: "version-gate" });
+  const catalog = events.find((event) => event.type === "catalog");
+  expect(catalog).toMatchObject({ catalog: { defaultMode: supported ? "auto-review" : "auto" } });
+  if (catalog?.type !== "catalog") throw new Error("catalog missing");
+  expect(catalog.catalog.modes.some((mode) => mode.id === "auto-review")).toBe(supported);
+  await send(openInput);
+  await send({ type: "session.configure", sessionId: "s", requestId: "set-auto-review", changes: { mode: "auto-review" } });
+  expect(events.some((event) => event.type === "request.failed" && event.requestId === "set-auto-review")).toBe(!supported);
+  await registration.close();
+});
+
+it("archives native threads and verifies an already-restored thread", async () => {
+  const { fake, send, events, registration } = await createHarness();
+  const persistence = { version: 1, data: { threadId: "saved-thread" } };
+  await send({ type: "session.archive", requestId: "archive", persistence });
+  fake.state.handlers["thread/unarchive"] = () => { throw new Error("no archived rollout found for thread id saved-thread"); };
+  await send({ type: "session.unarchive", requestId: "restore", persistence });
+  expect(fake.state.requests.filter((request) => ["thread/archive", "thread/unarchive", "thread/read"].includes(request.method)))
+    .toEqual([{ method: "thread/archive", params: { threadId: "saved-thread" } },
+      { method: "thread/unarchive", params: { threadId: "saved-thread" } }, { method: "thread/read", params: { threadId: "saved-thread" } }]);
+  expect(events.filter((event) => event.type === "request.completed").map((event) => event.requestId)).toEqual(["archive", "restore"]);
+  expect(fake.state.disposed).toBe(2);
+  await registration.close();
+});
+
+it("reports archive failures and disposes an unsuccessful ephemeral handshake", async () => {
+  const { fake, send, events, registration } = await createHarness();
+  fake.state.handlers.initialize = () => { throw new Error("handshake failed"); };
+  await send({ type: "session.archive", requestId: "failed-archive", persistence: { version: 1, data: { threadId: "saved" } } });
+  expect(events.find((event) => event.type === "request.failed")).toMatchObject({ requestId: "failed-archive", error: { message: "handshake failed" } });
+  expect(fake.state.disposed).toBe(1);
+  await registration.close();
+});
+
+it("requests last-use order and follows session pages beyond 100 rows", async () => {
+  const { fake, send, events, registration } = await createHarness({ translateResponses: false });
+  fake.state.handlers["thread/list"] = (params) => {
+    const cursor = (params as { cursor?: string }).cursor;
+    const offset = cursor ? 99 : 0;
+    return { data: Array.from({ length: cursor ? 51 : 100 }, (_, index) => ({ id: `session-${offset + index}`, cwd: "E:/repo", name: `Session ${offset + index}` })), nextCursor: cursor ? null : "second-page" };
+  };
+  await send({ type: "sessions", requestId: "paginated", cwd: "E:/repo", limit: 150 });
+  const listed = events.find((event) => event.type === "sessions");
+  if (listed?.type !== "sessions") throw new Error("listing missing");
+  expect(listed.sessions).toHaveLength(150);
+  expect(new Set(listed.sessions.map((entry) => JSON.stringify(entry.persistence))).size).toBe(150);
+  expect(fake.state.requests.filter((request) => request.method === "thread/list")).toEqual([
+    { method: "thread/list", params: { limit: 100, cwd: "E:/repo", sortKey: "updated_at" } },
+    { method: "thread/list", params: { limit: 50, cwd: "E:/repo", sortKey: "updated_at", cursor: "second-page" } },
+  ]);
+  await registration.close();
+});
+
+it("restores event timestamps and consolidates completed historical subagent activity", async () => {
+  const { fake, send, events, registration } = await createHarness({ translatePrompts: false });
+  fake.state.handlers["thread/read"] = (params) => {
+    if ((params as { threadId: string }).threadId === "child") return { thread: { turns: [{ id: "child-turn", status: "completed", startedAt: 1_700_000_000,
+      completedAt: 1_700_000_100, items: [{ id: "child-message", type: "agentMessage", text: "Child reply" }] }] } };
+    return { thread: { turns: [{ id: "root-turn", startedAt: 1_700_000_000, completedAt: 1_700_000_100, items: [
+      { id: "user", type: "userMessage", content: [{ type: "text", text: "Work" }] },
+      { id: "spawn", type: "subAgentActivity", agentThreadId: "child", kind: "started" },
+      { id: "reply", type: "agentMessage", text: "Reply", timestamp: "2023-11-14T22:14:00Z" },
+      { id: "interact", type: "subAgentActivity", agentThreadId: "child", kind: "interacted" },
+    ] }] } };
+  };
+  await send({ ...openInput, history: "replay", persistence: { version: 1, data: { threadId: "saved" } } });
+  const timeline = events.filter((event) => event.type === "timeline.item");
+  expect(timeline.find((event) => event.item.id === "user")).toMatchObject({ timestamp: "2023-11-14T22:13:20.000Z" });
+  expect(timeline.find((event) => event.item.id === "reply")).toMatchObject({ timestamp: "2023-11-14T22:14:00.000Z" });
+  expect(timeline.filter((event) => event.item.type === "tool_call")).toMatchObject([{ item: { callId: "spawn", status: "completed" } }]);
+  expect(timeline.find((event) => event.item.id === "child-message")).toMatchObject({ sessionId: "s:codex:child", timestamp: "2023-11-14T22:15:00.000Z" });
+  expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "s:codex:child").at(-1)).toMatchObject({ state: "completed" });
+  expect(timeline.every((event) => !("timestamp" in event.item))).toBe(true);
+  await registration.close();
+});
+
+it("tracks a manual compaction through loading and completion", async () => {
+  const { fake, send, events, registration } = await createHarness();
+  await send(openInput);
+  await send({ type: "session.prompt", sessionId: "s", prompt: { clientMessageId: "compact", delivery: "auto", input: { type: "command", name: "compact", arguments: "" } } });
+  fake.emit("item/started", { threadId: "thread-1", item: { id: "compact-item", type: "contextCompaction" } });
+  fake.emit("thread/compacted", { threadId: "thread-1" });
+  fake.emit("item/completed", { threadId: "thread-1", item: { id: "compact-item", type: "contextCompaction" } });
+  expect(events.flatMap((event) => event.type === "timeline.item" && event.item.type === "compaction" ? [event.item] : []))
+    .toEqual([{ type: "compaction", id: "compact-item", status: "loading", trigger: "manual" }, { type: "compaction", id: "compact-item", status: "completed", trigger: "manual" }]);
+  await registration.close();
+});
+
+
+it("keeps pending manual compaction attribution when a new turn starts first", async () => {
+  const { fake, send, events, registration } = await createHarness({ translatePrompts: false });
+  await send(openInput);
+  await send(commandInput("compact"));
+  await send(promptInput("Next work"));
+  fake.emit("item/started", { threadId: "thread-1", item: { id: "delayed-compact", type: "contextCompaction" } });
+  fake.emit("item/completed", { threadId: "thread-1", item: { id: "delayed-compact", type: "contextCompaction" } });
+  expect(events.flatMap((event) => event.type === "timeline.item" && event.item.type === "compaction" ? [event.item] : []))
+    .toEqual([{ type: "compaction", id: "delayed-compact", status: "loading", trigger: "manual" },
+      { type: "compaction", id: "delayed-compact", status: "completed", trigger: "manual" }]);
+  await registration.close();
+});
+
+it.each(["failed", "interrupted"])("settles unfinished historical child tools when its turn was %s", async (status) => {
+  const { fake, send, events, registration } = await createHarness({ translatePrompts: false });
+  fake.state.handlers["thread/read"] = (params) => ({ thread: { turns: (params as { threadId: string }).threadId === "child"
+    ? [{ id: "child-turn", status, completedAt: 1_700_000_100, items: [{ id: "unfinished-child-tool", type: "commandExecution", command: "work", status: "inProgress" }] }]
+    : [{ id: "root-turn", items: [{ id: "spawn", type: "subAgentActivity", agentThreadId: "child", kind: "started" }] }] } });
+  await send({ ...openInput, history: "replay", persistence: { version: 1, data: { threadId: "saved" } } });
+  expect(events.filter((event) => event.type === "timeline.item" && event.item.id === "unfinished-child-tool").at(-1))
+    .toMatchObject({ timestamp: "2023-11-14T22:15:00.000Z", item: { status: status === "failed" ? "failed" : "canceled" } });
+  expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "s:codex:child").at(-1))
+    .toMatchObject({ state: status === "failed" ? "failed" : "canceled" });
+  await registration.close();
 });

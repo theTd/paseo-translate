@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { z } from "zod";
 import {
   negotiateProviderCapabilities,
@@ -47,9 +48,10 @@ import {
 import { materializeImageOutput } from "./image-output";
 import { CodexItemStream, normalizeCodexNotification } from "./codex-item-stream";
 import { normalizeCodexOutputSchema } from "./codex-output-schema";
-import { codexCollaborationModes, codexSandboxPolicy, codexServiceTiers, type CodexCollaborationMode } from "./codex-session-settings";
+import { applyCodexToolPolicy, codexVersionAtLeast, codexCollaborationModes, codexSandboxPolicy, codexServiceTiers, type CodexCollaborationMode } from "./codex-session-settings";
 import { codexHome, codexCustomPrompts, expandCodexCustomPrompt } from "./codex-commands";
-import { readCodexHistory } from "./codex-history";
+import { readCodexHistory, readCodexSessionWindow, settleCodexReplayActivities } from "./codex-history";
+import { codexReplayTimestamp, normalizeReplayTimestamp, replayTimelineEvent } from "./provider-replay-timestamps";
 import { registerChildThreads, routeChildNotification, closeChildren, type CodexChildSession } from "./codex-child-sessions";
 import {
   isSerializedAttachment,
@@ -84,6 +86,9 @@ const CAPABILITIES = [
   "prompt.output_schema",
   "session.subsession",
   "permission",
+  "permission.tool_policy",
+  "session.archive",
+  "session.unarchive",
   "session.persistence",
   "session.configure",
   "session.list",
@@ -111,6 +116,12 @@ const STATIC_MODES: ProviderMode[] = [
 ];
 const VALID_MODES = new Set(STATIC_MODES.map((mode) => mode.id));
 const DEFAULT_MODE_ID = "auto";
+
+function codexModeCatalog(version: string | undefined) {
+  const autoReview = codexVersionAtLeast(version, 0, 115);
+  return { modes: autoReview ? STATIC_MODES : STATIC_MODES.filter((mode) => mode.id !== "auto-review"),
+    defaultMode: autoReview ? "auto-review" : DEFAULT_MODE_ID };
+}
 
 const MODE_PRESETS: Record<string, { approvalPolicy: string; sandbox: string; approvalsReviewer?: string }> =
   {
@@ -152,6 +163,8 @@ interface CodexSession {
   desiredModel: string | null;
   defaultModel: string | null;
   desiredMode: string | null;
+  defaultMode: string;
+  modes: ProviderMode[];
   desiredThinking: string | null;
   serviceTier: string;
   planMode: boolean;
@@ -216,7 +229,7 @@ export function createTranslateCodexProvider(deps: CodexProviderDeps): ProviderR
     label: TRANSLATE_CODEX_PROVIDER_LABEL,
     description:
       "Talks to Codex directly through the official app-server. Prompts are translated before Codex sees them; replies stream back in Codex's language and are translated in the app after the stream completes.",
-    icon: "icon.svg",
+    icon: "icons/codex-translate.svg",
     async getCatalogCacheKey(options) {
       const values = await deps.loadConfig();
       const executable =
@@ -326,7 +339,11 @@ async function dispatch(
       requireProviderCapabilities(capabilities, input);
       const session = context.sessions.get(input.sessionId);
       if (session === undefined) throw new Error(`Unknown session: ${input.sessionId}`);
-      applyConfigChanges(session, input.changes, context);
+      try { applyConfigChanges(session, input.changes, context); }
+      catch (error) {
+        context.emit({ type: "request.failed", requestId: input.requestId, error: { message: describe(error) } });
+        return;
+      }
       context.emit({
         type: "session.config",
         sessionId: input.sessionId,
@@ -337,11 +354,8 @@ async function dispatch(
     }
     case "session.archive":
     case "session.unarchive":
-      context.emit({
-        type: "request.failed",
-        requestId: input.requestId,
-        error: { message: `${input.type} is not supported by the Translate Codex provider` },
-      });
+      requireProviderCapabilities(capabilities, input);
+      await updateArchiveState(input, context);
       return;
     case "session.revert":
       requireProviderCapabilities(capabilities, input);
@@ -357,16 +371,43 @@ async function dispatch(
 async function probeCatalog(context: DispatchContext): Promise<ProviderCatalog> {
   const client = await connectEphemeralClient(context, process.cwd());
   try {
-    const models = await loadModels(client);
+    const defaults = toObjectRecord(toObjectRecord(await client.request("config/read", { includeLayers: false }).catch(() => ({})))?.config) ?? {};
+    const models = await loadModels(client, defaults);
     return {
       models,
-      modes: STATIC_MODES,
-      defaultMode: DEFAULT_MODE_ID,
+      ...codexModeCatalog(client.version),
       defaultModel: models.find((model) => model.isDefault)?.id ?? models[0]?.id,
       defaultThinkingOption: models.find((model) => model.isDefault)?.defaultThinkingOptionId,
     };
   } finally {
     await client.dispose().catch(() => undefined);
+  }
+}
+
+async function updateArchiveState(
+  input: Extract<ProviderInput, { type: "session.archive" | "session.unarchive" }>,
+  context: DispatchContext,
+): Promise<void> {
+  const threadId = readStoredThreadId(input.persistence);
+  if (!threadId) {
+    context.emit({ type: "request.failed", requestId: input.requestId, error: { message: "Invalid Codex thread persistence" } });
+    return;
+  }
+  try {
+    const client = await connectEphemeralClient(context, process.cwd());
+    try {
+      if (input.type === "session.archive") await client.request("thread/archive", { threadId });
+      else {
+        try { await client.request("thread/unarchive", { threadId }); }
+        catch (error) {
+          if (!describe(error).includes(`no archived rollout found for thread id ${threadId}`)) throw error;
+          await client.request("thread/read", { threadId });
+        }
+      }
+    } finally { await client.dispose(); }
+    context.emit({ type: "request.completed", requestId: input.requestId });
+  } catch (error) {
+    context.emit({ type: "request.failed", requestId: input.requestId, error: { message: describe(error) } });
   }
 }
 
@@ -383,9 +424,14 @@ async function connectEphemeralClient(
     cwd,
     env: { ...process.env, ...env },
   });
-  await client.request("initialize", buildCodexInitializeParams());
-  client.notify("initialized", {});
-  return client;
+  try {
+    await client.request("initialize", buildCodexInitializeParams());
+    client.notify("initialized", {});
+    return client;
+  } catch (error) {
+    await client.dispose().catch(() => undefined);
+    throw error;
+  }
 }
 
 function resolveCodexCommand(values: TranslateSettingsValues): string {
@@ -398,7 +444,7 @@ function resolveCodexCommand(values: TranslateSettingsValues): string {
   );
 }
 
-async function loadModels(client: CodexClientLike): Promise<ProviderModel[]> {
+async function loadModels(client: CodexClientLike, defaults: Record<string, unknown> = {}): Promise<ProviderModel[]> {
   const raw = toObjectRecord(await client.request("model/list", {}));
   const data = Array.isArray(raw?.data) ? raw.data : [];
   const models: ProviderModel[] = [];
@@ -407,7 +453,8 @@ async function loadModels(client: CodexClientLike): Promise<ProviderModel[]> {
     if (record === null) continue;
     const id = nonEmptyString(record.id);
     if (id === null) continue;
-    const thinking = thinkingOptionsFromModel(record);
+    const thinking = thinkingOptionsFromModel({ ...record,
+      defaultReasoningEffort: readConfigured(defaults.model_reasoning_effort) ?? record.defaultReasoningEffort });
     models.push({
       id,
       metadata: { model: typeof record.model === "string" ? record.model : id, serviceTiers: z.json().parse(record.serviceTiers ?? []) },
@@ -418,6 +465,9 @@ async function loadModels(client: CodexClientLike): Promise<ProviderModel[]> {
       ...(thinking.defaultId !== undefined ? { defaultThinkingOptionId: thinking.defaultId } : {}),
     });
   }
+  const configured = readConfigured(defaults.model);
+  const selected = models.find((model) => model.id === configured || model.metadata?.model === configured);
+  if (selected) for (const model of models) model.isDefault = model === selected;
   return models;
 }
 
@@ -503,7 +553,9 @@ async function openSession(
     translatedSystemPrompt,
     desiredModel: readConfigured(input.config.model),
     defaultModel: null,
-    desiredMode: readConfigured(input.config.mode) ?? DEFAULT_MODE_ID,
+    desiredMode: readConfigured(input.config.mode),
+    defaultMode: DEFAULT_MODE_ID,
+    modes: codexModeCatalog(undefined).modes,
     desiredThinking: readConfigured(input.config.thinkingOption),
     serviceTier: readConfigured(input.config.settings?.service_tier) ?? (input.config.settings?.fast_mode === true ? "fast" : "default"),
     planMode: input.config.settings?.plan_mode === true,
@@ -620,8 +672,13 @@ async function initializeSessionClient(session: CodexSession, context: DispatchC
   try {
   await client.request("initialize", buildCodexInitializeParams());
   client.notify("initialized", {});
-  session.catalogModels = await loadModels(client);
+  const modeCatalog = codexModeCatalog(client.version);
+  session.modes = modeCatalog.modes;
+  session.defaultMode = modeCatalog.defaultMode;
+  session.desiredMode ??= session.defaultMode;
+  if (!session.modes.some((mode) => mode.id === session.desiredMode)) throw new Error(`Codex mode ${session.desiredMode} is unavailable from this Codex version`);
   const resolved = toObjectRecord(toObjectRecord(await client.request("config/read", { cwd: session.config.cwd, includeLayers: false }).catch(() => ({})))?.config) ?? {};
+  session.catalogModels = await loadModels(client, resolved);
   session.defaultModel = readConfigured(resolved.model) ?? session.catalogModels.find((model) => model.isDefault)?.id ?? null;
   session.desiredModel ??= session.defaultModel;
   session.desiredThinking ??= readConfigured(resolved.model_reasoning_effort);
@@ -730,7 +787,8 @@ function buildInnerConfig(session: CodexSession): Record<string, unknown> | null
   if (servers !== null) inner.mcp_servers = servers;
   const raw = session.config.providerOptions;
   if (isRecord(raw)) Object.assign(inner, raw);
-  return Object.keys(inner).length > 0 ? inner : null;
+  const configured = applyCodexToolPolicy(inner, session.config.toolPolicy);
+  return Object.keys(configured).length > 0 ? configured : null;
 }
 
 function toCodexMcpServers(
@@ -1298,6 +1356,7 @@ function finishTurn(
   session.nativeTurnId = null;
   dropUnconsumedAnchors(session);
   const { status, errorMessage } = readTurnStatus(record);
+  for (const item of session.stream.finishCompactions()) context.emit({ type: "timeline.item", sessionId: session.id, item });
   if (status === "failed" || status === "interrupted") {
     for (const item of session.stream.settle(status === "failed" ? "failed" : "canceled", errorMessage ?? "Turn ended")) context.emit({ type: "timeline.item", sessionId: session.id, item });
   }
@@ -1801,8 +1860,8 @@ function applyConfigChanges(
 ): void {
   if (session.rewinding) throw new Error("Cannot configure a session while rewinding");
   const nextModel = changes.model !== undefined ? readConfigured(changes.model) ?? session.defaultModel : session.desiredModel;
-  const nextMode = changes.mode !== undefined ? readConfigured(changes.mode) ?? DEFAULT_MODE_ID : session.desiredMode;
-  if (nextMode !== null && !VALID_MODES.has(nextMode)) throw new Error(`Invalid Codex mode "${nextMode}"`);
+  const nextMode = changes.mode !== undefined ? readConfigured(changes.mode) ?? session.defaultMode : session.desiredMode;
+  if (nextMode !== null && !session.modes.some((mode) => mode.id === nextMode)) throw new Error(`Invalid or unavailable Codex mode "${nextMode}"`);
   for (const setting of ["fast_mode", "plan_mode"]) if (changes.settings?.[setting] !== undefined && typeof changes.settings[setting] !== "boolean") throw new Error(`${setting} must be a boolean`);
   const requestedTier = changes.settings?.service_tier ?? (changes.settings?.fast_mode !== undefined ? (changes.settings.fast_mode ? "fast" : "default") : undefined);
   if (requestedTier !== undefined && requestedTier !== "default" && !codexServiceTiers(session.catalogModels, nextModel).some((tier) => tier.id === requestedTier)) throw new Error(`Unsupported service tier: ${String(requestedTier)}`);
@@ -1816,7 +1875,7 @@ function applyConfigChanges(
     if (mode !== null && !VALID_MODES.has(mode)) {
       throw new Error(`Invalid Codex mode "${mode}"`);
     }
-    session.desiredMode = mode ?? DEFAULT_MODE_ID;
+    session.desiredMode = mode ?? session.defaultMode;
     if (session.active !== null) {
       context.emit({
         type: "session.notice",
@@ -1988,9 +2047,8 @@ async function listSessions(
   try {
     const client = await connectEphemeralClient(context, input.cwd ?? process.cwd());
     try {
-      const limit = Math.max(1, Math.min(input.limit ?? 20, 100));
-      const raw = toObjectRecord(await client.request("thread/list", { limit, cwd: input.cwd ?? null }));
-      const data = Array.isArray(raw?.data) ? raw.data : [];
+      const limit = Math.max(1, Math.min(input.limit ?? 20, 500));
+      const data = await readCodexSessionWindow(client, input.cwd ? Math.max(limit, 50) : limit, input.cwd);
       for (const entry of data) {
         const record = toObjectRecord(entry);
         const threadId = nonEmptyString(record?.id);
@@ -1998,10 +2056,7 @@ async function listSessions(
         const cwd = nonEmptyString(record?.cwd) ?? input.cwd ?? process.cwd();
         if (input.cwd !== undefined && !sameCwd(cwd, input.cwd)) continue;
         const title = nonEmptyString(record?.name) ?? nonEmptyString(record?.preview) ?? undefined;
-        const updatedAt =
-          typeof record?.updatedAt === "number"
-            ? new Date(record.updatedAt * 1000).toISOString()
-            : undefined;
+        const updatedAt = normalizeReplayTimestamp(record?.updatedAt, record?.createdAt);
         sessions.push({
           persistence: { version: 1, data: { threadId } },
           cwd,
@@ -2009,6 +2064,7 @@ async function listSessions(
           ...(updatedAt !== undefined ? { updatedAt } : {}),
         });
       }
+      sessions = sessions.slice(0, limit);
     } finally {
       await client.dispose().catch(() => undefined);
     }
@@ -2035,7 +2091,7 @@ async function replayHistory(session: CodexSession, context: DispatchContext, re
   }
   const { turns } = await readCodexHistory(session.client, session.threadId);
   const retainedQuestions = new Set<string>();
-  for (const turn of turns) {
+  for (const turn of settleCodexReplayActivities(turns)) {
     session.proposedPlan = null;
     const turnRecord = toObjectRecord(turn);
     const turnId = nonEmptyString(turnRecord?.id);
@@ -2046,8 +2102,10 @@ async function replayHistory(session: CodexSession, context: DispatchContext, re
         if (normalizeCodexItemType(item.type) === "plan" && typeof item.text === "string") session.proposedPlan = item.text;
         if (item.delivery === "async" && typeof item.id === "string") {
           retainedQuestions.add(item.id);
-          if (restoreQuestions) await receiveAsyncQuestion(session, item, context);
-          else if (!session.asyncQuestions.has(item.id)) session.asyncQuestions.set(item.id, { item, answered: false });
+          const timestamp = codexReplayTimestamp(item, turn, false);
+          const historical = { ...item, ...(timestamp ? { timestamp } : {}) };
+          if (restoreQuestions) await receiveAsyncQuestion(session, historical, context);
+          else if (!session.asyncQuestions.has(item.id)) session.asyncQuestions.set(item.id, { item: historical, answered: false });
           continue;
         }
       }
@@ -2062,7 +2120,8 @@ async function replayHistory(session: CodexSession, context: DispatchContext, re
           mapped.text = await restore(mapped.text);
         }
       }
-      context.emit({ type: "timeline.item", sessionId: session.id, item: mapped });
+      context.emit(replayTimelineEvent(session.id, { ...mapped,
+        timestamp: codexReplayTimestamp(toObjectRecord(item) ?? {}, turn, mapped.type === "user_message") }));
       }
     }
   }
@@ -2074,13 +2133,30 @@ async function replayHistory(session: CodexSession, context: DispatchContext, re
     replayed.add(threadId);
     try {
       const history = await readCodexHistory(session.client, threadId);
-      for (const turn of history.turns) for (const item of Array.isArray(turn.items) ? turn.items : []) {
-        if (!isRecord(item)) continue;
-        registerChildThreads(session, threadId, item, context);
-        if (item.type === "userMessage") {
-          const mapped = threadItemToTimeline(item);
-          if (mapped) context.emit({ type: "timeline.item", sessionId: child.id, item: mapped });
-        } else for (const entry of child.stream.observe(turn.status === "inProgress" ? "item/started" : "item/completed", { item })) context.emit({ type: "timeline.item", sessionId: child.id, item: entry });
+      for (const turn of settleCodexReplayActivities(history.turns)) {
+        const turnId = nonEmptyString(turn.id) ?? randomUUID();
+        child.turnId = turnId;
+        context.emit({ type: "session.turn", sessionId: child.id, turnId, state: "started" });
+        for (const item of Array.isArray(turn.items) ? turn.items : []) {
+          if (!isRecord(item)) continue;
+          registerChildThreads(session, threadId, item, context);
+          const entries = normalizeCodexItemType(item.type) === "userMessage"
+            ? threadItemTimelineEntries(item, session.config.cwd)
+            : child.stream.observe(item.status === "inProgress" ? "item/started" : "item/completed", { item });
+          for (const entry of entries) context.emit(replayTimelineEvent(child.id, { ...entry,
+            timestamp: codexReplayTimestamp(item, turn, entry.type === "user_message") }));
+        }
+        const { status, errorMessage } = readTurnStatus(turn);
+        if (status === "inProgress" || status === "in_progress") continue;
+        const settled = status === "failed" || status === "interrupted"
+          ? child.stream.settle(status === "failed" ? "failed" : "canceled", errorMessage ?? "Subagent turn ended")
+          : child.stream.finishCompactions();
+        for (const item of settled) context.emit(replayTimelineEvent(child.id, { ...item,
+          timestamp: codexReplayTimestamp({}, turn, false) }));
+        context.emit({ type: "session.turn", sessionId: child.id, turnId,
+          state: status === "failed" ? "failed" : status === "interrupted" ? "canceled" : "completed",
+          ...(status === "failed" ? { error: { message: errorMessage ?? "Subagent turn failed" } } : {}) });
+        child.turnId = null;
       }
     } catch (error) { emitRuntimeNotice(session, new Error(`Could not restore subagent ${threadId}: ${describe(error)}`), context); }
   }
@@ -2191,7 +2267,7 @@ function configStateFor(session: CodexSession): {
     ...(session.desiredMode !== null ? { mode: session.desiredMode } : {}),
     ...(session.desiredThinking !== null ? { thinkingOption: session.desiredThinking } : {}),
     models: session.catalogModels,
-    modes: STATIC_MODES,
+    modes: session.modes,
     thinkingOptions: [...thinkingOptions],
     settings: [
       ...(codexServiceTiers(session.catalogModels, session.desiredModel).length ? [{ type: "select" as const, id: "service_tier", label: "Service tier", value: selectedServiceTier(session), options: [
@@ -2221,14 +2297,17 @@ async function receiveAsyncQuestion(session: CodexSession, item: Record<string, 
   const questions = item.questions.flatMap((question, index) => isRecord(question) && typeof question.title === "string" && question.title.trim()
     ? [{ id: String(index), header: `Question ${index + 1}`, question: question.title, options: Array.isArray(question.options) ? question.options.filter((label): label is string => typeof label === "string").map((label) => ({ label })) : [] }] : []);
   if (!questions.length) return;
+  const timestamp = normalizeReplayTimestamp(item.timestamp, item.createdAt, item.created_at);
+  const emit = (event: ProviderEvent) => context.emit(event.type === "timeline.item" && timestamp ? { ...event, timestamp } : event);
+  const displayContext = { ...context, emit };
   const saved = session.asyncQuestions.get(item.id);
   if (!saved) { session.asyncQuestions.set(item.id, { item, answered: false }); emitPersistence(session, context); }
   if (saved?.answered) {
-    context.emit({ type: "timeline.item", sessionId: session.id, item: { type: "tool_call", id: item.id, callId: item.id, name: "request_user_input_async", status: "completed", error: null,
+    emit({ type: "timeline.item", sessionId: session.id, item: { type: "tool_call", id: item.id, callId: item.id, name: "request_user_input_async", status: "completed", error: null,
       detail: { type: "plain_text", text: formatCodexQuestionPrompts(questions) + `\n\n${JSON.stringify(saved.item.answers ?? "Dismissed")}`, icon: "brain" } } });
     return;
   }
-  void handleQuestionApproval(session, { itemId: item.id, questions }, context).catch((error) => emitRuntimeNotice(session, error, context));
+  void handleQuestionApproval(session, { itemId: item.id, questions }, displayContext).catch((error) => emitRuntimeNotice(session, error, context));
 }
 
 async function deliverAsyncAnswer(session: CodexSession, pending: PendingPermission, answers: Record<string, { answers: string[] }>, context: DispatchContext): Promise<void> {
@@ -2280,7 +2359,7 @@ function threadConfiguration(session: CodexSession, preserveResolved = false): R
   return { cwd: session.config.cwd, model: session.desiredModel, serviceTier: selectedServiceTier(session),
     ...(session.config.mode !== undefined && session.config.providerOptions?.approval_policy === undefined ? { approvalPolicy: preset.approvalPolicy } : {}),
     ...(preserveResolved && session.config.mode === undefined && session.resolvedApprovalPolicy !== undefined ? { approvalPolicy: session.resolvedApprovalPolicy } : {}),
-    ...(session.config.mode !== undefined ? { approvalsReviewer: preset.approvalsReviewer } : session.resolvedReviewer ? { approvalsReviewer: session.resolvedReviewer } : {}),
+    ...(session.config.mode !== undefined ? { approvalsReviewer: preset.approvalsReviewer } : session.resolvedReviewer ? { approvalsReviewer: session.resolvedReviewer } : session.defaultMode === "auto-review" ? { approvalsReviewer: "auto_review" } : {}),
     ...(session.config.mode !== undefined && session.config.providerOptions?.sandbox_mode === undefined ? { sandbox: preset.sandbox } : {}),
     ...(preserveResolved && session.config.mode === undefined && typeof session.resolvedSandbox.type === "string" ? { sandbox: ({ workspaceWrite: "workspace-write", readOnly: "read-only", dangerFullAccess: "danger-full-access" } as Record<string, string>)[session.resolvedSandbox.type] } : {}),
     ...(session.translatedSystemPrompt ? { developerInstructions: session.translatedSystemPrompt } : {}),
@@ -2293,7 +2372,7 @@ function turnWorkflowPolicy(session: CodexSession): Record<string, unknown> {
   const sandbox = readConfigured(session.config.providerOptions?.sandbox_mode) ?? (explicitMode ? preset.sandbox : null);
   return {
     ...(explicitMode && session.config.providerOptions?.approval_policy === undefined ? { approvalPolicy: preset.approvalPolicy } : {}),
-    ...(explicitMode ? { approvalsReviewer: preset.approvalsReviewer } : {}),
+    ...(explicitMode ? { approvalsReviewer: preset.approvalsReviewer } : session.resolvedReviewer ? { approvalsReviewer: session.resolvedReviewer } : session.defaultMode === "auto-review" ? { approvalsReviewer: "auto_review" } : {}),
     ...(sandbox ? { sandboxPolicy: codexSandboxPolicy(sandbox, session.resolvedSandbox, session.config.providerOptions?.sandbox_workspace_write) } : {}),
   };
 }
@@ -2315,6 +2394,7 @@ function adoptThreadSettings(session: CodexSession, response: unknown): void {
   if (session.config.mode == null) {
     if (record.approvalPolicy === "never" && toObjectRecord(record.sandbox)?.type === "dangerFullAccess") session.desiredMode = "full-access";
     else if (record.approvalsReviewer === "auto_review") session.desiredMode = "auto-review";
+    else if (record.approvalsReviewer === "user") session.desiredMode = "auto";
   }
 }
 
@@ -2334,7 +2414,11 @@ async function runBuiltinCommand(session: CodexSession, input: Extract<ProviderI
     const client = await ensureClient(session, context);
     const threadId = await ensureThread(session, context);
     const { name, arguments: args } = input.prompt.input;
-    if (name === "compact") await client.request("thread/compact/start", { threadId });
+    if (name === "compact") {
+      const cancel = session.stream.expectManualCompaction();
+      try { await client.request("thread/compact/start", { threadId }); }
+      catch (error) { cancel(); throw error; }
+    }
     else {
       if (!goalsEnabled(session, client)) throw new Error("Codex goals are not enabled for this session");
       const objective = args.trim();
@@ -2397,11 +2481,6 @@ async function createRealClient(options: CodexClientFactoryOptions): Promise<Cod
   return client;
 }
 
-function codexVersionAtLeast(version: string | undefined, major: number, minor: number): boolean {
-  const parts = version?.match(/^(\d+)\.(\d+)\./);
-  return !!parts && (Number(parts[1]) > major || (Number(parts[1]) === major && Number(parts[2]) >= minor));
-}
-
 function requestIsCurrent(session: CodexSession, params: Record<string, unknown>): boolean {
   const threadId = nonEmptyString(params.threadId);
   const turnId = nonEmptyString(params.turnId);
@@ -2427,8 +2506,11 @@ async function teardownSession(
 }
 
 function sameCwd(left: string, right: string): boolean {
-  const normalize = (value: string) =>
-    value.replace(/\\/g, "/").replace(/\/+$/g, "").toLowerCase();
+  const normalize = (value: string) => {
+    try { value = realpathSync.native(value); } catch { /* Compare the supplied paths if unavailable. */ }
+    const normalized = value.replace(/\\/g, "/").replace(/\/+$/g, "");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
   return normalize(left) === normalize(right);
 }
 

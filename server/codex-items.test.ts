@@ -106,3 +106,23 @@ describe("codex thread item mapping", () => {
     ]);
   });
 });
+
+
+it.each([
+  'powershell.exe -NoProfile -Command "Get-Location"',
+  'cmd.exe /c "Get-Location"',
+  ['pwsh.exe', '-Command', 'Get-Location'],
+  ['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', '-NoProfile', '-Command', 'Get-Location'],
+])("shows the actual Windows shell command: %s", (command) => {
+  expect(threadItemToTimeline({ id: "shell", type: "commandExecution", command, status: "completed" }))
+    .toMatchObject({ detail: { type: "shell", command: "Get-Location" } });
+});
+
+it("surfaces failed image generation and accepts structured image results", () => {
+  expect(threadItemToTimeline({ id: "failed-image", type: "imageGeneration", status: "failed", failure: { message: "Image quota exhausted" } }))
+    .toMatchObject({ type: "tool_call", name: "image_generation", status: "failed", error: { message: "Image quota exhausted" } });
+  expect(threadItemToTimeline({ id: "image-url", type: "imageGeneration", status: "completed", result: { url: "https://example.test/image.png" } }))
+    .toMatchObject({ type: "assistant_message", text: "![Image](https://example.test/image.png)" });
+  expect(threadItemToTimeline({ id: "image-path", type: "imageGeneration", status: "completed", result: { path: "image.png" } }, { cwd: "E:/images" }))
+    .toMatchObject({ type: "assistant_message", text: expect.stringContaining("/images/image.png") });
+});

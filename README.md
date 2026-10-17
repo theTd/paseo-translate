@@ -124,7 +124,9 @@ Then open the plugin's **Translate** settings screen in the app and configure:
   terminology, with automatic idle compaction (see below)
 
 Create agents against **Translate (ACP)**, **Translate (Claude Code)**, or
-**Translate (Codex)**. ACP sessions spawn the inner agent through the
+**Translate (Codex)**. Provider-list icons retain Claude's and Codex's native
+logos with a small translation badge at the bottom right. The generic ACP wrapper
+uses Paseo's agent fallback icon with the same badge. ACP sessions spawn the inner agent through the
 translating proxy; the direct providers talk to Claude Code or Codex natively.
 
 ## Direct Claude Code provider
@@ -225,14 +227,16 @@ app after each turn.
   the absolute path of the official CLI, run `codex login` with that CLI,
   and reload the plugin. Startup errors include the selected executable.
 - Model switching and thinking effort are probed live from `model/list`.
-  Modes are Default Permissions / Auto-review / Full Access, matching the
-  native provider. Service tiers come from model metadata, including Fast when
+  Modes are Default Permissions / Auto-review / Full Access. Like the native
+  provider, Codex 0.115+ defaults to Auto-review; older versions omit it.
+  The catalog uses the configured model and reasoning defaults. Service tiers come from model metadata, including Fast when
   advertised. Plan mode uses the server collaboration modes and offers
   Dismiss/Implement approval for completed proposals.
 - Session persistence uses Codex's thread id (resume survives daemon
   restarts). Permissions pass through Allow/Deny for commands and file
   changes; clarifying questions are translated for display and answers are
-  translated back (fail closed).
+  translated back (fail closed). Preapproved MCP tools use the same per-tool
+  approval configuration as native Paseo while retaining server launch settings.
 - Interrupt maps to `turn/interrupt`. Active-turn steering maps to
   `turn/steer`. Conversation rewind forks the Codex thread.
 - Session-list status tracks out-of-band root turns like the native
@@ -249,12 +253,22 @@ app after each turn.
   their turn lifecycle never settles the root turn or overwrites the native
   turn id, and their user/agent/reasoning text never surfaces as root rows
   (it would read as replies and reach attention notifications). Sub-agent
-  tool activity is flattened to tool-call cards (not provider subsessions);
-  archive/unarchive and file rewind stay capability-gated off.
+  activity replays as completed or canceled historical calls, with resumed activity
+  consolidated under the original call. Native archive/unarchive operations are
+  supported; file rewind remains capability-gated off.
 - `turn/completed` statuses are read from both wire shapes Codex has used
   (`turn.status`/`turn.error` and the older flat `status`/`errorMessage`).
 - Child agents have their own nested session panes, streamed tools, text,
   reasoning and usage; their telemetry does not overwrite the root session.
+- Session listing follows all requested pages (up to the native 500-thread scan
+  window), orders by last activity, and deduplicates threads that move between pages.
+  Root and child history retain their original event timestamps in both direct providers.
+- Compaction displays loading and completed states, distinguishes manual from automatic
+  runs, and merges duplicate item/notification completion signals. A terminal turn closes
+  any unfinished loading marker. Generated-image failures remain visible; structured
+  image results support paths, URLs, and inline image data.
+- Windows shell cards display the command inside PowerShell/cmd wrappers, matching
+  native Paseo.
 - Ordinary and asynchronous questions translate their display/answers and
   remain cancellation-aware. Async answers persist across resume. Supported
   MCP elicitations use approval cards; URL prompts and forms requiring fields

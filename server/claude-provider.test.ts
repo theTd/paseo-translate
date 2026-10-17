@@ -2942,11 +2942,13 @@ describe("translate claude provider extended protocol", () => {
           type: "user",
           message: { content: [{ type: "text", text: "Hello" }] },
           parent_tool_use_id: null,
+          timestamp: "2025-01-01T00:00:00Z",
         }),
         JSON.stringify({
           type: "assistant",
           message: { content: [{ type: "text", text: "Hi" }] },
           parent_tool_use_id: null,
+          timestamp: "2025-01-01T00:00:00Z",
         }),
       ].join("\n"),
     );
@@ -2959,6 +2961,7 @@ describe("translate claude provider extended protocol", () => {
       JSON.stringify({
         type: "assistant",
         message: { content: [{ type: "text", text: "Child found it" }] },
+        timestamp: "2025-01-02T00:00:00Z",
       }),
     );
     const previous = process.env["CLAUDE_CONFIG_DIR"];
@@ -2984,6 +2987,12 @@ describe("translate claude provider extended protocol", () => {
         (event) => event.type === "session.opened" && event.sessionId === "subagent:s:tu-9",
       );
       expect(childOpened).toMatchObject({ parentSessionId: "s", title: "Explore" });
+      expect(events.find((event) => event.type === "timeline.item" && event.item.type === "user_message"))
+        .toMatchObject({ timestamp: "2025-01-01T00:00:00.000Z" });
+      const childReply = events.find((event) => event.type === "timeline.item" && event.sessionId === "subagent:s:tu-9");
+      expect(childReply).toMatchObject({ timestamp: "2025-01-02T00:00:00.000Z" });
+      if (childReply?.type !== "timeline.item") throw new Error("child reply missing");
+      expect(childReply.item).not.toHaveProperty("timestamp");
     } finally {
       if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
       else process.env["CLAUDE_CONFIG_DIR"] = previous;

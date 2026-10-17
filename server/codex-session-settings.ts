@@ -1,8 +1,29 @@
-import type { ProviderModel } from "@getpaseo/plugin/server/provider";
+import type { ProviderModel, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import { isRecord, nonEmptyString, toObjectRecord } from "./codex-items";
 
 export interface CodexServiceTier { id: string; name: string }
 export interface CodexCollaborationMode { name: string; mode: string; settings: Record<string, unknown> }
+
+export function codexVersionAtLeast(version: string | undefined, major: number, minor: number): boolean {
+  const parts = version?.match(/^(\d+)\.(\d+)\./);
+  return !!parts && (Number(parts[1]) > major || (Number(parts[1]) === major && Number(parts[2]) >= minor));
+}
+
+/** Match native MCP preapprovals while retaining the server's transport configuration. */
+export function applyCodexToolPolicy(config: Record<string, unknown>, policy: ProviderSessionConfig["toolPolicy"]): Record<string, unknown> {
+  if (!policy) return config;
+  const servers = { ...toObjectRecord(config.mcp_servers) };
+  const grants = new Map<string, Set<string>>();
+  for (const grant of policy.preapproved) {
+    const tools = grants.get(grant.server) ?? new Set<string>();
+    tools.add(grant.tool);
+    grants.set(grant.server, tools);
+  }
+  for (const [server, tools] of grants) servers[server] = { ...toObjectRecord(servers[server]),
+    enabled_tools: [...tools], default_tools_approval_mode: "prompt",
+    tools: Object.fromEntries([...tools].map((tool) => [tool, { approval_mode: "approve" }])) };
+  return { ...config, mcp_servers: servers };
+}
 
 export function codexServiceTiers(models: readonly ProviderModel[], model: string | null): CodexServiceTier[] {
   const selected = models.find((entry) => entry.id === model || entry.metadata?.model === model) ?? models.find((entry) => entry.isDefault);

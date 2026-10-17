@@ -6,6 +6,8 @@ import { CodexItemStream } from "./codex-item-stream";
 import { threadItemToTimeline, threadItemTimelineEntries } from "./codex-items";
 import { normalizeCodexOutputSchema } from "./codex-output-schema";
 import { codexCustomPrompts, expandCodexCustomPrompt } from "./codex-commands";
+import { readCodexHistory, settleCodexReplayActivities, readCodexSessionWindow } from "./codex-history";
+import { replayTimelineEvent, normalizeReplayTimestamp } from "./provider-replay-timestamps";
 import { codexSandboxPolicy } from "./codex-session-settings";
 
 describe("Codex parity helpers", () => {
@@ -67,4 +69,70 @@ describe("Codex parity helpers", () => {
       await expect(expandCodexCustomPrompt(home, "prompts:../escape", "")).rejects.toThrow("Invalid custom prompt");
     } finally { await rm(home, { recursive: true, force: true }); }
   });
+});
+
+
+it.each(["notification-first", "item-first"])("pairs compaction completion channels: %s", (order) => {
+  const stream = new CodexItemStream();
+  expect(stream.observe("item/started", { item: { type: "contextCompaction", id: "c" } }))
+    .toEqual([{ type: "compaction", id: "c", status: "loading", trigger: "auto" }]);
+  const calls = order === "notification-first" ? ["thread/compacted", "item/completed"] : ["item/completed", "thread/compacted"];
+  const entries = calls.flatMap((method) => stream.observe(method, { item: { type: "contextCompaction", id: "c" } }));
+  expect(entries).toEqual([{ type: "compaction", id: "c", status: "completed", trigger: "auto" }]);
+  expect(stream.finishCompactions()).toEqual([]);
+});
+
+it("closes incomplete compaction cards on terminal turns and cancels failed manual attribution", () => {
+  const stream = new CodexItemStream();
+  const cancel = stream.expectManualCompaction();
+  cancel();
+  stream.observe("item/started", { item: { type: "contextCompaction", id: "c" } });
+  expect(stream.finishCompactions()).toEqual([{ type: "compaction", id: "c", status: "completed", trigger: "auto" }]);
+  expect(stream.observe("thread/compacted", {})).toEqual([]);
+  expect(stream.observe("item/completed", { item: { type: "contextCompaction", id: "c" } })).toEqual([]);
+});
+
+it("handles legacy notification-only compaction", () => {
+  const stream = new CodexItemStream();
+  stream.expectManualCompaction();
+  expect(stream.observe("codex/event/context_compacted", { msg: {} })).toEqual([
+    { type: "compaction", id: "compaction-1", status: "completed", trigger: "manual" },
+  ]);
+  expect(stream.observe("item/completed", { item: { type: "contextCompaction", id: "later-id" } })).toEqual([]);
+});
+
+it("normalizes replay time on the event and falls through malformed timestamps", () => {
+  expect(normalizeReplayTimestamp("invalid", 1_700_000_000)).toBe("2023-11-14T22:13:20.000Z");
+  expect(normalizeReplayTimestamp(1_700_000_000_000)).toBe("2023-11-14T22:13:20.000Z");
+  expect(replayTimelineEvent("s", { type: "assistant_message", id: "a", text: "Reply", timestamp: "2023-11-14T22:13:20Z" }))
+    .toEqual({ type: "timeline.item", sessionId: "s", item: { type: "assistant_message", id: "a", text: "Reply" }, timestamp: "2023-11-14T22:13:20.000Z" });
+});
+
+it("settles replayed activity without mutating input or duplicating a resumed child", () => {
+  const turns = [{ id: "t", items: [
+    { id: "start", type: "sub_agent_activity", agentThreadId: "child", kind: "started" },
+    { id: "talk", type: "subAgentActivity", agentThreadId: "child", kind: "interacted" },
+    { id: "stop", type: "subAgentActivity", agentThreadId: "child", kind: "interrupted" },
+  ] }];
+  const result = settleCodexReplayActivities(turns);
+  expect(result[0].items).toEqual([{ id: "start", type: "sub_agent_activity", agentThreadId: "child", kind: "interrupted", status: "canceled" }]);
+  expect(turns[0].items).toHaveLength(3);
+  expect(turns[0].items[0]).not.toHaveProperty("status");
+});
+
+it("retains paginated item-envelope timestamps", async () => {
+  const client = { async request(method: string) {
+    if (method === "thread/read") return { thread: { historyMode: "paginated" } };
+    if (method === "thread/turns/list") return { data: [{ id: "turn" }] };
+    return { data: [{ createdAt: 1_700_000_000, item: { id: "a", type: "agentMessage", text: "reply" } }] };
+  } };
+  const history = await readCodexHistory(client, "thread");
+  expect(history.turns[0].items).toEqual([{ id: "a", type: "agentMessage", text: "reply", timestamp: "2023-11-14T22:13:20.000Z" }]);
+});
+
+it("stops session-list cursor cycles without duplicate entries", async () => {
+  let requests = 0;
+  const client = { async request() { requests++; return { data: [{ id: "same" }], nextCursor: "cycle" }; } };
+  expect(await readCodexSessionWindow(client, 150)).toEqual([{ id: "same" }]);
+  expect(requests).toBe(2);
 });

@@ -69,6 +69,7 @@ export function routeChildNotification(session: CodexChildSessionOwner, threadId
   }
   if (method === "turn/completed") {
     const status = readTurnStatus(params);
+    for (const item of child.stream.finishCompactions()) context.emit({ type: "timeline.item", sessionId: child.id, item });
     if (status.status === "failed" || status.status === "interrupted") for (const item of child.stream.settle(status.status === "failed" ? "failed" : "canceled", status.errorMessage ?? "Subagent turn ended")) context.emit({ type: "timeline.item", sessionId: child.id, item });
     if (child.turnId) context.emit({ type: "session.turn", sessionId: child.id, turnId: child.turnId,
       state: status.status === "failed" ? "failed" : status.status === "interrupted" ? "canceled" : "completed" });

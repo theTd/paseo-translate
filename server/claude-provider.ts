@@ -56,6 +56,7 @@ import { describeFinishedTool, describeRunningTool } from "./claude-tool-details
 import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
 import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration, claudeForkEnvironment } from "./claude-fork-coordinator";
 import { resolveClaudeConfigDir } from "./claude-project-dir";
+import { replayTimelineEvent } from "./provider-replay-timestamps";
 import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
   TRANSLATE_CLAUDE_PROVIDER_LABEL,
@@ -328,7 +329,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
     label: TRANSLATE_CLAUDE_PROVIDER_LABEL,
     description:
       "Talks to Claude Code directly through the official SDK. Prompts are translated before Claude sees them; replies stream back in Claude's language and are translated in the app after the stream completes.",
-    icon: "icon.svg",
+    icon: "icons/claude-translate.svg",
     async getCatalogCacheKey(options) {
       const values = await deps.loadConfig();
       // The catalog reflects the CLI build behind this executable; `force` is
@@ -836,7 +837,7 @@ async function replayHistory(
   for (const item of replay.rootItems) {
     if (session.closed) return;
     if (item.type === "user_message" && typeof item.revertToken === "string") session.rewindUserMessageIds.push(item.revertToken);
-    context.emit({ type: "timeline.item", sessionId: session.id, item });
+    context.emit(replayTimelineEvent(session.id, item));
   }
   for (const child of orderReplayedChildren(replay.children)) {
     if (session.closed) return;
@@ -845,11 +846,9 @@ async function replayHistory(
       // content flattened into the parent timeline (see
       // flattenSubagentItemForParent).
       for (const item of child.items) {
-        context.emit({
-          type: "timeline.item",
-          sessionId: session.id,
-          item: flattenSubagentItemForParent(child.title ?? "Subagent", item),
-        });
+        context.emit(replayTimelineEvent(session.id, {
+          ...flattenSubagentItemForParent(child.title ?? "Subagent", item), timestamp: item.timestamp,
+        }));
       }
       continue;
     }
@@ -876,7 +875,7 @@ async function replayHistory(
     });
     context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
     for (const item of child.items) {
-      context.emit({ type: "timeline.item", sessionId: providerId, item });
+      context.emit(replayTimelineEvent(providerId, item));
     }
     if (child.totalTokens !== undefined) {
       context.emit({

@@ -55060,6 +55060,24 @@ function renderImageOutputMarkdown(uri, altText = "Image") {
 // server/claude-transcript.ts
 var import_promises14 = require("node:fs/promises");
 var import_node_path6 = require("node:path");
+
+// server/provider-replay-timestamps.ts
+function replayTimelineEvent(sessionId, source) {
+  const { timestamp, ...item } = source;
+  const time3 = normalizeReplayTimestamp(timestamp);
+  return { type: "timeline.item", sessionId, item, ...time3 ? { timestamp: time3 } : {} };
+}
+function normalizeReplayTimestamp(...values) {
+  for (const value of values) {
+    const milliseconds = typeof value === "number" ? Math.abs(value) < 1e12 ? value * 1e3 : value : typeof value === "string" && value.trim() ? Date.parse(value) : NaN;
+    if (!Number.isFinite(milliseconds)) continue;
+    const date5 = new Date(milliseconds);
+    if (Number.isFinite(date5.getTime())) return date5.toISOString();
+  }
+  return void 0;
+}
+
+// server/claude-transcript.ts
 function readString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
 }
@@ -55107,6 +55125,7 @@ function pushItem(collector, item) {
   collector.items.push(item);
 }
 async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
+  const timestamp = normalizeReplayTimestamp(entry.timestamp);
   if (entry.type === "system" && entry.subtype === "compact_boundary") {
     const metadata = entry.compaction ?? entry.metadata ?? entry.compactMetadata;
     const preTokens = metadata?.preTokens ?? metadata?.pre_tokens;
@@ -55114,6 +55133,7 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
       type: "compaction",
       id: idSeed,
       status: "completed",
+      timestamp,
       trigger: metadata?.trigger === "manual" ? "manual" : "auto",
       ...typeof preTokens === "number" ? { preTokens } : {}
     });
@@ -55124,7 +55144,6 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock) {
     const content = entry.message?.content;
     if (!Array.isArray(content) || !content.some((block) => typeof block === "object" && block !== null && block.type === "tool_result")) return;
   }
-  const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : void 0;
   const withTimestamp = (item) => timestamp !== void 0 ? { ...item, timestamp } : item;
   if (entry.type === "assistant") {
     const tokens = readTotalTokens2(entry);
@@ -55503,7 +55522,7 @@ function createTranslateClaudeProvider(deps) {
     id: TRANSLATE_CLAUDE_PROVIDER_ID,
     label: TRANSLATE_CLAUDE_PROVIDER_LABEL,
     description: "Talks to Claude Code directly through the official SDK. Prompts are translated before Claude sees them; replies stream back in Claude's language and are translated in the app after the stream completes.",
-    icon: "icon.svg",
+    icon: "icons/claude-translate.svg",
     async getCatalogCacheKey(options) {
       const values = await deps.loadConfig();
       const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude() ?? "bundled";
@@ -55918,17 +55937,16 @@ async function replayHistory(session, history, context) {
   for (const item of replay.rootItems) {
     if (session.closed) return;
     if (item.type === "user_message" && typeof item.revertToken === "string") session.rewindUserMessageIds.push(item.revertToken);
-    context.emit({ type: "timeline.item", sessionId: session.id, item });
+    context.emit(replayTimelineEvent(session.id, item));
   }
   for (const child of orderReplayedChildren(replay.children)) {
     if (session.closed) return;
     if (!session.supportsSubsessions) {
       for (const item of child.items) {
-        context.emit({
-          type: "timeline.item",
-          sessionId: session.id,
-          item: flattenSubagentItemForParent(child.title ?? "Subagent", item)
-        });
+        context.emit(replayTimelineEvent(session.id, {
+          ...flattenSubagentItemForParent(child.title ?? "Subagent", item),
+          timestamp: item.timestamp
+        }));
       }
       continue;
     }
@@ -55951,7 +55969,7 @@ async function replayHistory(session, history, context) {
     });
     context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
     for (const item of child.items) {
-      context.emit({ type: "timeline.item", sessionId: providerId, item });
+      context.emit(replayTimelineEvent(providerId, item));
     }
     if (child.totalTokens !== void 0) {
       context.emit({

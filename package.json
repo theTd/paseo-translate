@@ -10,7 +10,8 @@
     "client/",
     "server/",
     "shared/",
-    "icon.svg"
+    "icon.svg",
+    "icons/"
   ],
   "scripts": {
     "build": "node scripts/build.mjs && node scripts/verify-bundle.mjs",

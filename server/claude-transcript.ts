@@ -1,6 +1,7 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
+import { normalizeReplayTimestamp, type ReplayedTimelineItem } from "./provider-replay-timestamps";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { claudeProjectDir } from "./claude-project-dir";
 import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
@@ -51,12 +52,12 @@ export interface ReplayedChild {
   title?: string;
   description?: string;
   parentCanonicalId?: string;
-  items: ProviderTimelineItem[];
+  items: ReplayedTimelineItem[];
   totalTokens?: number;
 }
 
 export interface ReplayResult {
-  rootItems: ProviderTimelineItem[];
+  rootItems: ReplayedTimelineItem[];
   children: ReplayedChild[];
 }
 
@@ -128,7 +129,7 @@ function readTotalTokens(entry: ReplayEntry): number | undefined {
 }
 
 interface Collector {
-  items: ProviderTimelineItem[];
+  items: ReplayedTimelineItem[];
   toolNames: Map<string, string>;
   toolInputs: Map<string, unknown>;
   taskInputs: Map<string, Record<string, unknown>>;
@@ -149,7 +150,7 @@ function createCollector(contextCanonicalId: string | null): Collector {
   };
 }
 
-function pushItem(collector: Collector, item: ProviderTimelineItem): void {
+function pushItem(collector: Collector, item: ReplayedTimelineItem): void {
   collector.items.push(item);
 }
 
@@ -159,11 +160,12 @@ async function collectEntry(
   idSeed: string,
   restoreUserBlock?: (translatedBlock: string) => Promise<string> | string,
 ): Promise<void> {
+  const timestamp = normalizeReplayTimestamp(entry.timestamp);
   if (entry.type === "system" && entry.subtype === "compact_boundary") {
     const metadata = (entry.compaction ?? entry.metadata ?? entry.compactMetadata) as
       { trigger?: unknown; preTokens?: unknown; pre_tokens?: unknown } | undefined;
     const preTokens = metadata?.preTokens ?? metadata?.pre_tokens;
-    pushItem(collector, { type: "compaction", id: idSeed, status: "completed",
+    pushItem(collector, { type: "compaction", id: idSeed, status: "completed", timestamp,
       trigger: metadata?.trigger === "manual" ? "manual" : "auto",
       ...(typeof preTokens === "number" ? { preTokens } : {}) });
     return;
@@ -174,7 +176,6 @@ async function collectEntry(
     if (!Array.isArray(content) || !content.some((block) =>
       typeof block === "object" && block !== null && block.type === "tool_result")) return;
   }
-  const timestamp = typeof entry.timestamp === "string" ? entry.timestamp : undefined;
   const withTimestamp = <T extends object>(item: T): T =>
     timestamp !== undefined ? { ...item, timestamp } : item;
   if (entry.type === "assistant") {

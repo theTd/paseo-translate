@@ -20,7 +20,7 @@ export function createTranslateProvider(deps: TranslatorDeps): ProviderRegistrat
     label: TRANSLATE_PROVIDER_LABEL,
     description:
       "Converses in your language while the wrapped ACP agent works in its own. Prompts are translated before they reach the agent; replies are translated in the app after the stream completes.",
-    icon: "icon.svg",
+    icon: "icons/acp-translate.svg",
     async connector() {
       const values = await deps.loadConfig();
       assertAcpConfigured(values);
