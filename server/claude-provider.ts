@@ -45,6 +45,8 @@ import {
   translateQuestionsForDisplay,
 } from "./question";
 import { ClaudeSubagentTracker, flattenSubagentItemForParent } from "./claude-subagents";
+import { ClaudeMessageInput } from "./claude-message-input";
+import { ClaudeMessageStream } from "./claude-message-stream";
 import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
@@ -69,6 +71,7 @@ export interface CommandInfoLike {
 /** Minimal SDK Query surface this provider uses; test fakes implement the same. */
 export interface ClaudeQueryHandle {
   interrupt(): Promise<unknown>;
+  cancelAsyncMessage?(uuid: string): Promise<boolean>;
   [Symbol.asyncIterator](): AsyncIterator<SDKMessage>;
   supportedModels?(): Promise<readonly ModelInfoLike[]>;
   supportedCommands?(): Promise<readonly CommandInfoLike[]>;
@@ -175,6 +178,8 @@ type PermissionResultLike =
 
 interface PendingPermission {
   resolve: (response: PermissionResultLike | null) => void;
+  cleanup: () => void;
+  resolving?: boolean;
   /** True for ExitPlanMode cards: the answer switches the permission mode. */
   plan?: boolean;
   /**
@@ -207,21 +212,26 @@ interface ClaudeSession {
   translatedSystemPrompt: string | null;
   /** Configured overrides applied at query start and live where possible. */
   desiredModel: string | null;
+  runtimeModel: string | null;
   desiredMode: string | null;
   desiredThinking: string | null;
-  sink: PromptSink;
+  sink: ClaudeMessageInput;
+  messages: ClaudeMessageStream;
   query: ClaudeQueryHandle | null;
   abort: AbortController;
   pump: Promise<void> | null;
   claudeSessionId: string | null;
-  active: { clientMessageId: string; turnId: string } | null;
+  active: { clientMessageId: string; turnId: string; messageUuid: string; announced: boolean; sent: boolean } | null;
+  mainTurnInFlight: boolean;
+  mainTurnOrdinal: number;
+  cancellationEpoch: number;
+  permissionClearingEpoch: number;
+  compacting: boolean;
+  restartForThinking: boolean;
   /**
-   * Native-parity autonomous turn: SDK activity arriving with no open
-   * foreground turn is live work (a backgrounded subagent or job that
-   * outlived its turn, or trailing output), so it re-opens a synthetic
-   * root turn. The daemon tracks it as an autonomous run and keeps the
-   * session listed as running until the work settles, the next prompt,
-   * or an interrupt — mirroring the native provider's wake behavior.
+   * Claude's main loop can wake without a user prompt after background
+   * work finishes. Its system/init opens this turn; its result or an idle
+   * session state closes it. Background children alone never own a root turn.
    */
   autonomous: { turnId: string } | null;
   interrupted: boolean;
@@ -255,7 +265,7 @@ interface ClaudeSession {
   /** Claude-side user message ids already seen, in arrival order (rewind anchors). */
   rewindUserMessageIds: string[];
   /** Submitted prompts awaiting their Claude-side user message uuid (FIFO). */
-  pendingUserAnchors: Array<{ clientMessageId: string; text: string }>;
+  pendingUserAnchors: Array<{ uuid: string; clientMessageId: string; text: string }>;
   /** Latest stream-event request prompt size (mid-turn ring numerator). */
   streamInputTokens: number | null;
   streamOutputTokens: number | null;
@@ -272,69 +282,6 @@ interface ClaudeSession {
    */
   supportsSubsessions: boolean;
   commandsPublished: boolean;
-}
-
-interface PromptSink {
-  push(message: SDKUserMessage): void;
-  /**
-   * Queue a steer behind the running turn. Returns an id the sink tracks
-   * until the SDK actually dequeues the message, so an interrupt can discard
-   * steers Claude never read instead of resuming a stopped turn.
-   */
-  pushSteer(message: SDKUserMessage): void;
-  discardPendingSteers(): void;
-  iterable: AsyncIterable<SDKUserMessage>;
-}
-
-interface SinkEntry {
-  message: SDKUserMessage;
-  steer: boolean;
-  delivered: boolean;
-}
-
-function createPromptSink(): PromptSink {
-  const queue: SinkEntry[] = [];
-  let wake: (() => void) | null = null;
-  const iterable: AsyncIterable<SDKUserMessage> = {
-    [Symbol.asyncIterator]() {
-      return {
-        async next(): Promise<IteratorResult<SDKUserMessage>> {
-          const pending = queue.shift();
-          if (pending !== undefined) {
-            pending.delivered = true;
-            return { value: pending.message, done: false };
-          }
-          await new Promise<void>((resolve) => {
-            wake = resolve;
-          });
-          wake = null;
-          const message = queue.shift();
-          if (message === undefined) return { value: undefined, done: true };
-          message.delivered = true;
-          return { value: message.message, done: false };
-        },
-      };
-    },
-  };
-  return {
-    push(message) {
-      queue.push({ message, steer: false, delivered: false });
-      wake?.();
-    },
-    pushSteer(message) {
-      queue.push({ message, steer: true, delivered: false });
-      wake?.();
-    },
-    discardPendingSteers() {
-      for (let index = queue.length - 1; index >= 0; index -= 1) {
-        const entry = queue[index];
-        if (entry !== undefined && entry.steer && !entry.delivered) {
-          queue.splice(index, 1);
-        }
-      }
-    },
-    iterable,
-  };
 }
 
 /**
@@ -403,7 +350,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
         async send(input) {
           if (connectionClosed) throw new Error("Translate Claude provider connection is closed");
           const session = "sessionId" in input ? sessions.get(input.sessionId) : undefined;
-          if (session && deps.forkCoordinator) {
+          if (session && deps.forkCoordinator && input.type !== "session.prompt" && input.type !== "session.interrupt" && input.type !== "session.permission") {
             await deps.forkCoordinator.exclusive(session.contextKey, () => dispatch(input, context, capabilities));
           } else await dispatch(input, context, capabilities);
         },
@@ -466,35 +413,7 @@ async function dispatch(
       return;
     case "session.interrupt": {
       const session = context.sessions.get(input.sessionId);
-      if (session !== undefined && session.query !== null) {
-        session.interrupted = true;
-        const active = session.active;
-        // Native parity: interrupt settles an open autonomous turn as
-        // completed; canceled foreground results retain their ownership
-        // until the CLI reports their terminal frames.
-        settleAutonomousTurn(session, context.emit, "completed");
-        if (active !== null) {
-          session.pendingInterruptedResults += 1;
-          // The pump keeps reading after an interrupt, so settle the stopped
-          // turn here instead of waiting for the killed request's trailing
-          // result frame, which must not settle a newer turn either (see the
-          // result handler's stale suppression).
-          session.active = null;
-          context.emit({
-            type: "session.turn",
-            sessionId: session.id,
-            turnId: active.turnId,
-            state: "canceled",
-          });
-        }
-        // Discard steers Claude never read first: the SDK would otherwise
-        // dequeue one and resume the turn just stopped.
-        session.sink.discardPendingSteers();
-        await session.query.interrupt().catch(() => undefined);
-        // Settle foreground children now; retain background descriptors for
-        // the CLI's separate task termination notifications.
-        session.subagents?.cancelRunningForegroundTasks();
-      }
+      if (session) await interruptSession(session, context);
       context.emit({ type: "request.completed", requestId: input.requestId });
       return;
     }
@@ -516,7 +435,12 @@ async function dispatch(
       requireProviderCapabilities(capabilities, input);
       const session = context.sessions.get(input.sessionId);
       if (session === undefined) throw new Error(`Unknown session: ${input.sessionId}`);
-      await applyConfigChanges(session, input.changes);
+      try { await applyConfigChanges(session, input.changes); }
+      catch (error) {
+        context.emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+        context.emit({ type: "request.failed", requestId: input.requestId, error: { message: describe(error) } });
+        return;
+      }
       if (session.forkConfiguration) context.emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
       context.emit({
         type: "session.config",
@@ -676,27 +600,34 @@ async function rewindConversationOnce(
 async function resetQuery(
   session: ClaudeSession,
   emit: (event: ProviderEvent) => void,
+  preservePreparing = false,
 ): Promise<void> {
   session.detached = true;
+  session.sink.close();
   session.abort.abort();
   session.abort = new AbortController();
   // The rebuilt query belongs to no interrupted request: a stale flag would
   // mute genuine background work and suppress a later real crash.
   session.interrupted = false;
   session.pendingInterruptedResults = 0;
+  session.mainTurnInFlight = false;
+  session.compacting = false;
+  session.pendingUserAnchors = [];
+  settleRootTools(session, emit, "canceled", "Superseded by a rewind");
   for (const pending of session.pendingPermissions.values()) {
+    pending.cleanup();
     pending.resolve({ behavior: "deny", message: "Superseded by a rewind" });
   }
   session.pendingPermissions.clear();
   const pump = session.pump;
   session.query = null;
   session.pump = null;
-  const active = session.active;
-  session.active = null;
+  const active = preservePreparing && session.active?.announced === false ? null : session.active;
+  if (active) session.active = null;
   await pump?.catch(() => undefined);
   session.subagents?.finishProcessTasks();
   session.detached = false;
-  if (active !== null) {
+  if (active?.announced) {
     emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
   }
   // The torn-down query owns the autonomous turn; the rebuilt one cannot
@@ -754,15 +685,23 @@ async function openSession(
     config: input.config,
     contextKey,
     translatedSystemPrompt,
-    desiredModel: readConfigured(input.config.model),
+    desiredModel: input.config.model === "default" ? null : readConfigured(input.config.model),
+    runtimeModel: null,
     desiredMode: readConfigured(input.config.mode),
     desiredThinking: readConfigured(input.config.thinkingOption),
-    sink: createPromptSink(),
+    sink: new ClaudeMessageInput(),
+    messages: new ClaudeMessageStream(),
     query: null,
     abort: new AbortController(),
     pump: null,
     claudeSessionId: readStoredSessionId(input.persistence),
     active: null,
+    mainTurnInFlight: false,
+    mainTurnOrdinal: 0,
+    cancellationEpoch: 0,
+    permissionClearingEpoch: 0,
+    compacting: false,
+    restartForThinking: false,
     autonomous: null,
     interrupted: false,
     pendingInterruptedResults: 0,
@@ -1037,8 +976,9 @@ function configStateFor(session: ClaudeSession): {
   thinkingOptions: [];
   settings: ProviderSetting[];
 } {
+  const model = session.runtimeModel ?? session.desiredModel;
   return {
-    ...(session.desiredModel !== null ? { model: session.desiredModel } : {}),
+    ...(model !== null ? { model } : {}),
     ...(session.desiredMode !== null ? { mode: session.desiredMode } : {}),
     ...(session.desiredThinking !== null ? { thinkingOption: session.desiredThinking } : {}),
     models: catalogModelsCache ?? [],
@@ -1119,135 +1059,120 @@ async function promptSession(
   context: DispatchContext,
 ): Promise<void> {
   const session = context.sessions.get(input.sessionId);
-  if (session === undefined) throw new Error(`Unknown session: ${input.sessionId}`);
-  if (input.prompt.input.type === "command") {
-    await commandSession(input, context, session);
-    return;
-  }
+  if (session === undefined || session.closed) throw new Error(`Unknown session: ${input.sessionId}`);
   if (input.prompt.delivery === "steer") {
     await steerSession(input, context, session);
     return;
   }
-  if (session.active !== null) {
-    context.emit({
-      type: "session.prompt_result",
-      sessionId: input.sessionId,
-      clientMessageId: input.prompt.clientMessageId,
-      result: { type: "failed", error: { message: "A turn is already running on this session" } },
-    });
-    return;
-  }
-  let blocks: SdkContentBlock[];
-  try {
-    blocks = await buildMessageBlocks(input.prompt.input.content, context, session.contextKey);
-  } catch (error) {
-    // Fail closed: the prompt never reaches Claude untranslated.
-    context.emit({
-      type: "session.prompt_result",
-      sessionId: input.sessionId,
-      clientMessageId: input.prompt.clientMessageId,
-      result: { type: "failed", error: { message: describe(error) } },
-    });
-    return;
-  }
-  await ensureQuery(session, context);
-  const turnId = randomUUID();
-  session.active = { clientMessageId: input.prompt.clientMessageId, turnId };
-  session.interrupted = false;
-  // Native parity: a new foreground turn supersedes an open autonomous one
-  // (background work that outlived the previous turn).
-  settleAutonomousTurn(session, context.emit, "completed");
-  context.emit({
-    type: "session.prompt_result",
-    sessionId: input.sessionId,
-    clientMessageId: input.prompt.clientMessageId,
-    result: { type: "turn", turnId },
-  });
-  context.emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "started" });
-  session.sink.push({
-    type: "user",
-    message: { role: "user", content: blocks },
-    parent_tool_use_id: null,
-  });
-  // Rewind anchor: the SDK echoes this prompt back with its Claude-side uuid,
-  // at which point a user_message item carrying the revertToken is emitted.
-  session.pendingUserAnchors.push({
-    clientMessageId: input.prompt.clientMessageId,
-    text: rawPromptText(input.prompt.input.content),
-  });
-  await publishCommands(session, context);
-}
-
-/**
- * Slash-command prompts (`prompt.command`). The command word travels
- * verbatim; only free-text arguments are translated, matching the flattened
- * `/name args` handling of the ACP provider.
- */
-async function commandSession(
-  input: Extract<ProviderInput, { type: "session.prompt" }>,
-  context: DispatchContext,
-  session: ClaudeSession,
-): Promise<void> {
-  if (session.active !== null) {
-    context.emit({
-      type: "session.prompt_result",
-      sessionId: input.sessionId,
-      clientMessageId: input.prompt.clientMessageId,
-      result: { type: "failed", error: { message: "A turn is already running on this session" } },
-    });
-    return;
-  }
-  if (input.prompt.input.type !== "command") return;
-  let text = `/${input.prompt.input.name}`;
-  const args = input.prompt.input.arguments;
-  if (args.trim().length > 0) {
-    try {
-      const values = await context.loadValues();
-      const translated = values.translatePrompts
-        ? await context.translator.translate(args, "user-to-agent", {
-            contextKey: session.contextKey,
-          })
-        : args;
-      text += ` ${translated}`;
-    } catch (error) {
-      context.emit({
-        type: "session.prompt_result",
-        sessionId: input.sessionId,
+  const cancellationEpoch = session.cancellationEpoch;
+  const reserve = () => {
+    if (session.closed || session.cancellationEpoch !== cancellationEpoch || session.active !== null) {
+      context.emit({ type: "session.prompt_result", sessionId: session.id,
         clientMessageId: input.prompt.clientMessageId,
-        result: { type: "failed", error: { message: describe(error) } },
-      });
-      return;
+        result: { type: "failed", error: { message: session.closed || session.cancellationEpoch !== cancellationEpoch
+          ? "Prompt canceled before delivery" : "A turn is already running on this session" } } });
+      return undefined;
+    }
+    const active = { clientMessageId: input.prompt.clientMessageId, turnId: randomUUID(),
+      messageUuid: randomUUID(), announced: false, sent: false };
+    session.active = active;
+    return active;
+  };
+  // Reserve under the fork fence, then release it before translation. The
+  // reservation blocks a fork while Stop remains able to cancel preparation.
+  const active = context.forkCoordinator
+    ? await context.forkCoordinator.exclusive(session.contextKey, async () => reserve())
+    : reserve();
+  if (!active) return;
+  try {
+    const prompt = input.prompt.input;
+    let blocks: SdkContentBlock[];
+    let original: string;
+    if (prompt.type === "command") {
+      original = `/${prompt.name}${prompt.arguments.trim() ? ` ${prompt.arguments}` : ""}`;
+      const values = await context.loadValues();
+      const args = values.translatePrompts && prompt.arguments.trim()
+        ? await context.translator.translate(prompt.arguments, "user-to-agent", { contextKey: session.contextKey })
+        : prompt.arguments;
+      blocks = [{ type: "text", text: `/${prompt.name}${args.trim() ? ` ${args}` : ""}` }];
+    } else {
+      original = rawPromptText(prompt.content);
+      blocks = await buildMessageBlocks(prompt.content, context, session.contextKey);
+    }
+    if (session.closed || session.active !== active) return;
+    await ensureQuery(session, context, active);
+    if (session.closed || session.active !== active) return;
+    session.interrupted = false;
+    settleAutonomousTurn(session, context.emit, "completed");
+    active.announced = true;
+    context.emit({ type: "session.prompt_result", sessionId: session.id,
+      clientMessageId: active.clientMessageId, result: { type: "turn", turnId: active.turnId } });
+    context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "started" });
+    // Event listeners may synchronously request Stop on acknowledgement.
+    if (session.closed || session.active !== active) return;
+    session.pendingUserAnchors.push({ uuid: active.messageUuid, clientMessageId: active.clientMessageId, text: original });
+    active.sent = true;
+    session.sink.push({ type: "user", uuid: active.messageUuid,
+      session_id: session.claudeSessionId ?? "", parent_tool_use_id: null,
+      message: { role: "user", content: blocks } });
+    await publishCommands(session, context);
+  } catch (error) {
+    if (session.closed || session.active !== active) return;
+    session.active = null;
+    if (active.announced) {
+      context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId,
+        state: "failed", error: { message: describe(error) } });
+    } else {
+      context.emit({ type: "session.prompt_result", sessionId: session.id,
+        clientMessageId: active.clientMessageId, result: { type: "failed", error: { message: describe(error) } } });
     }
   }
-  await ensureQuery(session, context);
-  const turnId = randomUUID();
-  session.active = { clientMessageId: input.prompt.clientMessageId, turnId };
-  session.interrupted = false;
-  // Native parity: a new foreground turn supersedes an open autonomous one
-  // (background work that outlived the previous turn).
+}
+
+async function interruptSession(session: ClaudeSession, context: DispatchContext): Promise<void> {
+  session.cancellationEpoch += 1;
+  const active = session.active;
+  const query = session.query;
+  const sink = session.sink;
+  const mainTurnOrdinal = session.mainTurnOrdinal;
+  const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid));
+  session.active = null;
   settleAutonomousTurn(session, context.emit, "completed");
-  context.emit({
-    type: "session.prompt_result",
-    sessionId: input.sessionId,
-    clientMessageId: input.prompt.clientMessageId,
-    result: { type: "turn", turnId },
+  if (active) {
+    if (active.announced) context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
+    else context.emit({ type: "session.prompt_result", sessionId: session.id,
+      clientMessageId: active.clientMessageId, result: { type: "failed", error: { message: "Prompt canceled before delivery" } } });
+  }
+  denyPendingPermissions(session, context.emit, "Interrupted");
+  settleRootTools(session, context.emit, "canceled", "Interrupted");
+  // Terminalize the children owned by this Stop before control I/O yields.
+  // A newer turn may have declared different children by the time it returns.
+  if (hadMainTurn || active?.sent) session.subagents?.cancelRunningForegroundTasks();
+  if (!query) return;
+  // Establish result ownership before an asynchronous control request can yield.
+  const ownsResult = Boolean(active?.sent && hadMainTurn);
+  if (ownsResult) session.pendingInterruptedResults += 1;
+  session.interrupted = hadMainTurn;
+  const withdrawing = new Set(sink.pendingUuids);
+  const notWithdrawn = await sink.withdraw(async (uuid) => {
+    if (!query.cancelAsyncMessage) return false;
+    try { return await withTimeout(query.cancelAsyncMessage(uuid), 10_000, "Claude message withdrawal timed out"); }
+    catch (error) { console.warn(`[translate-claude] Could not withdraw message: ${describe(error)}`); return false; }
   });
-  context.emit({ type: "session.turn", sessionId: input.sessionId, turnId, state: "started" });
-  session.sink.push({
-    type: "user",
-    message: { role: "user", content: [{ type: "text", text }] },
-    parent_tool_use_id: null,
-  });
-  session.pendingUserAnchors.push({
-    clientMessageId: input.prompt.clientMessageId,
-    text: `/${input.prompt.input.name}${args.trim().length > 0 ? ` ${args}` : ""}`,
-  });
-  await publishCommands(session, context);
+  const retained = new Set(notWithdrawn);
+  session.pendingUserAnchors = session.pendingUserAnchors.filter((anchor) => !withdrawing.has(anchor.uuid) || retained.has(anchor.uuid));
+  if (session.query !== query || session.mainTurnOrdinal !== mainTurnOrdinal) return;
+  if (!hadMainTurn && notWithdrawn.length === 0) return;
+  if (!ownsResult && active?.sent) session.pendingInterruptedResults += 1;
+  session.interrupted = true;
+  // The captured query owns this stop; never interrupt a replacement process.
+  try { await withTimeout(query.interrupt(), 10_000, "Claude interrupt timed out"); }
+  catch (error) { console.warn(`[translate-claude] Interrupt failed: ${describe(error)}`); }
 }
 
 /**
- * Active-turn steering (`prompt.steer`). The message is queued behind the
- * running turn with SDK `next` priority instead of opening a new turn; the
+ * Active-turn steering (`prompt.steer`), including autonomous background
+ * work. The message joins the live query with SDK `next` priority; the
  * daemon falls back to interrupt-and-replace when this reports failure.
  */
 async function steerSession(
@@ -1255,8 +1180,10 @@ async function steerSession(
   context: DispatchContext,
   session: ClaudeSession,
 ): Promise<void> {
-  const active = session.active;
-  if (active === null || session.query === null) {
+  const active = session.active ?? session.autonomous;
+  const query = session.query;
+  const sink = session.sink;
+  if (active === null || query === null || session.compacting || (session.active !== null && !session.active.sent)) {
     context.emit({
       type: "session.prompt_result",
       sessionId: input.sessionId,
@@ -1286,20 +1213,40 @@ async function steerSession(
     });
     return;
   }
-  if (input.prompt.clearPendingPermissions === true) {
-    denyPendingForSteer(session, (event) => context.emit(event));
+  // Translation yields to the SDK pump. Never send an old turn's follow-up
+  // into a later turn or a rebuilt query after that work settles or stops.
+  if (
+    session.closed ||
+    (session.active ?? session.autonomous) !== active ||
+    session.query !== query ||
+    session.sink !== sink
+  ) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input.sessionId,
+      clientMessageId: input.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "Active turn changed while translating the follow-up" } },
+    });
+    return;
   }
-  session.sink.pushSteer({
+  const uuid = randomUUID();
+  if (input.prompt.clearPendingPermissions === true) session.permissionClearingEpoch += 1;
+  session.pendingUserAnchors.push({
+    uuid,
+    clientMessageId: input.prompt.clientMessageId,
+    text: rawPromptText(input.prompt.input.content),
+  });
+  sink.push({
     type: "user",
     message: { role: "user", content: blocks },
     parent_tool_use_id: null,
     priority: "next",
-    uuid: randomUUID(),
-  });
-  session.pendingUserAnchors.push({
-    clientMessageId: input.prompt.clientMessageId,
-    text: rawPromptText(input.prompt.input.content),
-  });
+    uuid,
+    session_id: session.claudeSessionId ?? "",
+  }, input.prompt.clearPendingPermissions === true);
+  if (input.prompt.clearPendingPermissions === true) {
+    denyPendingPermissions(session, context.emit, "Superseded by a follow-up prompt");
+  }
   context.emit({
     type: "session.prompt_result",
     sessionId: input.sessionId,
@@ -1312,15 +1259,17 @@ async function steerSession(
  * Permissions a steer supersedes are denied immediately: leaving them open
  * would block the steered turn on a card the user already moved past.
  */
-function denyPendingForSteer(
+function denyPendingPermissions(
   session: ClaudeSession,
   emit: (event: ProviderEvent) => void,
+  message: string,
 ): void {
   for (const permissionId of session.pendingPermissions.keys()) {
     const pending = session.pendingPermissions.get(permissionId);
     if (pending === undefined) continue;
     session.pendingPermissions.delete(permissionId);
-    pending.resolve({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+    pending.cleanup();
+    pending.resolve({ behavior: "deny", message });
     emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
   }
 }
@@ -1356,6 +1305,7 @@ async function buildMessageBlocks(
   const blocks: SdkContentBlock[] = [];
   const displayFragments: PromptTranslationFragment[] = [];
   let hasContent = false;
+  let slashCommandIndex = -1;
   for (const block of content) {
     if (
       typeof block === "object" &&
@@ -1364,6 +1314,7 @@ async function buildMessageBlocks(
       typeof (block as { text?: unknown }).text === "string"
     ) {
       const translated = await translatePromptFragment((block as { text: string }).text, translate);
+      if (!("mimeType" in block) && /^\/[\w:-]+(?:\s|$)/.test((block as { text: string }).text)) slashCommandIndex = blocks.length;
       displayFragments.push({ original: (block as { text: string }).text, translated });
       if (translated.trim().length > 0) hasContent = true;
       blocks.push({ type: "text", text: translated });
@@ -1393,42 +1344,64 @@ async function buildMessageBlocks(
   if (!hasContent) {
     throw new Error("Refusing to send an empty prompt");
   }
+  if (slashCommandIndex >= 0 && slashCommandIndex < blocks.length - 1) {
+    const [command] = blocks.splice(slashCommandIndex, 1);
+    blocks.push(command);
+  }
   if (values.translatePrompts) await context.translator.rememberPromptDisplay(displayFragments, { contextKey });
   return blocks;
 }
 
-async function ensureQuery(session: ClaudeSession, context: DispatchContext): Promise<void> {
+async function ensureQuery(session: ClaudeSession, context: DispatchContext, preparing?: NonNullable<ClaudeSession["active"]>): Promise<void> {
+  if (session.query !== null && session.restartForThinking) {
+    session.restartForThinking = false;
+    await resetQuery(session, context.emit, true);
+  }
   if (session.query !== null) return;
+  if (session.closed) throw new Error("Claude session is closed");
   session.subagents?.resetProcessTasks();
   const values = await context.loadValues();
+  if (session.closed || (preparing && session.active !== preparing)) throw new Error("Claude prompt was canceled during startup");
+  if (session.query !== null) return;
   // Prefer the settings override, then the user's PATH claude (their own
   // install and login); the daemon-bundled CLI is only the last resort.
   const executable =
     values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const permissionMode = session.desiredMode ?? undefined;
   const providerOptions = resolveProviderOptions(session);
+  validateThinking(session.desiredThinking, session.desiredModel);
   const thinking = thinkingStartOptions(session.desiredThinking);
-  const effortLevel =
-    thinking.settings !== undefined &&
-    typeof thinking.settings === "object" &&
-    thinking.settings !== null &&
-    "effortLevel" in thinking.settings
-      ? (thinking.settings as { effortLevel?: unknown }).effortLevel
-      : undefined;
   const settings: Record<string, unknown> = {
     ...providerOptions.settings,
-    // Thinking effort wins over a leftover providerOptions.settings.effortLevel
-    // so a mode picker change is not silently ignored.
-    ...(effortLevel !== undefined ? { effortLevel } : {}),
+    ...(typeof thinking.settings === "object" ? thinking.settings : {}),
+
     ...(session.fastMode ? { fastMode: true } : {}),
+  };
+  if (thinking.effort !== undefined) delete settings.effortLevel;
+  const observeEffort = async (input: unknown): Promise<Record<string, never>> => {
+    try { session.subagents?.observeHook(input); }
+    catch (error) { console.warn(`[translate-claude] Could not observe child effort: ${describe(error)}`); }
+    return {};
   };
   const options: Options = {
     cwd: session.config.cwd,
-    env: { ...process.env, ...omitTranslationBridgeEnv(session.config.env) },
+    env: {
+      ...process.env,
+      ...omitTranslationBridgeEnv(session.config.env),
+      CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+    },
     abortController: session.abort,
     // Token-level stream events drive the mid-turn context ring (the timeline
     // itself still renders complete messages).
     includePartialMessages: true,
+    forwardSubagentText: true,
+    perTaskStopAffordance: true,
+    persistSession: session.config.persist,
+    hooks: {
+      PreToolUse: [{ hooks: [observeEffort] }],
+      PostToolUse: [{ hooks: [observeEffort] }],
+      SubagentStop: [{ hooks: [observeEffort] }],
+    },
     // Mirror the native provider: load the user's settings/CLAUDE.md layers.
     settingSources: ["user", "project", "local"],
     // Required for provider-level file rewind.
@@ -1452,14 +1425,14 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
     // setPermissionMode("bypassPermissions") does not fail after a restart
     // (native provider parity).
     allowDangerouslySkipPermissions: true,
-    // Leave perTaskStopAffordance undeclared until the client exposes a
-    // stop_task control. The CLI's default then lets Stop end background
-    // tasks too, rather than leaving work the user cannot directly stop.
+    // Like native Paseo, Stop aborts the main turn. Claude can stop a helper
+    // explicitly through TaskStop without killing unrelated background work.
     ...(permissionMode !== undefined
       ? { permissionMode: permissionMode as Options["permissionMode"] }
       : {}),
     ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
     ...(thinking.thinking !== undefined ? { thinking: thinking.thinking } : {}),
+    ...(thinking.effort !== undefined ? { effort: thinking.effort } : {}),
     ...(Object.keys(settings).length > 0 ? { settings } : {}),
     ...providerOptions.spread,
     canUseTool: ((toolName: string, input: Record<string, unknown>, toolOptions: unknown) =>
@@ -1473,6 +1446,12 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext): Pr
   };
   const servers = normalizeMcpServers(session.config.mcpServers);
   if (servers !== undefined) options.mcpServers = servers;
+  session.sink.close();
+  session.messages.clear();
+  session.sink = new ClaudeMessageInput();
+  session.mainTurnInFlight = false;
+  session.compacting = false;
+  session.commandsPublished = false;
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
   session.pump = pumpQuery(session, query, context);
@@ -1624,109 +1603,87 @@ async function publishCommands(session: ClaudeSession, context: DispatchContext)
 }
 
 /** Thinking selection → query-start options (none for "default"). */
-function thinkingStartOptions(thinking: string | null): Pick<Options, "thinking" | "settings"> {
+function thinkingStartOptions(thinking: string | null): Pick<Options, "thinking" | "effort" | "settings"> {
   if (thinking === null || thinking === "default") return {};
   if (thinking === "adaptive") return { thinking: { type: "adaptive" } };
   if (thinking === "off") return { thinking: { type: "disabled" } };
-  if (START_EFFORT.has(thinking)) {
-    return { settings: { effortLevel: thinking as "low" | "medium" | "high" | "xhigh" } };
+  if (thinking === "ultracode") return { thinking: { type: "adaptive" }, effort: "xhigh", settings: { ultracode: true } };
+  if (START_EFFORT.has(thinking) || thinking === "max") {
+    return { thinking: { type: "adaptive" }, effort: thinking as NonNullable<Options["effort"]> };
   }
-  // "max" is session-scoped in the SDK and cannot persist at query start;
-  // start at the closest persisted level instead.
-  if (thinking === "max") {
-    return { settings: { effortLevel: "xhigh" } };
-  }
-  return {};
+  throw new Error(`Unknown Claude thinking option: ${thinking}`);
 }
 
-/**
- * Applies model/mode/thinking/settings changes; live on the running query
- * when possible. Mode changes also maintain the plan resume anchor the plan
- * permission actions use (mirrors the native provider).
- */
+function observePermissionMode(session: ClaudeSession, mode: string): void {
+  const previous = session.desiredMode ?? "default";
+  session.desiredMode = mode === "default" ? null : mode;
+  if (mode === "plan") {
+    if (previous !== "plan") session.planResumeMode = previous;
+  } else session.planResumeMode = mode;
+}
+
+function validateThinking(thinking: string | null, model: string | null): void {
+  thinkingStartOptions(thinking);
+  if (thinking === "off" && findClaudeModel(model)?.supportsThinkingDisabled !== true) {
+    throw new Error(`Thinking cannot be disabled for model ${model ?? "default"}`);
+  }
+}
+
+/** Commit each live setting only after the corresponding SDK call succeeds. */
 async function applyConfigChanges(
   session: ClaudeSession,
-  changes: {
-    model?: string | null;
-    mode?: string | null;
-    thinkingOption?: string | null;
-    settings?: Readonly<Record<string, unknown>>;
-  },
+  changes: { model?: string | null; mode?: string | null; thinkingOption?: string | null; settings?: Readonly<Record<string, unknown>> },
 ): Promise<void> {
+  const model = Object.hasOwn(changes, "model") ? readConfigured(changes.model ?? undefined) : session.desiredModel;
+  const nextModel = model === "default" ? null : model ?? null;
+  const thinking = Object.hasOwn(changes, "thinkingOption") ? readConfigured(changes.thinkingOption ?? undefined) : session.desiredThinking;
+  const nextThinking = thinking === "default" ? null : thinking ?? null;
+  if (Object.hasOwn(changes, "thinkingOption")) validateThinking(nextThinking, nextModel);
+  if (Object.hasOwn(changes, "mode") && changes.mode && !VALID_MODES.has(changes.mode)) throw new Error(`Unknown Claude mode: ${changes.mode}`);
   if (Object.hasOwn(changes, "model")) {
-    const model = changes.model ?? null;
-    session.desiredModel = model === null || model === "default" ? null : model;
-    session.fastModeSupported = claudeModelSupportsFastMode(session.desiredModel);
-    // The ring denominator follows the model: re-resolve it from the manifest.
-    session.contextWindowMaxTokens =
-      findClaudeModel(session.desiredModel)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
-    if (session.fastMode && !session.fastModeSupported) {
-      session.fastMode = false;
-      if (session.query?.applyFlagSettings !== undefined) {
-        await session.query.applyFlagSettings({ fastMode: false }).catch(() => undefined);
-      }
+    if (session.query) {
+      if (!session.query.setModel) throw new Error("Claude does not support live model changes");
+      await session.query.setModel(nextModel ?? undefined);
     }
-    if (session.query?.setModel !== undefined) {
-      await session.query.setModel(session.desiredModel ?? undefined).catch(() => undefined);
+    session.desiredModel = nextModel;
+    session.runtimeModel = null;
+    session.fastModeSupported = claudeModelSupportsFastMode(nextModel);
+    session.contextWindowMaxTokens = findClaudeModel(nextModel)?.contextWindowMaxTokens ?? null;
+    if (session.desiredThinking === "off" && findClaudeModel(nextModel)?.supportsThinkingDisabled !== true) {
+      session.desiredThinking = findClaudeModel(nextModel)?.defaultThinkingOption ?? null;
+      session.restartForThinking = true;
+    }
+    if (session.fastMode && !session.fastModeSupported) {
+      if (session.query) {
+        if (!session.query.applyFlagSettings) throw new Error("Claude does not support live fast-mode changes");
+        await session.query.applyFlagSettings({ fastMode: false });
+      }
+      session.fastMode = false;
     }
   }
   if (Object.hasOwn(changes, "mode")) {
-    const mode = changes.mode ?? null;
-    const previousMode = session.desiredMode ?? "default";
-    if (mode === null || mode === "default") {
-      session.desiredMode = null;
-    } else if (VALID_MODES.has(mode)) {
-      session.desiredMode = mode;
+    const mode = changes.mode ?? "default";
+    if (session.query) {
+      if (!session.query.setPermissionMode) throw new Error("Claude does not support live permission-mode changes");
+      await session.query.setPermissionMode(mode);
     }
-    // Track the mode a plan approval should return to (see respondToPermission).
-    if (session.desiredMode === "plan") {
-      if (previousMode !== "plan") session.planResumeMode = previousMode;
-    } else {
-      session.planResumeMode = session.desiredMode ?? "default";
-    }
-    if (session.query?.setPermissionMode !== undefined) {
-      // Always apply live, including the return to "default": a stored-only
-      // clear would leave a running bypass session auto-approving while the
-      // UI already shows Always Ask.
-      await session.query
-        .setPermissionMode(session.desiredMode ?? "default")
-        .catch(() => undefined);
-    }
+    observePermissionMode(session, mode);
   }
-  if (Object.hasOwn(changes, "thinkingOption")) {
-    const thinking = changes.thinkingOption ?? null;
-    session.desiredThinking =
-      thinking === null || thinking === "default" || thinking.length === 0 ? null : thinking;
-    if (session.query?.applyFlagSettings !== undefined) {
-      await session.query
-        .applyFlagSettings(thinkingFlagSettings(session.desiredThinking))
-        .catch(() => undefined);
+  if (Object.hasOwn(changes, "thinkingOption") && session.desiredThinking !== nextThinking) {
+    session.desiredThinking = nextThinking;
+    // Constructor-level thinking options must be rebuilt at the next turn;
+    // flag settings cannot override a query launched with thinking disabled.
+    session.restartForThinking = session.query !== null;
+  }
+  if (changes.settings && Object.hasOwn(changes.settings, "fast_mode")) {
+    const enabled = changes.settings.fast_mode === true;
+    if (enabled && !session.fastModeSupported) throw new Error("Fast mode is unavailable for the selected Claude model");
+    if (session.query) {
+      if (!session.query.applyFlagSettings) throw new Error("Claude does not support live fast-mode changes");
+      await session.query.applyFlagSettings({ fastMode: enabled });
     }
+    session.fastMode = enabled;
   }
-  if (Object.hasOwn(changes, "settings")) {
-    const settings = changes.settings ?? {};
-    if (Object.hasOwn(settings, "fast_mode")) {
-      session.fastMode = settings["fast_mode"] === true;
-      if (session.fastMode && !session.fastModeSupported) {
-        session.fastMode = false;
-      }
-      if (session.query?.applyFlagSettings !== undefined) {
-        await session.query.applyFlagSettings({ fastMode: session.fastMode }).catch(() => undefined);
-      }
-    }
-  }
-}
-
-/** Live thinking application through the flag-settings layer. */
-function thinkingFlagSettings(thinking: string | null): Record<string, unknown> {
-  // Null clears a flag-layer key (documented SDK contract), so every branch
-  // resets what the other modes may have set.
-  if (thinking === null || thinking === "default") {
-    return { effortLevel: null, alwaysThinkingEnabled: null };
-  }
-  if (thinking === "adaptive") return { effortLevel: null, alwaysThinkingEnabled: true };
-  if (thinking === "off") return { effortLevel: null, alwaysThinkingEnabled: false };
-  return { effortLevel: thinking };
 }
 
 /** Last catalog mapped from the CLI; reused for session.config states. */
@@ -1751,7 +1708,7 @@ async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
     values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const abort = new AbortController();
   const query = context.queryFactory({
-    prompt: createPromptSink().iterable,
+    prompt: new ClaudeMessageInput().iterable,
     options: {
       cwd: process.cwd(),
       env: { ...process.env },
@@ -1800,6 +1757,7 @@ function thinkingOptionsForModel(
   const options: NonNullable<ProviderModel["thinkingOptions"]> = [
     { id: "default", label: "Default", isDefault: true },
   ];
+  if (findClaudeModel(info.value)?.supportsThinkingDisabled === true) options.push({ id: "off", label: "Off" });
   if (info.supportsAdaptiveThinking === true) {
     options.push({ id: "adaptive", label: "Adaptive" });
   }
@@ -1808,6 +1766,7 @@ function thinkingOptionsForModel(
       options.push({ id: level, label: labelForEffort(level) });
     }
   }
+  if (info.supportedEffortLevels?.includes("xhigh")) options.push({ id: "ultracode", label: "Ultra Code" });
   return options;
 }
 
@@ -1861,21 +1820,27 @@ function waitForPermissionResponse(
   question?: PendingPermission["question"],
   plan = false,
 ): Promise<PermissionResultLike | null> {
+  if (session.closed || toolOptions.signal.aborted) {
+    return Promise.resolve({ behavior: "deny", message: "Permission request expired" });
+  }
+  if (session.sink.clearsPermissions) {
+    return Promise.resolve({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+  }
   return new Promise((resolve) => {
+    const abort = () => {
+      const pending = session.pendingPermissions.get(permissionId);
+      if (!pending) return;
+      session.pendingPermissions.delete(permissionId);
+      pending.cleanup();
+      pending.resolve({ behavior: "deny", message: "Permission request expired" });
+      emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
+    };
     session.pendingPermissions.set(permissionId, {
-      resolve,
+      resolve, cleanup: () => toolOptions.signal.removeEventListener("abort", abort),
       ...(question !== undefined ? { question } : {}),
       ...(plan ? { plan: true } : {}),
     });
-    toolOptions.signal.addEventListener("abort", () => {
-      const pending = session.pendingPermissions.get(permissionId);
-      if (pending === undefined) return;
-      session.pendingPermissions.delete(permissionId);
-      pending.resolve({ behavior: "deny", message: "Permission request expired" });
-      // Resolve the daemon-side card too: a superseded request would otherwise
-      // linger until the turn ends and ignore taps.
-      emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
-    });
+    toolOptions.signal.addEventListener("abort", abort, { once: true });
     emit({ type: "session.permission", sessionId: session.id, request });
   });
 }
@@ -1978,6 +1943,12 @@ async function requestQuestionPermission(
   context: DispatchContext,
 ): Promise<PermissionResultLike | null> {
   const emit = (event: ProviderEvent) => context.emit(event);
+  const cancellationEpoch = session.cancellationEpoch;
+  const query = session.query;
+  const permissionClearingEpoch = session.permissionClearingEpoch;
+  if (session.sink.clearsPermissions) {
+    return { behavior: "deny", message: "Superseded by a follow-up prompt" };
+  }
   const permissionId = toolOptions.requestId;
   const requestInput = normalizeQuestionRequestInput(
     JSON.parse(JSON.stringify(input)) as Record<string, unknown>,
@@ -1997,7 +1968,9 @@ async function requestQuestionPermission(
     // Display-only: keep the original text rather than breaking the turn.
     translatedQuestions = originalQuestions;
   }
-  if (toolOptions.signal.aborted || session.closed) {
+  if (toolOptions.signal.aborted || session.closed ||
+      session.cancellationEpoch !== cancellationEpoch || session.query !== query ||
+      session.permissionClearingEpoch !== permissionClearingEpoch) {
     // The turn went away while the display translation was in flight
     // (close, teardown, or SDK abort): deny without emitting or registering,
     // so no ghost card appears and no pending is left for teardown to wait on.
@@ -2029,44 +2002,36 @@ async function respondToPermission(
   const emit = (event: ProviderEvent) => context.emit(event);
   if (session === undefined) return;
   const pending = session.pendingPermissions.get(permissionId);
-  if (pending === undefined) return;
-  session.pendingPermissions.delete(permissionId);
-  if (response.behavior === "allow") {
-    if (pending.question !== undefined) {
-      await resolveQuestionAllow(pending.question, response, pending.resolve, context, session.contextKey);
-    } else {
-      if (pending.plan === true) {
-        // A plan approval switches the mode the native provider would switch
-        // to, then lets the turn continue on the approved plan.
-        const shouldResumeBypass =
-          response.selectedActionId === "implement_resume" &&
-          session.planResumeMode === "bypassPermissions";
-        const targetMode = shouldResumeBypass ? "bypassPermissions" : "acceptEdits";
-        session.desiredMode = targetMode;
-        session.planResumeMode = targetMode;
-        if (session.forkConfiguration) emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
-        if (session.query?.setPermissionMode !== undefined) {
-          await session.query.setPermissionMode(targetMode).catch(() => undefined);
-        }
-        emit({
-          type: "session.config",
-          sessionId: session.id,
-          config: configStateFor(session),
-        });
-      }
-      pending.resolve({
-        behavior: "allow",
-        updatedInput: response.updatedInput,
-        updatedPermissions: response.updatedPermissions,
-      });
-    }
-  } else {
-    pending.resolve({
-      behavior: "deny",
-      message: response.message ?? "Denied",
-      interrupt: response.interrupt,
+  if (!pending || pending.resolving) return;
+  pending.resolving = true;
+  let result: PermissionResultLike | null;
+  if (response.behavior === "deny") {
+    result = { behavior: "deny", message: response.message ?? "Denied", interrupt: response.interrupt };
+  } else if (pending.question) {
+    const question = pending.question;
+    result = await new Promise<PermissionResultLike | null>((resolve) => {
+      void resolveQuestionAllow(question, response, resolve, context, session.contextKey);
     });
+  } else {
+    result = { behavior: "allow", updatedInput: response.updatedInput, updatedPermissions: response.updatedPermissions };
+    if (pending.plan) {
+      const targetMode = response.selectedActionId === "implement_resume" && session.planResumeMode === "bypassPermissions"
+        ? "bypassPermissions" : "acceptEdits";
+      try {
+        await applyConfigChanges(session, { mode: targetMode });
+        if (session.forkConfiguration) emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
+        emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+      } catch (error) {
+        result = { behavior: "deny", message: `Could not apply plan permission mode: ${describe(error)}` };
+      }
+    }
   }
+  // A Stop or SDK abort can settle a request while its answer is translating
+  // or its plan mode is being applied. Never approve it after cancellation.
+  if (session.pendingPermissions.get(permissionId) !== pending) return;
+  session.pendingPermissions.delete(permissionId);
+  pending.cleanup();
+  pending.resolve(result);
   emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
 }
 
@@ -2155,6 +2120,22 @@ async function pumpQuery(
  * only surface a runtime failure when the exit was not interrupt-driven.
  */
 
+function settleRootTools(
+  session: ClaudeSession,
+  emit: (event: ProviderEvent) => void,
+  status: "canceled" | "failed",
+  message: string,
+): void {
+  for (const [id, name] of session.toolNames) {
+    emit({ type: "timeline.item", sessionId: session.id,
+      item: { type: "tool_call", id, callId: id, name,
+        detail: describeFinishedTool(name, session.toolInputs.get(id), message),
+        ...(status === "failed" ? { status, error: message } : { status, error: null }) } });
+  }
+  session.toolNames.clear();
+  session.toolInputs.clear();
+}
+
 function finishDeadQuery(
   session: ClaudeSession,
   message: string,
@@ -2162,13 +2143,23 @@ function finishDeadQuery(
 ): void {
   session.query = null;
   session.pump = null;
+  session.abort.abort();
+  session.abort = new AbortController();
+  session.sink.close();
+  session.messages.clear();
+  session.pendingUserAnchors = [];
+  session.mainTurnInFlight = false;
+  session.compacting = false;
   const wasInterrupted = session.interrupted;
   session.interrupted = false;
   session.pendingInterruptedResults = 0;
   const active = session.active;
-  if (active !== null) {
+  if (active !== null && (active.announced || !wasInterrupted)) {
     session.active = null;
-    if (wasInterrupted) {
+    if (!active.announced) {
+      emit({ type: "session.prompt_result", sessionId: session.id, clientMessageId: active.clientMessageId,
+        result: { type: "failed", error: { message } } });
+    } else if (wasInterrupted) {
       emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
     } else {
       emit({
@@ -2180,6 +2171,7 @@ function finishDeadQuery(
       });
     }
   }
+  settleRootTools(session, emit, wasInterrupted ? "canceled" : "failed", message);
   // A dead process ends backgrounded work too: its autonomous turn settles
   // alongside the foreground one (canceled when the user interrupted).
   if (session.autonomous !== null) {
@@ -2190,6 +2182,7 @@ function finishDeadQuery(
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
   session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
+    pending.cleanup();
     pending.resolve({ behavior: "deny", message: "Claude session ended" });
   }
   session.pendingPermissions.clear();
@@ -2206,28 +2199,8 @@ function finishDeadQuery(
 }
 
 /**
- * Native parity for the SDK messages that mark live work outside a turn
- * (the native provider's isAssistantishMessage): a backgrounded subagent
- * or job heartbeats through tool_progress and settles with a
- * task_notification; trailing assistant output and stream events count
- * too. task_started/task_updated/task_progress carry no such signal.
- */
-function isAssistantishSdkMessage(message: SDKMessage): boolean {
-  return (
-    message.type === "assistant" ||
-    message.type === "stream_event" ||
-    message.type === "tool_progress" ||
-    (message.type === "system" && message.subtype === "task_notification")
-  );
-}
-
-/**
- * Mirrors the native provider's autonomous turn. Without it, a background
- * subagent or job that outlives its turn updates only timelines and
- * subagent tracks, so the daemon-side agent settles to idle and the
- * session list shows a still-working session as stopped. Opening a
- * synthetic root turn makes the daemon track an autonomous run and keep
- * the session's status "running" until the turn settles.
+ * Mirrors the native provider's main-session wake-up turn. Child output
+ * continues on its own timeline without opening a root turn.
  */
 function startAutonomousTurn(session: ClaudeSession, emit: (event: ProviderEvent) => void): void {
   if (session.autonomous !== null) return;
@@ -2261,18 +2234,50 @@ function handleSdkMessage(
   context: DispatchContext,
 ): void {
   const emit = (event: ProviderEvent) => context.emit(event);
-  // Native parity: SDK activity with no open foreground turn is live work —
-  // a backgrounded subagent or job that outlived its turn, or trailing
-  // output. Open an autonomous turn so the daemon keeps the session listed
-  // as running; the trailing garbage of a killed foreground request must
-  // not wake it, or a turn nothing closes wedges the status at running.
-  // Stop also kills idle background work: keep consuming its notifications
-  // without reopening the root turn while the interrupt is outstanding.
+  const lifecycle = message as unknown as { type?: unknown; state?: unknown; command_uuid?: unknown };
+  if (lifecycle.type === "command_lifecycle" && typeof lifecycle.command_uuid === "string" &&
+      typeof lifecycle.state === "string" && lifecycle.state !== "queued") {
+    session.sink.started(lifecycle.command_uuid);
+    if (lifecycle.state === "started") session.mainTurnInFlight = true;
+    else session.pendingUserAnchors = session.pendingUserAnchors.filter((anchor) => anchor.uuid !== lifecycle.command_uuid);
+    return;
+  }
+  if (message.type === "system" && message.subtype === "init") {
+    // A fresh main-loop bracket proves an older interrupted request is over,
+    // including an idle interrupt that never produced a result at all.
+    session.mainTurnInFlight = true;
+    session.mainTurnOrdinal += 1;
+    session.interrupted = false;
+    session.pendingInterruptedResults = 0;
+    if (message.session_id) {
+      session.claudeSessionId = message.session_id;
+      emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
+    }
+    if (message.model) {
+      session.runtimeModel = message.model;
+      session.contextWindowMaxTokens = findClaudeModel(message.model)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
+    }
+    if (VALID_MODES.has(message.permissionMode)) observePermissionMode(session, message.permissionMode);
+    emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+  }
+  // Session state includes background children: "running" never opens a
+  // root turn. "idle" closes a wake-up turn, but may trail an earlier
+  // request, so it must never close a newly submitted foreground turn.
+  if (message.type === "system" && message.subtype === "session_state_changed") {
+    if (message.state === "idle") {
+      session.mainTurnInFlight = false;
+      settleAutonomousTurn(session, emit, "completed");
+    }
+    return;
+  }
+  // Only Claude's own turn bracket starts autonomous root work. Background
+  // task frames, child text and tool heartbeats have no root result to close
+  // a turn, and must not make the daemon replace an imaginary active run.
   if (
     session.active === null &&
     !session.interrupted &&
     session.pendingInterruptedResults === 0 &&
-    isAssistantishSdkMessage(message)
+    message.type === "system" && message.subtype === "init"
   ) {
     startAutonomousTurn(session, emit);
   }
@@ -2282,10 +2287,16 @@ function handleSdkMessage(
   if (message.type === "system") {
     if (message.subtype === "init") void publishCommands(session, context);
     if (message.subtype === "status") {
+      if (message.permissionMode && VALID_MODES.has(message.permissionMode)) {
+        observePermissionMode(session, message.permissionMode);
+        emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+      }
+      session.compacting = message.status === "compacting";
       noteCompactionStatus(session, message, emit);
       return;
     }
     if (message.subtype === "compact_boundary") {
+      session.compacting = false;
       noteCompactionBoundary(session, message, emit);
       return;
     }
@@ -2301,57 +2312,17 @@ function handleSdkMessage(
     // rendering complete messages. Sidechain frames already returned above
     // so they never move the parent ring.
     noteStreamEventUsage(session, message, emit);
+    for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
     noteAssistantContextUsage(session, message.message);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
+    for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
     for (const block of content) {
-      if (
-        typeof block === "object" &&
-        block !== null &&
-        (block as { type?: unknown }).type === "text" &&
-        typeof (block as { text?: unknown }).text === "string"
-      ) {
-        const text = (block as { text: string }).text;
-        if (text.trim().length === 0) continue;
-        emit({
-          type: "timeline.item",
-          sessionId: session.id,
-          item: {
-            type: "assistant_message",
-            id: message.uuid,
-            text,
-            messageId: message.uuid,
-          },
-        });
-      } else if (
-        typeof block === "object" &&
-        block !== null &&
-        (block as { type?: unknown }).type === "thinking" &&
-        typeof (block as { thinking?: unknown }).thinking === "string"
-      ) {
-        const thinking = (block as { thinking: string }).thinking;
-        if (thinking.trim().length === 0) continue;
-        // Reasoning streams in the agent language and is not translated;
-        // the daemon renders it through the built-in reasoning projection.
-        emit({
-          type: "timeline.item",
-          sessionId: session.id,
-          item: {
-            type: "reasoning",
-            id: message.uuid,
-            text: thinking,
-          },
-        });
-      } else if (
-        typeof block === "object" &&
-        block !== null &&
-        ((block as { type?: unknown }).type === "tool_use" ||
-          (block as { type?: unknown }).type === "mcp_tool_use" ||
-          (block as { type?: unknown }).type === "server_tool_use")
-      ) {
+      if (typeof block === "object" && block !== null &&
+          (block.type === "tool_use" || block.type === "mcp_tool_use" || block.type === "server_tool_use")) {
         const use = block as { id: string; name: string; input?: unknown };
         if (typeof use.id !== "string" || typeof use.name !== "string") continue;
         session.toolNames.set(use.id, use.name);
@@ -2401,6 +2372,8 @@ function handleSdkMessage(
             detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output.text),
           },
         });
+        session.toolNames.delete(result.tool_use_id);
+        session.toolInputs.delete(result.tool_use_id);
         // Tool results can carry screenshots as base64 image blocks. Base64
         // must never reach timeline text (it would be sent to the
         // translation endpoint), so each image is materialized to a
@@ -2430,6 +2403,8 @@ function handleSdkMessage(
     return;
   }
   if (message.type === "result") {
+    session.mainTurnInFlight = false;
+    session.compacting = false;
     // Detect a missing resume against the id we asked the SDK to resume,
     // BEFORE overwriting it with this result's session_id. Official result
     // fixtures often omit session_id entirely; matching the stored id is
@@ -2474,8 +2449,11 @@ function handleSdkMessage(
       // kill the daemon session. The next prompt rebuilds without resume.
       session.detached = true;
       session.abort.abort();
+      session.sink.close();
+      session.pendingUserAnchors = [];
       session.abort = new AbortController();
       for (const pending of session.pendingPermissions.values()) {
+        pending.cleanup();
         pending.resolve({ behavior: "deny", message: "Claude session ended" });
       }
       session.pendingPermissions.clear();
@@ -2483,7 +2461,7 @@ function handleSdkMessage(
       session.pump = null;
       return;
     }
-    session.claudeSessionId = message.session_id;
+    if (message.session_id) session.claudeSessionId = message.session_id;
     emit({
       type: "session.persistence",
       sessionId: session.id,
@@ -2509,7 +2487,11 @@ function handleSdkMessage(
     // result arriving with only an autonomous turn open settles it.
     const wasInterrupted = session.interrupted;
     session.interrupted = false;
-    const active = session.active;
+    if (message.subtype !== "success" || message.is_error) {
+      const reason = message.subtype === "success" ? message.result : (message.errors[0] ?? "Claude turn failed");
+      settleRootTools(session, emit, wasInterrupted ? "canceled" : "failed", reason);
+    }
+    const active = session.active?.announced ? session.active : null;
     if (active === null) {
       if (wasInterrupted) {
         settleAutonomousTurn(session, emit, "canceled");
@@ -2938,7 +2920,8 @@ function noteRewindAnchor(
   }
   if (session.rewindUserMessageIds.includes(uuid)) return;
   session.rewindUserMessageIds.push(uuid);
-  const anchor = session.pendingUserAnchors.shift();
+  const matched = session.pendingUserAnchors.findIndex((entry) => entry.uuid === uuid);
+  const [anchor] = session.pendingUserAnchors.splice(matched >= 0 ? matched : 0, 1);
   if (anchor === undefined) return;
   emit({
     type: "timeline.item",
@@ -2957,9 +2940,12 @@ function noteRewindAnchor(
 async function teardownSession(session: ClaudeSession): Promise<void> {
   if (session.closed) return;
   session.closed = true;
+  session.cancellationEpoch += 1;
+  session.sink.close();
   session.abort.abort();
   session.subagents?.reset();
   for (const pending of session.pendingPermissions.values()) {
+    pending.cleanup();
     pending.resolve({ behavior: "deny", message: "Session closed" });
   }
   session.pendingPermissions.clear();

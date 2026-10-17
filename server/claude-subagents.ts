@@ -6,6 +6,9 @@ import type {
   ProviderToolCallDetail,
 } from "@getpaseo/plugin/server/provider";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
+import { ClaudeMessageStream } from "./claude-message-stream";
+import { readClaudeWorkflowResultFile } from "./claude-workflow-output";
+import { findClaudeModel } from "./claude-model-manifest";
 
 /**
  * Live Task-protocol tracker for the Translate (Claude Code) provider.
@@ -60,6 +63,7 @@ interface TaskNotificationShape {
   task_id: string;
   status?: unknown;
   usage?: { total_tokens?: unknown };
+  output_file?: unknown;
 }
 
 interface TaskProgressShape {
@@ -75,6 +79,11 @@ interface ChildState {
   turnOpen: boolean;
   toolNames: Map<string, string>;
   toolInputs: Map<string, unknown>;
+  messages: ClaudeMessageStream;
+  model?: string;
+  effort?: string;
+  totalTokens?: number;
+  lastPresentation?: string;
 }
 
 const SUBAGENT_TASK_TYPE = "local_agent";
@@ -119,13 +128,6 @@ function readTotalTokens(usage: { total_tokens?: unknown } | undefined): number 
   return Math.round(usage.total_tokens);
 }
 
-function timelineId(fallback: string, ...candidates: Array<string | undefined>): string {
-  for (const candidate of candidates) {
-    if (candidate !== undefined && candidate.length > 0) return candidate;
-  }
-  return fallback;
-}
-
 /**
  * Degraded rendering of one child timeline item into its parent timeline,
  * shared by the live tracker fallback and the replay path. Child prompts
@@ -159,6 +161,7 @@ export class ClaudeSubagentTracker {
   private readonly taskInputs = new Map<string, Record<string, unknown>>();
   private readonly declaredIds = new Set<string>();
   private readonly workflowTaskIds = new Set<string>();
+  private readonly lastWorkflowResultByTaskId = new Map<string, string>();
   private readonly backgroundedIds = new Set<string>();
   private readonly children = new Map<string, ChildState>();
   private readonly lastStatusById = new Map<string, SubagentStatus>();
@@ -187,6 +190,7 @@ export class ClaudeSubagentTracker {
     this.taskInputs.clear();
     this.declaredIds.clear();
     this.workflowTaskIds.clear();
+    this.lastWorkflowResultByTaskId.clear();
     this.backgroundedIds.clear();
     this.children.clear();
     this.lastStatusById.clear();
@@ -194,7 +198,7 @@ export class ClaudeSubagentTracker {
 
   /** Record a `tool_use` block from a root (non-sidechain) assistant message. */
   noteRootToolUse(toolUseId: string, name: string, input: unknown): void {
-    if (name === "Task" && typeof input === "object" && input !== null) {
+    if ((name === "Task" || name === "Agent") && typeof input === "object" && input !== null) {
       this.taskInputs.set(toolUseId, input as Record<string, unknown>);
     }
   }
@@ -295,7 +299,14 @@ export class ClaudeSubagentTracker {
         ? this.children.get(this.ownerCanonicalByToolUseId.get(parentToolUseId) as string)
         : undefined);
     if (!child) return;
+    for (const item of child.messages.observe(message)) {
+      this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
+    }
     if (message.type === "assistant") {
+      if (typeof message.message.model === "string" && message.message.model) {
+        child.model = message.message.model;
+        this.publishPresentation(child);
+      }
       this.handleSidechainAssistant(child, message);
     } else if (message.type === "user") {
       this.handleSidechainUser(child, message);
@@ -326,6 +337,32 @@ export class ClaudeSubagentTracker {
     return `subagent:${this.rootSessionId}:${canonicalId}`;
   }
 
+  /** Observation-only SDK hooks report effective effort, including model downgrades. */
+  observeHook(input: unknown): void {
+    if (typeof input !== "object" || input === null) return;
+    const hook = input as { agent_id?: unknown; effort?: { level?: unknown } };
+    if (typeof hook.agent_id !== "string" || typeof hook.effort?.level !== "string") return;
+    const id = this.subagentIdByTaskId.get(hook.agent_id);
+    const child = id ? this.children.get(id) : undefined;
+    if (!child || child.effort === hook.effort.level) return;
+    child.effort = hook.effort.level;
+    this.publishPresentation(child);
+  }
+
+  private publishPresentation(child: ChildState, includeUsage = false): void {
+    const parts = [child.title];
+    if (child.model) parts.push(findClaudeModel(child.model)?.label ?? child.model);
+    if (child.effort) parts.push(child.effort === "xhigh" ? "Extra High" : child.effort[0].toUpperCase() + child.effort.slice(1));
+    if (includeUsage && child.totalTokens) parts.push(`${child.totalTokens.toLocaleString("en-US")} tokens`);
+    const text = parts.join(" · ");
+    if (parts.length === 1 || text === child.lastPresentation) return;
+    child.lastPresentation = text;
+    // Protocol v1 has no mutable child subtitle event. Expose the same facts
+    // through the child's supported timeline, with live tokens in session.usage.
+    this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId,
+      item: { type: "notification", id: `${child.canonicalId}:metadata:${text}`, level: "info", message: text } });
+  }
+
   private observeTaskStarted(message: TaskStartedShape): void {
     const id = readString(message.tool_use_id);
     const ownerCanonical = id !== undefined ? this.ownerCanonicalByToolUseId.get(id) : undefined;
@@ -334,10 +371,16 @@ export class ClaudeSubagentTracker {
       return;
     }
     const existingId = this.subagentIdByTaskId.get(message.task_id);
+    const backgroundedId = existingId ?? id;
+    if (message.is_backgrounded === true) this.backgroundedIds.add(backgroundedId);
+    else if (message.is_backgrounded === false) this.backgroundedIds.delete(backgroundedId);
     if (existingId !== undefined) {
       this.canonicalIdByToolUseId.set(id, existingId);
       const child = this.children.get(existingId);
       if (!child) return;
+      this.lastStatusById.set(existingId, "running");
+      this.lastWorkflowResultByTaskId.delete(message.task_id);
+      child.messages.clear();
       if (!child.turnOpen) {
         child.turnId = randomUUID();
         child.turnOpen = true;
@@ -348,7 +391,7 @@ export class ClaudeSubagentTracker {
           state: "started",
         });
       }
-      const prompt = readString(message.prompt);
+      const prompt = this.workflowTaskIds.has(message.task_id) ? readString(message.description) : readString(message.prompt);
       if (prompt !== undefined) {
         this.emitChildEvent(child, {
           type: "timeline.item",
@@ -385,6 +428,7 @@ export class ClaudeSubagentTracker {
       turnOpen: true,
       toolNames: new Map(),
       toolInputs: new Map(),
+      messages: new ClaudeMessageStream(),
     };
     this.children.set(id, child);
     this.lastStatusById.set(id, "running");
@@ -423,11 +467,23 @@ export class ClaudeSubagentTracker {
   }
 
   private observeTaskNotification(message: TaskNotificationShape): void {
+    if (this.workflowTaskIds.has(message.task_id)) {
+      const id = this.subagentIdByTaskId.get(message.task_id);
+      const child = id ? this.children.get(id) : undefined;
+      const outputFile = readString(message.output_file);
+      const result = outputFile ? readClaudeWorkflowResultFile(outputFile) : undefined;
+      if (child && result && this.lastWorkflowResultByTaskId.get(message.task_id) !== result) {
+        this.lastWorkflowResultByTaskId.set(message.task_id, result);
+        this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId,
+          item: { type: "assistant_message", id: `${message.task_id}:result:${child.turnId}`, text: result } });
+      }
+    }
     const totalTokens = readTotalTokens(message.usage);
     if (totalTokens !== undefined) {
       const id = this.subagentIdByTaskId.get(message.task_id);
       const child = id !== undefined ? this.children.get(id) : undefined;
       if (child !== undefined) {
+        child.totalTokens = totalTokens;
         this.emitChildEvent(child, {
           type: "session.usage",
           sessionId: child.providerId,
@@ -445,6 +501,7 @@ export class ClaudeSubagentTracker {
     const id = this.subagentIdByTaskId.get(message.task_id);
     const child = id !== undefined ? this.children.get(id) : undefined;
     if (child === undefined) return;
+    child.totalTokens = totalTokens;
     this.emitChildEvent(child, {
       type: "session.usage",
       sessionId: child.providerId,
@@ -478,6 +535,14 @@ export class ClaudeSubagentTracker {
 
   private closeChildTurn(child: ChildState, status: "completed" | "failed" | "canceled", error?: string): void {
     if (!child.turnOpen) return;
+    this.publishPresentation(child, true);
+    for (const [id, name] of child.toolNames) {
+      this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId,
+        item: { type: "tool_call", id, callId: id, name, status: "canceled", error: null,
+          detail: describeFinishedTool(name, child.toolInputs.get(id), "Child turn ended") } });
+    }
+    child.toolNames.clear();
+    child.toolInputs.clear();
     child.turnOpen = false;
     this.emitChildEvent(child, {
       type: "session.turn",
@@ -495,52 +560,18 @@ export class ClaudeSubagentTracker {
     };
     const content = assistant.message?.content;
     if (!Array.isArray(content)) return;
-    const messageId = readString(assistant.message?.id);
     for (const block of content) {
       if (typeof block !== "object" || block === null) continue;
       const record = block as { type?: unknown; id?: unknown; text?: unknown; thinking?: unknown };
-      if (record.type === "text" && typeof record.text === "string" && record.text.trim().length > 0) {
-        this.emitChildEvent(child, {
-          type: "timeline.item",
-          sessionId: child.providerId,
-          item: {
-            type: "assistant_message",
-            id: timelineId(randomUUID(), readString(assistant.uuid)),
-            text: record.text,
-            ...(messageId !== undefined ? { messageId } : {}),
-          },
-        });
-      } else if (
-        record.type === "thinking" &&
-        typeof record.thinking === "string" &&
-        record.thinking.trim().length > 0
-      ) {
-        this.emitChildEvent(child, {
-          type: "timeline.item",
-          sessionId: child.providerId,
-          item: {
-            type: "reasoning",
-            id: timelineId(randomUUID(), readString(assistant.uuid)),
-            text: record.thinking,
-          },
-        });
-      } else if (
-        record.type === "tool_use" ||
-        record.type === "mcp_tool_use" ||
-        record.type === "server_tool_use"
-      ) {
+      if (record.type === "tool_use" || record.type === "mcp_tool_use" || record.type === "server_tool_use") {
         const use = block as { id?: unknown; name?: unknown; input?: unknown };
         if (typeof use.id !== "string" || typeof use.name !== "string") continue;
-        if (use.name === "Task" && typeof use.input === "object" && use.input !== null) {
+        if ((use.name === "Task" || use.name === "Agent") && typeof use.input === "object" && use.input !== null) {
           this.taskInputs.set(use.id, use.input as Record<string, unknown>);
         }
         child.toolNames.set(use.id, use.name);
         child.toolInputs.set(use.id, use.input);
         this.ownerCanonicalByToolUseId.set(use.id, child.canonicalId);
-        child.toolInputs.set(use.id, use.input);
-        if (use.name === "Task" && typeof use.input === "object" && use.input !== null) {
-          this.taskInputs.set(use.id, use.input as Record<string, unknown>);
-        }
         const detail: ProviderToolCallDetail = describeRunningTool(use.name, use.input);
         const item: ProviderTimelineItem = {
           type: "tool_call",
@@ -580,6 +611,8 @@ export class ClaudeSubagentTracker {
         detail,
       };
       this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
+      child.toolNames.delete(result.tool_use_id);
+      child.toolInputs.delete(result.tool_use_id);
     }
   }
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { randomUUID } from "node:crypto";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
   PROVIDER_CAPABILITIES,
@@ -207,6 +208,30 @@ function resultSuccess(sessionId: string, text: string): SDKMessage {
   } as unknown as SDKMessage;
 }
 
+function claudeTurnInit(): SDKMessage {
+  return {
+    type: "system",
+    subtype: "init",
+    session_id: "cs-1",
+    uuid: randomUUID(),
+    apiKeySource: "none",
+    claude_code_version: "2.1.280",
+    cwd: "E:\\repo",
+    tools: [],
+    mcp_servers: [],
+    model: "claude-sonnet-5",
+    permissionMode: "default",
+    slash_commands: [],
+    output_style: "default",
+    skills: [],
+    plugins: [],
+  };
+}
+
+function sessionState(state: "running" | "idle"): SDKMessage {
+  return { type: "system", subtype: "session_state_changed", state, session_id: "cs-1", uuid: randomUUID() };
+}
+
 /** The CLI's trailing result frame for a request stopped by an interrupt. */
 function resultAborted(sessionId: string): SDKMessage {
   return {
@@ -225,11 +250,12 @@ async function createHarness(
   connectCapabilities?: readonly string[],
   context?: import("./translation-context").TranslationContextManager,
   forkCoordinator?: ClaudeForkCoordinator,
+  fetchFn: typeof fetch = translatingFetch(),
 ) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
     loadConfig: async () => ({ ...values, ...overrides }),
-    fetchFn: translatingFetch(),
+    fetchFn,
     queryFactory: fake.factory,
     forkCoordinator,
     ...(cacheStore !== undefined ? { cacheStore } : {}),
@@ -606,7 +632,10 @@ describe("translate claude provider", () => {
     const gate = new Promise<string>((resolve) => {
       releaseFetch = resolve;
     });
-    const gatedFetch = (async () => {
+    const gatedFetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      if (String(init?.body).includes("Choose")) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: "DE(Choose)" } }] }), { status: 200 });
+      }
       fetchCalled = true;
       const text = await gate;
       return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }), {
@@ -722,7 +751,7 @@ describe("translate claude provider", () => {
     expect(fake.state.options?.resume).toBeUndefined();
   });
 
-  it("keeps the CLI default that interrupts stop background tasks too", async () => {
+  it("preserves background helpers when the main turn is interrupted", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
     fake.use(async function* () {
@@ -731,7 +760,7 @@ describe("translate claude provider", () => {
     await send(promptInput("Hello"));
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
     // There is no per-task stop control in the read-only subagent UI.
-    expect(fake.state.options?.perTaskStopAffordance).toBeUndefined();
+    expect(fake.state.options?.perTaskStopAffordance).toBe(true);
   });
 
   it("keeps the query usable after an interrupt and its trailing result", async () => {
@@ -935,7 +964,7 @@ describe("translate claude provider", () => {
     );
     expect(reasoning).toMatchObject({
       sessionId: "s",
-      item: { type: "reasoning", id: "t-1", text: "Der Nutzer will…" },
+      item: { type: "reasoning", id: "t-1:thinking", text: "Der Nutzer will…" },
     });
   });
 
@@ -970,10 +999,12 @@ describe("translate claude provider", () => {
     expect(opus.defaultThinkingOptionId).toBe("default");
     expect(opus.thinkingOptions?.map((option) => option.id)).toEqual([
       "default",
+      "off",
       "adaptive",
       "low",
       "high",
       "xhigh",
+      "ultracode",
     ]);
     expect(opus.thinkingOptions?.find((option) => option.id === "xhigh")?.label).toBe("Extra high");
     expect(models[1].thinkingOptions?.map((option) => option.id)).toEqual(["default"]);
@@ -981,7 +1012,7 @@ describe("translate claude provider", () => {
     expect(fake.state.options?.abortController?.signal.aborted).toBe(true);
   });
 
-  it("applies model, mode, and thinking changes live on the running query", async () => {
+  it("applies model and mode live and schedules thinking for the next query", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
     fake.use(async function* () {
@@ -998,7 +1029,7 @@ describe("translate claude provider", () => {
     await waitFor(events, (event) => event.type === "request.completed");
     expect(fake.state.setModelCalls).toEqual(["claude-opus-5"]);
     expect(fake.state.setPermissionModeCalls).toEqual(["acceptEdits"]);
-    expect(fake.state.applyFlagSettingsCalls).toEqual([{ effortLevel: "high" }]);
+    expect(fake.state.applyFlagSettingsCalls).toEqual([]);
     const config = events.filter((event) => event.type === "session.config").at(-1);
     expect(config).toMatchObject({
       sessionId: "s",
@@ -1036,9 +1067,9 @@ describe("translate claude provider", () => {
     expect(fake.state.setPermissionModeCalls).toEqual(["bypassPermissions", "default"]);
   });
 
-  it("resets thinking flags when switching off and back to default", async () => {
+  it("updates deferred thinking from off back to default", async () => {
     const { fake, events, send } = await createHarness();
-    await send(openInput);
+    await send({ ...openInput, config: { ...openInput.config, model: "claude-opus-5" } });
     fake.use(async function* () {
       yield resultSuccess("cs-1", "ok");
     });
@@ -1058,10 +1089,7 @@ describe("translate claude provider", () => {
       changes: { thinkingOption: "default" },
     });
     await waitFor(events, (event) => event.type === "request.completed");
-    expect(fake.state.applyFlagSettingsCalls).toEqual([
-      { effortLevel: null, alwaysThinkingEnabled: false },
-      { effortLevel: null, alwaysThinkingEnabled: null },
-    ]);
+    expect(fake.state.applyFlagSettingsCalls).toEqual([]);
   });
 
   it("carries configured model, mode, and thinking into the next query", async () => {
@@ -1084,8 +1112,7 @@ describe("translate claude provider", () => {
     expect(fake.state.options?.permissionMode).toBe("plan");
     expect(fake.state.options?.thinking).toEqual({ type: "adaptive" });
 
-    // "max" is session-scoped in the SDK: at query start it falls back to
-    // the closest persisted effort level instead of being dropped silently.
+    // Max travels as an SDK per-session effort without a persisted downgrade.
     const second = { ...openInput, sessionId: "s2", config: { ...openInput.config, thinkingOption: "max" } };
     await send(second);
     fake.use(async function* () {
@@ -1097,7 +1124,7 @@ describe("translate claude provider", () => {
       (event) => event.type === "session.turn" && event.state === "completed" && event.sessionId === "s2",
     );
     const secondOptions = fake.state.allOptions.at(-1);
-    expect(secondOptions?.settings).toEqual({ effortLevel: "xhigh" });
+    expect(secondOptions?.effort).toBe("max");
   });
 });
 
@@ -1417,6 +1444,7 @@ describe("translate claude provider subagents", () => {
     });
     await send(promptInput("Start background work"));
     await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-bg-idle");
+    expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "s" && event.state === "started")).toHaveLength(1);
     expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" && event.state !== "started")).toEqual([]);
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -1428,6 +1456,7 @@ describe("translate claude provider subagents", () => {
     });
     await send(promptInput("Continue", "m-next"));
     await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-bg-next");
+    expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "s" && event.state === "started")).toHaveLength(2);
     expect(fake.state.interrupted).toBe(0);
     expect(fake.state.spawnCount).toBe(1);
     expect(fake.state.options?.abortController?.signal.aborted).toBe(false);
@@ -1439,7 +1468,7 @@ describe("translate claude provider subagents", () => {
 });
 
 describe("translate claude provider background work", () => {
-  /** A backgrounded tool heartbeat, the SDK signal of work outside a turn. */
+  /** Background work reports progress independently of the main session. */
   function toolProgress(toolUseId: string): SDKMessage {
     return {
       type: "tool_progress",
@@ -1459,13 +1488,109 @@ describe("translate claude provider background work", () => {
     );
   }
 
-  it("re-opens a root turn while background work outlives the completed one", async () => {
+  it("keeps background-only frames from creating a phantom active root turn", async () => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      yield rootToolUse("a-bg", "tu-bg", "Agent", { subagent_type: "general-purpose" });
+      yield taskStarted("t-bg", "tu-bg", { is_backgrounded: true });
+      yield resultSuccess("cs-1", "foreground done");
+      yield sessionState("running");
+      yield toolProgress("tu-bg");
+      yield sidechainText("tu-bg", "a-child", "Still working");
+      yield taskNotification("t-bg", "completed");
+      yield assistantText("a-stray", "Trailing output");
+    });
+    await send(promptInput("Start background work"));
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-stray");
+    expect(rootTurns(events, "started")).toHaveLength(1);
+    expect(rootTurns(events, "completed")).toHaveLength(1);
+    expect(fake.state.options?.env?.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS).toBe("1");
+    fake.use(async function* () { yield resultSuccess("cs-1", "ok"); });
+    await send(promptInput("New question", "m-next"));
+    await waitFor(events, () => rootTurns(events, "completed").length === 2);
+    expect(events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "m-next"))
+      .toMatchObject({ result: { type: "turn" } });
+    expect(fake.state.interrupted).toBe(0);
+    expect(fake.state.spawnCount).toBe(1);
+    await registration.close();
+  });
+
+  it.each([false, true])("idle state closes only an autonomous root turn (autonomous=%s)", async (autonomous) => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fake.use(async function* () {
+      if (autonomous) yield resultSuccess("cs-1", "foreground done");
+      yield claudeTurnInit();
+      yield sessionState("running");
+      yield sessionState("idle");
+      yield assistantText("a-after-idle", "Idle state received");
+      await gate;
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-after-idle");
+    expect(rootTurns(events, "started")).toHaveLength(autonomous ? 2 : 1);
+    expect(rootTurns(events, "completed")).toHaveLength(autonomous ? 2 : 0);
+    release();
+    await waitFor(events, () => rootTurns(events, "completed").length === (autonomous ? 2 : 1));
+    await registration.close();
+  });
+
+  it.each(["subagent", "shell job"])("steers an autonomous %s turn without stopping background work", async (kind) => {
+    const { fake, events, send, registration } = await createHarness();
+    await send(openInput);
+    fake.use(async function* () {
+      if (kind === "subagent") {
+        yield rootToolUse("a-bg", "tu-bg", "Agent", { subagent_type: "general-purpose" });
+        yield taskStarted("t-bg", "tu-bg", { is_backgrounded: true });
+      }
+      yield resultSuccess("cs-1", "foreground done");
+      yield toolProgress("tu-bg");
+      yield claudeTurnInit();
+    });
+    await send(promptInput("Start background work"));
+    await waitFor(events, () => rootTurns(events, "started").length === 2);
+    const autonomous = rootTurns(events, "started")[1];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    fake.use(async function* () {
+      yield assistantText("a-follow-up", "Got the follow-up; still working");
+      await gate;
+      if (kind === "subagent") yield taskNotification("t-bg", "completed");
+      yield resultSuccess("cs-1", "done");
+    });
+    const followUp = promptInput("Expulsion has no cost", "m-follow-up");
+    followUp.prompt.delivery = "steer";
+    await send(followUp);
+    expect(events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "m-follow-up"))
+      .toMatchObject({ result: { type: "steer", turnId: autonomous.turnId } });
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-follow-up");
+    expect(fake.state.received[1]).toMatchObject({ priority: "next" });
+    expect(JSON.stringify(fake.state.received[1].message.content)).toContain("DE(Expulsion has no cost)");
+    expect(fake.state.interrupted).toBe(0);
+    expect(fake.state.spawnCount).toBe(1);
+    expect(fake.state.options?.abortController?.signal.aborted).toBe(false);
+    expect(rootTurns(events, "started")).toHaveLength(2);
+    expect(rootTurns(events, "completed")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" && event.state !== "started")).toEqual([]);
+    release();
+    await waitFor(events, () => rootTurns(events, "completed").length === 2);
+    if (kind === "subagent") {
+      expect(events.find((event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" && event.state === "completed")).toBeDefined();
+    }
+    await registration.close();
+  });
+
+  it("opens a root turn when Claude wakes after foreground completion", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
     fake.use(async function* () {
       yield resultSuccess("cs-1", "done");
-      // The turn settled, but a backgrounded job keeps heartbeating.
       yield toolProgress("tu-job");
+      yield claudeTurnInit();
     });
     await send(promptInput("Start the job"));
     await waitFor(events, () => rootTurns(events, "started").length === 2);
@@ -1500,8 +1625,8 @@ describe("translate claude provider background work", () => {
     fake.use(async function* () {
       yield resultSuccess("cs-1", "done");
       yield taskNotification("t-job", "completed");
-      // A trailing result (background work settling its own request) ends
-      // the autonomous turn instead of leaving the session running forever.
+      yield claudeTurnInit();
+      // Claude's wake-up turn owns the next main-session result.
       yield resultSuccess("cs-1", "background settled");
     });
     await send(promptInput("Work"));
@@ -1538,6 +1663,7 @@ describe("translate claude provider background work", () => {
     fake.use(async function* () {
       yield resultSuccess("cs-1", "done");
       yield toolProgress("tu-job");
+      yield claudeTurnInit();
       await gate;
       return END_ITERATOR;
     });
@@ -1563,6 +1689,7 @@ describe("translate claude provider background work", () => {
     fake.use(async function* () {
       yield resultSuccess("cs-1", "done");
       yield toolProgress("tu-job");
+      yield claudeTurnInit();
       await gate;
       // A task heartbeat can already be in flight when Stop is processed.
       // Keep observing it until the CLI reports termination.
@@ -1595,13 +1722,13 @@ describe("translate claude provider background work", () => {
       yield taskNotification("t-bg", status);
     });
     await send(promptInput("Work"));
-    await waitFor(events, () => rootTurns(events, "started").length === 2);
+    await waitFor(events, () => rootTurns(events, "completed").length === 1);
     await send({ type: "session.interrupt", requestId: "stop-idle", sessionId: "s" });
     release();
     await waitFor(events, (event) => event.type === "session.turn" && event.sessionId === "subagent:s:tu-bg" &&
       event.state === (status === "killed" ? "canceled" : "completed"));
-    expect(rootTurns(events, "started")).toHaveLength(2);
-    expect(rootTurns(events, "completed")).toHaveLength(2);
+    expect(rootTurns(events, "started")).toHaveLength(1);
+    expect(rootTurns(events, "completed")).toHaveLength(1);
     await registration.close();
   });
 
@@ -1631,6 +1758,58 @@ describe("translate claude provider background work", () => {
 });
 
 describe("translate claude provider extended protocol", () => {
+  it.each([false, true])("does not deliver a steer to a newer turn after translation (autonomous=%s)", async (autonomous) => {
+    let releaseTranslation!: () => void;
+    const translationGate = new Promise<void>((resolve) => { releaseTranslation = resolve; });
+    let translationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { translationStarted = resolve; });
+    const fetchFn: typeof fetch = async (input, init) => {
+      if (String(init?.body).includes("Slow follow-up")) {
+        translationStarted();
+        await translationGate;
+      }
+      return translatingFetch()(input, init);
+    };
+    const { fake, events, send, registration } = await createHarness(undefined, undefined, undefined, undefined, undefined, fetchFn);
+    await send(openInput);
+    let releaseTurn!: () => void;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    fake.use(async function* () {
+      if (autonomous) {
+        yield resultSuccess("cs-1", "foreground done");
+        yield claudeTurnInit();
+      }
+      yield assistantText("a-old-turn", "Working");
+      await turnGate;
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("Work"));
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-old-turn");
+    const followUp = promptInput("Slow follow-up", "m-slow");
+    followUp.prompt.delivery = "steer";
+    const pending = send(followUp);
+    await started;
+    releaseTurn();
+    await waitFor(events, () => events.filter((event) => event.type === "session.turn" && event.sessionId === "s" && event.state === "completed").length === (autonomous ? 2 : 1));
+    let releaseReplacement!: () => void;
+    const replacementGate = new Promise<void>((resolve) => { releaseReplacement = resolve; });
+    fake.use(async function* () {
+      yield assistantText("a-new-turn", "New work");
+      await replacementGate;
+      yield resultSuccess("cs-1", "done");
+    });
+    await send(promptInput("New work", "m-new"));
+    await waitFor(events, (event) => event.type === "timeline.item" && event.item.id === "a-new-turn");
+    releaseTranslation();
+    await pending;
+    expect(events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "m-slow"))
+      .toMatchObject({ result: { type: "failed", error: { message: "Active turn changed while translating the follow-up" } } });
+    releaseReplacement();
+    await registration.close();
+    expect(fake.state.received).toHaveLength(2);
+    expect(fake.state.interrupted).toBe(0);
+  });
+
   it("steers the active turn with next priority and reports unavailable when idle", async () => {
     const { fake, events, send } = await createHarness();
     await send(openInput);
@@ -2397,7 +2576,9 @@ describe("translate claude provider extended protocol", () => {
     });
     await send(promptInput("Hi"));
     await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
-    expect(fake.state.options?.settings).toMatchObject({ effortLevel: "high", fastMode: true });
+    expect(fake.state.options?.settings).toMatchObject({ fastMode: true });
+    expect(fake.state.options?.effort).toBe("high");
+    expect(fake.state.options?.settings).not.toHaveProperty("effortLevel");
   });
 
   it("clears a stale resume id when the stored conversation is missing", async () => {
@@ -3303,7 +3484,7 @@ describe("Claude fork coordination", () => {
     expect(restarted.fake.state.options?.model).toBe("claude-opus-4-6");
     expect(restarted.fake.state.options?.permissionMode).toBe("plan");
     expect(restarted.fake.state.options?.env?.CLAUDE_CONFIG_DIR).toBe("E:/test-claude-storage");
-    expect(restarted.fake.state.options?.settings).not.toHaveProperty("fastMode");
+    expect(restarted.fake.state.options?.settings ?? {}).not.toHaveProperty("fastMode");
     expect(restarted.fake.state.options?.systemPrompt).toMatchObject({ append: "DE(Keep the source instructions)" });
     expect(restarted.fake.state.options?.env?.CUSTOM_ENV).toBe("keep");
     expect(restarted.fake.state.options?.env?.PASEO_AGENT_ID).toBe("new-agent");

@@ -149,8 +149,8 @@ the app after each turn.
 - Model switching, thinking intensity, and permission modes match the native
   provider's surface: the catalog is probed live from the CLI's reported
   models (effort levels become thinking options), modes are
-  Plan/Always Ask/Accept Edits/Bypass, and changes apply live through the
-  SDK's control surface. "Auto" mode is not offered (it requires the API
+  Plan/Always Ask/Accept Edits/Bypass. Model and mode changes apply live;
+  thinking changes apply at the next query. "Auto" mode is not offered (it requires the API
   transport).
 - Session persistence uses Claude's own session id (resume survives daemon
   restarts). Permissions pass through to you with Allow/Deny; interrupt maps
@@ -170,21 +170,31 @@ the app after each turn.
   excluded from generic Claude session import to prevent duplicate writers.
   Forking uses the installed Paseo CLI against the
   daemon's home and requires Paseo 0.11.2 or newer; no daemon patch is needed.
-- Session-list status tracks background work like the native provider:
-  a backgrounded Task subagent or a background job that outlives its turn
-  keeps the session reporting as running (the provider opens a synthetic
-  autonomous turn the daemon tracks), until the work settles, the next
-  prompt, or an interrupt.
+- Root turns follow Claude's main-session lifecycle like the native provider:
+  background child output and job heartbeats keep their timelines updating
+  without opening a root turn. When Claude wakes to process a result, its
+  `system/init` opens an autonomous turn, closed by its result or idle state.
+  Follow-up messages can steer foreground and autonomous turns on the live
+  Claude stream, keeping background work running. Stop cancels the main turn
+  and withdraws unstarted prompts; background helpers survive, as in native
+  Paseo. Ask Claude to stop a specific helper through its TaskStop tool.
+- Session identity, runtime model and mode are captured from Claude init/status
+  events, so a first-turn crash can resume the session. Rejected live settings
+  changes report failure rather than claiming they were applied. Thinking
+  changes take effect on the next query; Max uses the SDK session effort and
+  supported models offer Off and Ultra Code.
+- Text and thinking stream incrementally in root and child panes. Child panes
+  include observed model/effort and final token usage; live usage uses the host
+  usage events. Completed workflows show their bounded result-file output.
 - Full surface: message/command/image prompts, active-turn steering, slash
   commands reported by the CLI, streaming text and thinking, structured
   tool-call cards (shell/read/write/edit/search/fetch/plan/sub-agent),
   Task subagents as provider subsessions (track rows with read-only
   timelines, nesting, backgrounded children, resume aliases), usage
   reporting, and history replay from Claude's own transcript files
-  (including subagent sidecars). Archive/unarchive/revert/session-listing
-  stay capability-gated off — the daemon handles their absence gracefully.
-  Model selection passes the daemon-configured model through; the default
-  catalog entry uses the CLI's default model.
+  (including subagent sidecars), session listing, and file/conversation rewind.
+  Archive/unarchive stay capability-gated off; the daemon handles their absence
+  gracefully. The default catalog entry uses the CLI's default model.
 
 ## Direct Codex provider
 

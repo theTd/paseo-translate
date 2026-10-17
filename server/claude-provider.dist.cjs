@@ -35,7 +35,7 @@ __export(claude_provider_exports, {
 });
 module.exports = __toCommonJS(claude_provider_exports);
 var import_node_crypto6 = require("node:crypto");
-var import_node_fs3 = require("node:fs");
+var import_node_fs4 = require("node:fs");
 var import_node_path6 = __toESM(require("node:path"));
 
 // node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
@@ -53105,95 +53105,149 @@ function promptDisplayKey(values, text, scopeKey) {
 // server/claude-model-manifest.ts
 var CLAUDE_MODEL_MANIFEST = [
   {
+    id: "claude-opus-5-5",
+    label: "Opus 5.5",
+    description: "Opus 5.5 \xB7 Latest release",
+    contextWindowMaxTokens: 1e6,
+    supportsFastMode: true,
+    defaultThinkingOption: "medium"
+  },
+  {
     id: "claude-opus-5",
     label: "Opus 5",
-    description: "Opus 5 \xB7 Latest release",
+    description: "Opus 5 \xB7 Previous release",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true
+    supportsFastMode: true,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
+  },
+  {
+    id: "claude-mythos-5-1",
+    label: "Mythos 5.1",
+    description: "Mythos 5.1 \xB7 Requires verified access",
+    contextWindowMaxTokens: 1e6,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-fable-5-1",
     label: "Fable 5.1",
     description: "Fable 5.1 \xB7 Most powerful model",
-    contextWindowMaxTokens: 1e6
+    contextWindowMaxTokens: 1e6,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-fable-5",
     aliases: ["claude-fable-5[1m]"],
     label: "Fable 5",
     description: "Fable 5 \xB7 Previous release",
-    contextWindowMaxTokens: 1e6
+    contextWindowMaxTokens: 1e6,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-opus-4-8[1m]",
     label: "Opus 4.8 1M",
     description: "Opus 4.8 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true
+    supportsFastMode: true,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-opus-4-8",
     label: "Opus 4.8",
     description: "Opus 4.8 \xB7 Previous release",
     contextWindowMaxTokens: 2e5,
-    supportsFastMode: true
+    supportsFastMode: true,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
+  },
+  {
+    id: "claude-sonnet-5-5",
+    label: "Sonnet 5.5",
+    description: "Sonnet 5.5 \xB7 Best for everyday tasks",
+    contextWindowMaxTokens: 1e6,
+    defaultThinkingOption: "medium"
   },
   {
     id: "claude-sonnet-5",
     label: "Sonnet 5",
-    description: "Sonnet 5 \xB7 Best for everyday tasks",
-    contextWindowMaxTokens: 2e5
+    description: "Sonnet 5 \xB7 Previous release",
+    contextWindowMaxTokens: 2e5,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-sonnet-5[1m]",
     label: "Sonnet 5 1M",
     description: "Sonnet 5 with 1M context window",
-    contextWindowMaxTokens: 1e6
+    contextWindowMaxTokens: 1e6,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-opus-4-7[1m]",
     label: "Opus 4.7 1M",
     description: "Opus 4.7 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true
+    supportsFastMode: true,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-opus-4-7",
     label: "Opus 4.7",
     description: "Opus 4.7 \xB7 Previous release",
     contextWindowMaxTokens: 2e5,
-    supportsFastMode: true
+    supportsFastMode: true,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-opus-4-6[1m]",
     label: "Opus 4.6 1M",
     description: "Opus 4.6 with 1M context window",
     contextWindowMaxTokens: 1e6,
-    supportsFastMode: true
+    supportsFastMode: true,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-opus-4-6",
     label: "Opus 4.6",
     description: "Opus 4.6 \xB7 Most capable for complex work",
     contextWindowMaxTokens: 2e5,
-    supportsFastMode: true
+    supportsFastMode: true,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-sonnet-4-6[1m]",
     label: "Sonnet 4.6 1M",
     description: "Sonnet 4.6 with 1M context window",
-    contextWindowMaxTokens: 1e6
+    contextWindowMaxTokens: 1e6,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
   },
   {
     id: "claude-sonnet-4-6",
     label: "Sonnet 4.6",
     description: "Sonnet 4.6 \xB7 Best for everyday tasks",
-    contextWindowMaxTokens: 2e5
+    contextWindowMaxTokens: 2e5,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "high"
+  },
+  {
+    id: "claude-haiku-5-5",
+    label: "Haiku 5.5",
+    description: "Haiku 5.5 \xB7 Fastest for quick answers",
+    contextWindowMaxTokens: 1e6,
+    supportsThinkingDisabled: true,
+    defaultThinkingOption: "medium"
   },
   {
     id: "claude-haiku-4-5",
     label: "Haiku 4.5",
-    description: "Haiku 4.5 \xB7 Fastest for quick answers",
+    description: "Haiku 4.5 \xB7 Previous release",
     contextWindowMaxTokens: 2e5
   }
 ];
@@ -53724,6 +53778,150 @@ ${output2}`.trim() };
   }
 }
 
+// server/claude-message-stream.ts
+var ClaudeMessageStream = class {
+  constructor() {
+    this.messages = /* @__PURE__ */ new Map();
+  }
+  clear() {
+    this.messages.clear();
+    this.activeId = void 0;
+  }
+  observe(message) {
+    if (message.type === "assistant") {
+      if (!Array.isArray(message.message.content)) return [];
+      const id2 = message.message.id || message.uuid;
+      if (!id2) return [];
+      const state2 = this.get(id2);
+      state2.blocks.clear();
+      message.message.content.forEach((block, index) => {
+        if (block.type === "text") state2.blocks.set(index, { kind: "text", text: block.text });
+        else if (block.type === "thinking") state2.blocks.set(index, { kind: "thinking", text: block.thinking });
+      });
+      return this.snapshots(state2);
+    }
+    if (message.type !== "stream_event") return [];
+    const event = message.event;
+    if (event.type === "message_start") {
+      if (!event.message.id) return [];
+      this.activeId = event.message.id;
+      this.get(this.activeId);
+      return [];
+    }
+    if (!this.activeId) return [];
+    const state = this.get(this.activeId);
+    if (event.type === "content_block_start") {
+      const block = event.content_block;
+      if (block.type === "text") state.blocks.set(event.index, { kind: "text", text: block.text });
+      else if (block.type === "thinking") state.blocks.set(event.index, { kind: "thinking", text: block.thinking });
+    } else if (event.type === "content_block_delta") {
+      const delta = event.delta;
+      if (delta.type !== "text_delta" && delta.type !== "thinking_delta") return [];
+      const kind = delta.type === "text_delta" ? "text" : "thinking";
+      const block = state.blocks.get(event.index) ?? { kind, text: "" };
+      block.text += delta.type === "text_delta" ? delta.text : delta.thinking;
+      state.blocks.set(event.index, block);
+    } else return [];
+    return this.snapshots(state);
+  }
+  get(id2) {
+    let state = this.messages.get(id2);
+    if (!state) {
+      state = { id: id2, blocks: /* @__PURE__ */ new Map(), text: "", thinking: "" };
+      this.messages.set(id2, state);
+      const oldest = this.messages.keys().next().value;
+      if (this.messages.size > 256 && oldest !== void 0) this.messages.delete(oldest);
+    }
+    return state;
+  }
+  snapshots(state) {
+    const items = [];
+    const blocks = [...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
+    const text = blocks.filter((block) => block.kind === "text").map((block) => block.text).join("");
+    const thinking = blocks.filter((block) => block.kind === "thinking").map((block) => block.text).join("");
+    if (text && text !== state.text && text !== "[Request interrupted by user]") {
+      items.push({ type: "assistant_message", id: state.id, messageId: state.id, text });
+      state.text = text;
+    }
+    if (thinking && thinking !== state.thinking) {
+      items.push({ type: "reasoning", id: `${state.id}:thinking`, text: thinking });
+      state.thinking = thinking;
+    }
+    return items;
+  }
+};
+
+// server/claude-workflow-output.ts
+var import_node_fs2 = __toESM(require("node:fs"));
+var MAX_WORKFLOW_OUTPUT_BYTES = 1024 * 1024;
+var MAX_WORKFLOW_RESULT_CHARS = 1e5;
+function readClaudeWorkflowResultFile(outputFile) {
+  let descriptor;
+  try {
+    descriptor = import_node_fs2.default.openSync(outputFile, "r");
+    const buffer = Buffer.alloc(MAX_WORKFLOW_OUTPUT_BYTES + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = import_node_fs2.default.readSync(descriptor, buffer, bytesRead, buffer.length - bytesRead, null);
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    if (bytesRead > MAX_WORKFLOW_OUTPUT_BYTES) return void 0;
+    return parseClaudeWorkflowResult(buffer.subarray(0, bytesRead).toString("utf8"));
+  } catch {
+    return void 0;
+  } finally {
+    if (descriptor !== void 0) import_node_fs2.default.closeSync(descriptor);
+  }
+}
+function parseClaudeWorkflowResult(contents) {
+  if (Buffer.byteLength(contents, "utf8") > MAX_WORKFLOW_OUTPUT_BYTES) return void 0;
+  let parsed;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return void 0;
+  }
+  const record2 = toRecord(parsed);
+  return record2 && Object.hasOwn(record2, "result") ? formatClaudeWorkflowResult(record2.result) : void 0;
+}
+function formatClaudeWorkflowResult(result) {
+  const unwrapped = unwrapSingleValue(result);
+  let text;
+  if (typeof unwrapped === "string") {
+    text = unwrapped.trim();
+  } else if (typeof unwrapped === "number" || typeof unwrapped === "boolean") {
+    text = String(unwrapped);
+  } else if (unwrapped !== null && unwrapped !== void 0) {
+    try {
+      const json2 = JSON.stringify(unwrapped, null, 2);
+      if (json2) text = `\`\`\`json
+${json2}
+\`\`\``;
+    } catch {
+      return void 0;
+    }
+  }
+  if (!text) return void 0;
+  return text.length <= MAX_WORKFLOW_RESULT_CHARS ? text : `${text.slice(0, MAX_WORKFLOW_RESULT_CHARS)}
+
+\u2026`;
+}
+function unwrapSingleValue(value) {
+  let current = value;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const record2 = toRecord(current);
+    if (!record2) return current;
+    const keys = Object.keys(record2);
+    if (keys.length !== 1) return current;
+    current = record2[keys[0]];
+  }
+  return current;
+}
+function toRecord(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
 // server/claude-subagents.ts
 var SUBAGENT_TASK_TYPE = "local_agent";
 var WORKFLOW_TASK_TYPE = "local_workflow";
@@ -53761,12 +53959,6 @@ function readTotalTokens(usage) {
   if (!usage || typeof usage.total_tokens !== "number" || usage.total_tokens <= 0) return void 0;
   return Math.round(usage.total_tokens);
 }
-function timelineId(fallback, ...candidates) {
-  for (const candidate of candidates) {
-    if (candidate !== void 0 && candidate.length > 0) return candidate;
-  }
-  return fallback;
-}
 function flattenSubagentItemForParent(title, item) {
   if (item.type !== "user_message") return item;
   return {
@@ -53793,6 +53985,7 @@ var ClaudeSubagentTracker = class {
     this.taskInputs = /* @__PURE__ */ new Map();
     this.declaredIds = /* @__PURE__ */ new Set();
     this.workflowTaskIds = /* @__PURE__ */ new Set();
+    this.lastWorkflowResultByTaskId = /* @__PURE__ */ new Map();
     this.backgroundedIds = /* @__PURE__ */ new Set();
     this.children = /* @__PURE__ */ new Map();
     this.lastStatusById = /* @__PURE__ */ new Map();
@@ -53808,13 +54001,14 @@ var ClaudeSubagentTracker = class {
     this.taskInputs.clear();
     this.declaredIds.clear();
     this.workflowTaskIds.clear();
+    this.lastWorkflowResultByTaskId.clear();
     this.backgroundedIds.clear();
     this.children.clear();
     this.lastStatusById.clear();
   }
   /** Record a `tool_use` block from a root (non-sidechain) assistant message. */
   noteRootToolUse(toolUseId, name, input2) {
-    if (name === "Task" && typeof input2 === "object" && input2 !== null) {
+    if ((name === "Task" || name === "Agent") && typeof input2 === "object" && input2 !== null) {
       this.taskInputs.set(toolUseId, input2);
     }
   }
@@ -53899,7 +54093,14 @@ var ClaudeSubagentTracker = class {
     const canonical = this.canonicalIdByToolUseId.get(parentToolUseId);
     const child = (canonical !== void 0 ? this.children.get(canonical) : void 0) ?? (this.ownerCanonicalByToolUseId.get(parentToolUseId) !== void 0 ? this.children.get(this.ownerCanonicalByToolUseId.get(parentToolUseId)) : void 0);
     if (!child) return;
+    for (const item of child.messages.observe(message)) {
+      this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
+    }
     if (message.type === "assistant") {
+      if (typeof message.message.model === "string" && message.message.model) {
+        child.model = message.message.model;
+        this.publishPresentation(child);
+      }
       this.handleSidechainAssistant(child, message);
     } else if (message.type === "user") {
       this.handleSidechainUser(child, message);
@@ -53926,6 +54127,31 @@ var ClaudeSubagentTracker = class {
   childProviderId(canonicalId) {
     return `subagent:${this.rootSessionId}:${canonicalId}`;
   }
+  /** Observation-only SDK hooks report effective effort, including model downgrades. */
+  observeHook(input2) {
+    if (typeof input2 !== "object" || input2 === null) return;
+    const hook = input2;
+    if (typeof hook.agent_id !== "string" || typeof hook.effort?.level !== "string") return;
+    const id2 = this.subagentIdByTaskId.get(hook.agent_id);
+    const child = id2 ? this.children.get(id2) : void 0;
+    if (!child || child.effort === hook.effort.level) return;
+    child.effort = hook.effort.level;
+    this.publishPresentation(child);
+  }
+  publishPresentation(child, includeUsage = false) {
+    const parts = [child.title];
+    if (child.model) parts.push(findClaudeModel(child.model)?.label ?? child.model);
+    if (child.effort) parts.push(child.effort === "xhigh" ? "Extra High" : child.effort[0].toUpperCase() + child.effort.slice(1));
+    if (includeUsage && child.totalTokens) parts.push(`${child.totalTokens.toLocaleString("en-US")} tokens`);
+    const text = parts.join(" \xB7 ");
+    if (parts.length === 1 || text === child.lastPresentation) return;
+    child.lastPresentation = text;
+    this.emitChildEvent(child, {
+      type: "timeline.item",
+      sessionId: child.providerId,
+      item: { type: "notification", id: `${child.canonicalId}:metadata:${text}`, level: "info", message: text }
+    });
+  }
   observeTaskStarted(message) {
     const id2 = readString2(message.tool_use_id);
     const ownerCanonical = id2 !== void 0 ? this.ownerCanonicalByToolUseId.get(id2) : void 0;
@@ -53934,10 +54160,16 @@ var ClaudeSubagentTracker = class {
       return;
     }
     const existingId = this.subagentIdByTaskId.get(message.task_id);
+    const backgroundedId = existingId ?? id2;
+    if (message.is_backgrounded === true) this.backgroundedIds.add(backgroundedId);
+    else if (message.is_backgrounded === false) this.backgroundedIds.delete(backgroundedId);
     if (existingId !== void 0) {
       this.canonicalIdByToolUseId.set(id2, existingId);
       const child2 = this.children.get(existingId);
       if (!child2) return;
+      this.lastStatusById.set(existingId, "running");
+      this.lastWorkflowResultByTaskId.delete(message.task_id);
+      child2.messages.clear();
       if (!child2.turnOpen) {
         child2.turnId = (0, import_node_crypto4.randomUUID)();
         child2.turnOpen = true;
@@ -53948,7 +54180,7 @@ var ClaudeSubagentTracker = class {
           state: "started"
         });
       }
-      const prompt2 = readString2(message.prompt);
+      const prompt2 = this.workflowTaskIds.has(message.task_id) ? readString2(message.description) : readString2(message.prompt);
       if (prompt2 !== void 0) {
         this.emitChildEvent(child2, {
           type: "timeline.item",
@@ -53977,7 +54209,8 @@ var ClaudeSubagentTracker = class {
       turnId,
       turnOpen: true,
       toolNames: /* @__PURE__ */ new Map(),
-      toolInputs: /* @__PURE__ */ new Map()
+      toolInputs: /* @__PURE__ */ new Map(),
+      messages: new ClaudeMessageStream()
     };
     this.children.set(id2, child);
     this.lastStatusById.set(id2, "running");
@@ -54012,11 +54245,26 @@ var ClaudeSubagentTracker = class {
     this.applyStatus(message.task_id, message.patch?.status);
   }
   observeTaskNotification(message) {
+    if (this.workflowTaskIds.has(message.task_id)) {
+      const id2 = this.subagentIdByTaskId.get(message.task_id);
+      const child = id2 ? this.children.get(id2) : void 0;
+      const outputFile = readString2(message.output_file);
+      const result = outputFile ? readClaudeWorkflowResultFile(outputFile) : void 0;
+      if (child && result && this.lastWorkflowResultByTaskId.get(message.task_id) !== result) {
+        this.lastWorkflowResultByTaskId.set(message.task_id, result);
+        this.emitChildEvent(child, {
+          type: "timeline.item",
+          sessionId: child.providerId,
+          item: { type: "assistant_message", id: `${message.task_id}:result:${child.turnId}`, text: result }
+        });
+      }
+    }
     const totalTokens = readTotalTokens(message.usage);
     if (totalTokens !== void 0) {
       const id2 = this.subagentIdByTaskId.get(message.task_id);
       const child = id2 !== void 0 ? this.children.get(id2) : void 0;
       if (child !== void 0) {
+        child.totalTokens = totalTokens;
         this.emitChildEvent(child, {
           type: "session.usage",
           sessionId: child.providerId,
@@ -54033,6 +54281,7 @@ var ClaudeSubagentTracker = class {
     const id2 = this.subagentIdByTaskId.get(message.task_id);
     const child = id2 !== void 0 ? this.children.get(id2) : void 0;
     if (child === void 0) return;
+    child.totalTokens = totalTokens;
     this.emitChildEvent(child, {
       type: "session.usage",
       sessionId: child.providerId,
@@ -54064,6 +54313,24 @@ var ClaudeSubagentTracker = class {
   }
   closeChildTurn(child, status, error62) {
     if (!child.turnOpen) return;
+    this.publishPresentation(child, true);
+    for (const [id2, name] of child.toolNames) {
+      this.emitChildEvent(child, {
+        type: "timeline.item",
+        sessionId: child.providerId,
+        item: {
+          type: "tool_call",
+          id: id2,
+          callId: id2,
+          name,
+          status: "canceled",
+          error: null,
+          detail: describeFinishedTool(name, child.toolInputs.get(id2), "Child turn ended")
+        }
+      });
+    }
+    child.toolNames.clear();
+    child.toolInputs.clear();
     child.turnOpen = false;
     this.emitChildEvent(child, {
       type: "session.turn",
@@ -54077,44 +54344,18 @@ var ClaudeSubagentTracker = class {
     const assistant = message;
     const content = assistant.message?.content;
     if (!Array.isArray(content)) return;
-    const messageId = readString2(assistant.message?.id);
     for (const block of content) {
       if (typeof block !== "object" || block === null) continue;
       const record2 = block;
-      if (record2.type === "text" && typeof record2.text === "string" && record2.text.trim().length > 0) {
-        this.emitChildEvent(child, {
-          type: "timeline.item",
-          sessionId: child.providerId,
-          item: {
-            type: "assistant_message",
-            id: timelineId((0, import_node_crypto4.randomUUID)(), readString2(assistant.uuid)),
-            text: record2.text,
-            ...messageId !== void 0 ? { messageId } : {}
-          }
-        });
-      } else if (record2.type === "thinking" && typeof record2.thinking === "string" && record2.thinking.trim().length > 0) {
-        this.emitChildEvent(child, {
-          type: "timeline.item",
-          sessionId: child.providerId,
-          item: {
-            type: "reasoning",
-            id: timelineId((0, import_node_crypto4.randomUUID)(), readString2(assistant.uuid)),
-            text: record2.thinking
-          }
-        });
-      } else if (record2.type === "tool_use" || record2.type === "mcp_tool_use" || record2.type === "server_tool_use") {
+      if (record2.type === "tool_use" || record2.type === "mcp_tool_use" || record2.type === "server_tool_use") {
         const use2 = block;
         if (typeof use2.id !== "string" || typeof use2.name !== "string") continue;
-        if (use2.name === "Task" && typeof use2.input === "object" && use2.input !== null) {
+        if ((use2.name === "Task" || use2.name === "Agent") && typeof use2.input === "object" && use2.input !== null) {
           this.taskInputs.set(use2.id, use2.input);
         }
         child.toolNames.set(use2.id, use2.name);
         child.toolInputs.set(use2.id, use2.input);
         this.ownerCanonicalByToolUseId.set(use2.id, child.canonicalId);
-        child.toolInputs.set(use2.id, use2.input);
-        if (use2.name === "Task" && typeof use2.input === "object" && use2.input !== null) {
-          this.taskInputs.set(use2.id, use2.input);
-        }
         const detail = describeRunningTool(use2.name, use2.input);
         const item = {
           type: "tool_call",
@@ -54151,6 +54392,8 @@ var ClaudeSubagentTracker = class {
         detail
       };
       this.emitChildEvent(child, { type: "timeline.item", sessionId: child.providerId, item });
+      child.toolNames.delete(result.tool_use_id);
+      child.toolInputs.delete(result.tool_use_id);
     }
   }
 };
@@ -54166,9 +54409,72 @@ function flattenBlockContent(content) {
   return parts.length > 0 ? parts.join("\n") : null;
 }
 
+// server/claude-message-input.ts
+var ClaudeMessageInput = class {
+  constructor() {
+    this.queue = [];
+    this.unstarted = /* @__PURE__ */ new Map();
+    this.closed = false;
+    this.iterable = {
+      [Symbol.asyncIterator]: () => ({
+        next: async () => {
+          while (!this.closed) {
+            const message = this.queue.shift();
+            if (message) return { value: message, done: false };
+            await new Promise((resolve5) => {
+              this.wake = resolve5;
+            });
+            this.wake = void 0;
+          }
+          return { value: void 0, done: true };
+        }
+      })
+    };
+  }
+  push(message, clearsPermissions = false) {
+    if (this.closed) throw new Error("Claude input is closed");
+    if (message.uuid) this.unstarted.set(message.uuid, { clearsPermissions });
+    this.queue.push(message);
+    this.wake?.();
+  }
+  hasUnstarted(uuid3) {
+    return this.unstarted.has(uuid3);
+  }
+  get pendingUuids() {
+    return [...this.unstarted.keys()];
+  }
+  get clearsPermissions() {
+    return [...this.unstarted.values()].some((entry) => entry.clearsPermissions);
+  }
+  started(uuid3) {
+    this.unstarted.delete(uuid3);
+  }
+  /** Snapshot before any await: a later user message belongs to the next turn. */
+  async withdraw(cancel) {
+    const ids = [...this.unstarted.keys()];
+    const notWithdrawn = [];
+    for (const id2 of ids) this.unstarted.delete(id2);
+    for (const id2 of ids) {
+      const index = this.queue.findIndex((message) => message.uuid === id2);
+      if (index >= 0) {
+        this.queue.splice(index, 1);
+        continue;
+      }
+      if (!cancel || !await cancel(id2)) notWithdrawn.push(id2);
+    }
+    return notWithdrawn;
+  }
+  close() {
+    this.closed = true;
+    this.queue.length = 0;
+    this.unstarted.clear();
+    this.wake?.();
+  }
+};
+
 // server/image-output.ts
 var import_node_crypto5 = require("node:crypto");
-var import_node_fs2 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_node_os3 = __toESM(require("node:os"));
 var import_node_path4 = __toESM(require("node:path"));
 var IMAGE_ATTACHMENT_DIR = "paseo-attachments";
@@ -54178,8 +54484,8 @@ var IMAGE_FILE_MODE = 384;
 var materializedDir = null;
 function canReuseDir(dir) {
   try {
-    if (!(0, import_node_fs2.lstatSync)(dir).isDirectory()) return false;
-    (0, import_node_fs2.chmodSync)(dir, PRIVATE_DIR_MODE);
+    if (!(0, import_node_fs3.lstatSync)(dir).isDirectory()) return false;
+    (0, import_node_fs3.chmodSync)(dir, PRIVATE_DIR_MODE);
     return true;
   } catch {
     return false;
@@ -54187,8 +54493,8 @@ function canReuseDir(dir) {
 }
 function attachmentDir() {
   if (materializedDir !== null && canReuseDir(materializedDir)) return materializedDir;
-  materializedDir = (0, import_node_fs2.mkdtempSync)(import_node_path4.default.join(import_node_os3.default.tmpdir(), IMAGE_ATTACHMENT_DIR_PREFIX));
-  (0, import_node_fs2.chmodSync)(materializedDir, PRIVATE_DIR_MODE);
+  materializedDir = (0, import_node_fs3.mkdtempSync)(import_node_path4.default.join(import_node_os3.default.tmpdir(), IMAGE_ATTACHMENT_DIR_PREFIX));
+  (0, import_node_fs3.chmodSync)(materializedDir, PRIVATE_DIR_MODE);
   return materializedDir;
 }
 function imageExtension(mimeType) {
@@ -54252,8 +54558,8 @@ function materializeImageOutput(data, mimeType) {
   const hash2 = (0, import_node_crypto5.createHash)("sha256").update(bytes).digest("hex");
   const filePath = import_node_path4.default.join(attachmentDir(), `${hash2}.${extension}`);
   try {
-    if (!(0, import_node_fs2.existsSync)(filePath)) (0, import_node_fs2.writeFileSync)(filePath, bytes, { mode: IMAGE_FILE_MODE });
-    (0, import_node_fs2.chmodSync)(filePath, IMAGE_FILE_MODE);
+    if (!(0, import_node_fs3.existsSync)(filePath)) (0, import_node_fs3.writeFileSync)(filePath, bytes, { mode: IMAGE_FILE_MODE });
+    (0, import_node_fs3.chmodSync)(filePath, IMAGE_FILE_MODE);
   } catch {
     return null;
   }
@@ -54667,7 +54973,7 @@ function scanPathForClaude(pathValue, platform) {
       if (directory.length === 0) continue;
       const candidate = import_node_path6.default.join(directory, name);
       try {
-        (0, import_node_fs3.accessSync)(candidate, import_node_fs3.constants.X_OK);
+        (0, import_node_fs4.accessSync)(candidate, import_node_fs4.constants.X_OK);
         return candidate;
       } catch {
       }
@@ -54681,50 +54987,6 @@ function resolvePathClaude() {
     cachedPathClaude = scanPathForClaude(process.env.PATH ?? "", process.platform);
   }
   return cachedPathClaude;
-}
-function createPromptSink() {
-  const queue = [];
-  let wake = null;
-  const iterable = {
-    [Symbol.asyncIterator]() {
-      return {
-        async next() {
-          const pending = queue.shift();
-          if (pending !== void 0) {
-            pending.delivered = true;
-            return { value: pending.message, done: false };
-          }
-          await new Promise((resolve5) => {
-            wake = resolve5;
-          });
-          wake = null;
-          const message = queue.shift();
-          if (message === void 0) return { value: void 0, done: true };
-          message.delivered = true;
-          return { value: message.message, done: false };
-        }
-      };
-    }
-  };
-  return {
-    push(message) {
-      queue.push({ message, steer: false, delivered: false });
-      wake?.();
-    },
-    pushSteer(message) {
-      queue.push({ message, steer: true, delivered: false });
-      wake?.();
-    },
-    discardPendingSteers() {
-      for (let index = queue.length - 1; index >= 0; index -= 1) {
-        const entry = queue[index];
-        if (entry !== void 0 && entry.steer && !entry.delivered) {
-          queue.splice(index, 1);
-        }
-      }
-    },
-    iterable
-  };
 }
 function createTranslateClaudeProvider(deps) {
   const translator = createTranslator(deps);
@@ -54767,7 +55029,7 @@ function createTranslateClaudeProvider(deps) {
         async send(input2) {
           if (connectionClosed) throw new Error("Translate Claude provider connection is closed");
           const session = "sessionId" in input2 ? sessions.get(input2.sessionId) : void 0;
-          if (session && deps.forkCoordinator) {
+          if (session && deps.forkCoordinator && input2.type !== "session.prompt" && input2.type !== "session.interrupt" && input2.type !== "session.permission") {
             await deps.forkCoordinator.exclusive(session.contextKey, () => dispatch(input2, context, capabilities));
           } else await dispatch(input2, context, capabilities);
         },
@@ -54811,24 +55073,7 @@ async function dispatch(input2, context, capabilities) {
       return;
     case "session.interrupt": {
       const session = context.sessions.get(input2.sessionId);
-      if (session !== void 0 && session.query !== null) {
-        session.interrupted = true;
-        const active = session.active;
-        settleAutonomousTurn(session, context.emit, "completed");
-        if (active !== null) {
-          session.pendingInterruptedResults += 1;
-          session.active = null;
-          context.emit({
-            type: "session.turn",
-            sessionId: session.id,
-            turnId: active.turnId,
-            state: "canceled"
-          });
-        }
-        session.sink.discardPendingSteers();
-        await session.query.interrupt().catch(() => void 0);
-        session.subagents?.cancelRunningForegroundTasks();
-      }
+      if (session) await interruptSession(session, context);
       context.emit({ type: "request.completed", requestId: input2.requestId });
       return;
     }
@@ -54850,7 +55095,13 @@ async function dispatch(input2, context, capabilities) {
       (0, import_provider.requireProviderCapabilities)(capabilities, input2);
       const session = context.sessions.get(input2.sessionId);
       if (session === void 0) throw new Error(`Unknown session: ${input2.sessionId}`);
-      await applyConfigChanges(session, input2.changes);
+      try {
+        await applyConfigChanges(session, input2.changes);
+      } catch (error62) {
+        context.emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+        context.emit({ type: "request.failed", requestId: input2.requestId, error: { message: describe3(error62) } });
+        return;
+      }
       if (session.forkConfiguration) context.emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
       context.emit({
         type: "session.config",
@@ -54961,25 +55212,31 @@ async function rewindConversationOnce(session, messageId, context) {
     persistence: claudePersistence(session)
   });
 }
-async function resetQuery(session, emit) {
+async function resetQuery(session, emit, preservePreparing = false) {
   session.detached = true;
+  session.sink.close();
   session.abort.abort();
   session.abort = new AbortController();
   session.interrupted = false;
   session.pendingInterruptedResults = 0;
+  session.mainTurnInFlight = false;
+  session.compacting = false;
+  session.pendingUserAnchors = [];
+  settleRootTools(session, emit, "canceled", "Superseded by a rewind");
   for (const pending of session.pendingPermissions.values()) {
+    pending.cleanup();
     pending.resolve({ behavior: "deny", message: "Superseded by a rewind" });
   }
   session.pendingPermissions.clear();
   const pump = session.pump;
   session.query = null;
   session.pump = null;
-  const active = session.active;
-  session.active = null;
+  const active = preservePreparing && session.active?.announced === false ? null : session.active;
+  if (active) session.active = null;
   await pump?.catch(() => void 0);
   session.subagents?.finishProcessTasks();
   session.detached = false;
-  if (active !== null) {
+  if (active?.announced) {
     emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
   }
   settleAutonomousTurn(session, emit, "canceled");
@@ -55038,15 +55295,23 @@ async function openSession(input2, context, capabilities) {
     config: input2.config,
     contextKey,
     translatedSystemPrompt,
-    desiredModel: readConfigured(input2.config.model),
+    desiredModel: input2.config.model === "default" ? null : readConfigured(input2.config.model),
+    runtimeModel: null,
     desiredMode: readConfigured(input2.config.mode),
     desiredThinking: readConfigured(input2.config.thinkingOption),
-    sink: createPromptSink(),
+    sink: new ClaudeMessageInput(),
+    messages: new ClaudeMessageStream(),
     query: null,
     abort: new AbortController(),
     pump: null,
     claudeSessionId: readStoredSessionId(input2.persistence),
     active: null,
+    mainTurnInFlight: false,
+    mainTurnOrdinal: 0,
+    cancellationEpoch: 0,
+    permissionClearingEpoch: 0,
+    compacting: false,
+    restartForThinking: false,
     autonomous: null,
     interrupted: false,
     pendingInterruptedResults: 0,
@@ -55253,8 +55518,9 @@ async function buildReplayRestore(context) {
   };
 }
 function configStateFor(session) {
+  const model = session.runtimeModel ?? session.desiredModel;
   return {
-    ...session.desiredModel !== null ? { model: session.desiredModel } : {},
+    ...model !== null ? { model } : {},
     ...session.desiredMode !== null ? { mode: session.desiredMode } : {},
     ...session.desiredThinking !== null ? { thinkingOption: session.desiredThinking } : {},
     models: catalogModelsCache ?? [],
@@ -55314,115 +55580,144 @@ function rawPromptText(content) {
 }
 async function promptSession(input2, context) {
   const session = context.sessions.get(input2.sessionId);
-  if (session === void 0) throw new Error(`Unknown session: ${input2.sessionId}`);
-  if (input2.prompt.input.type === "command") {
-    await commandSession(input2, context, session);
-    return;
-  }
+  if (session === void 0 || session.closed) throw new Error(`Unknown session: ${input2.sessionId}`);
   if (input2.prompt.delivery === "steer") {
     await steerSession(input2, context, session);
     return;
   }
-  if (session.active !== null) {
-    context.emit({
-      type: "session.prompt_result",
-      sessionId: input2.sessionId,
-      clientMessageId: input2.prompt.clientMessageId,
-      result: { type: "failed", error: { message: "A turn is already running on this session" } }
-    });
-    return;
-  }
-  let blocks;
-  try {
-    blocks = await buildMessageBlocks(input2.prompt.input.content, context, session.contextKey);
-  } catch (error62) {
-    context.emit({
-      type: "session.prompt_result",
-      sessionId: input2.sessionId,
-      clientMessageId: input2.prompt.clientMessageId,
-      result: { type: "failed", error: { message: describe3(error62) } }
-    });
-    return;
-  }
-  await ensureQuery(session, context);
-  const turnId = (0, import_node_crypto6.randomUUID)();
-  session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
-  session.interrupted = false;
-  settleAutonomousTurn(session, context.emit, "completed");
-  context.emit({
-    type: "session.prompt_result",
-    sessionId: input2.sessionId,
-    clientMessageId: input2.prompt.clientMessageId,
-    result: { type: "turn", turnId }
-  });
-  context.emit({ type: "session.turn", sessionId: input2.sessionId, turnId, state: "started" });
-  session.sink.push({
-    type: "user",
-    message: { role: "user", content: blocks },
-    parent_tool_use_id: null
-  });
-  session.pendingUserAnchors.push({
-    clientMessageId: input2.prompt.clientMessageId,
-    text: rawPromptText(input2.prompt.input.content)
-  });
-  await publishCommands(session, context);
-}
-async function commandSession(input2, context, session) {
-  if (session.active !== null) {
-    context.emit({
-      type: "session.prompt_result",
-      sessionId: input2.sessionId,
-      clientMessageId: input2.prompt.clientMessageId,
-      result: { type: "failed", error: { message: "A turn is already running on this session" } }
-    });
-    return;
-  }
-  if (input2.prompt.input.type !== "command") return;
-  let text = `/${input2.prompt.input.name}`;
-  const args = input2.prompt.input.arguments;
-  if (args.trim().length > 0) {
-    try {
-      const values = await context.loadValues();
-      const translated = values.translatePrompts ? await context.translator.translate(args, "user-to-agent", {
-        contextKey: session.contextKey
-      }) : args;
-      text += ` ${translated}`;
-    } catch (error62) {
+  const cancellationEpoch = session.cancellationEpoch;
+  const reserve = () => {
+    if (session.closed || session.cancellationEpoch !== cancellationEpoch || session.active !== null) {
       context.emit({
         type: "session.prompt_result",
-        sessionId: input2.sessionId,
+        sessionId: session.id,
         clientMessageId: input2.prompt.clientMessageId,
+        result: { type: "failed", error: { message: session.closed || session.cancellationEpoch !== cancellationEpoch ? "Prompt canceled before delivery" : "A turn is already running on this session" } }
+      });
+      return void 0;
+    }
+    const active2 = {
+      clientMessageId: input2.prompt.clientMessageId,
+      turnId: (0, import_node_crypto6.randomUUID)(),
+      messageUuid: (0, import_node_crypto6.randomUUID)(),
+      announced: false,
+      sent: false
+    };
+    session.active = active2;
+    return active2;
+  };
+  const active = context.forkCoordinator ? await context.forkCoordinator.exclusive(session.contextKey, async () => reserve()) : reserve();
+  if (!active) return;
+  try {
+    const prompt = input2.prompt.input;
+    let blocks;
+    let original;
+    if (prompt.type === "command") {
+      original = `/${prompt.name}${prompt.arguments.trim() ? ` ${prompt.arguments}` : ""}`;
+      const values = await context.loadValues();
+      const args = values.translatePrompts && prompt.arguments.trim() ? await context.translator.translate(prompt.arguments, "user-to-agent", { contextKey: session.contextKey }) : prompt.arguments;
+      blocks = [{ type: "text", text: `/${prompt.name}${args.trim() ? ` ${args}` : ""}` }];
+    } else {
+      original = rawPromptText(prompt.content);
+      blocks = await buildMessageBlocks(prompt.content, context, session.contextKey);
+    }
+    if (session.closed || session.active !== active) return;
+    await ensureQuery(session, context, active);
+    if (session.closed || session.active !== active) return;
+    session.interrupted = false;
+    settleAutonomousTurn(session, context.emit, "completed");
+    active.announced = true;
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: session.id,
+      clientMessageId: active.clientMessageId,
+      result: { type: "turn", turnId: active.turnId }
+    });
+    context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "started" });
+    if (session.closed || session.active !== active) return;
+    session.pendingUserAnchors.push({ uuid: active.messageUuid, clientMessageId: active.clientMessageId, text: original });
+    active.sent = true;
+    session.sink.push({
+      type: "user",
+      uuid: active.messageUuid,
+      session_id: session.claudeSessionId ?? "",
+      parent_tool_use_id: null,
+      message: { role: "user", content: blocks }
+    });
+    await publishCommands(session, context);
+  } catch (error62) {
+    if (session.closed || session.active !== active) return;
+    session.active = null;
+    if (active.announced) {
+      context.emit({
+        type: "session.turn",
+        sessionId: session.id,
+        turnId: active.turnId,
+        state: "failed",
+        error: { message: describe3(error62) }
+      });
+    } else {
+      context.emit({
+        type: "session.prompt_result",
+        sessionId: session.id,
+        clientMessageId: active.clientMessageId,
         result: { type: "failed", error: { message: describe3(error62) } }
       });
-      return;
     }
   }
-  await ensureQuery(session, context);
-  const turnId = (0, import_node_crypto6.randomUUID)();
-  session.active = { clientMessageId: input2.prompt.clientMessageId, turnId };
-  session.interrupted = false;
+}
+async function interruptSession(session, context) {
+  session.cancellationEpoch += 1;
+  const active = session.active;
+  const query = session.query;
+  const sink = session.sink;
+  const mainTurnOrdinal = session.mainTurnOrdinal;
+  const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid));
+  session.active = null;
   settleAutonomousTurn(session, context.emit, "completed");
-  context.emit({
-    type: "session.prompt_result",
-    sessionId: input2.sessionId,
-    clientMessageId: input2.prompt.clientMessageId,
-    result: { type: "turn", turnId }
+  if (active) {
+    if (active.announced) context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
+    else context.emit({
+      type: "session.prompt_result",
+      sessionId: session.id,
+      clientMessageId: active.clientMessageId,
+      result: { type: "failed", error: { message: "Prompt canceled before delivery" } }
+    });
+  }
+  denyPendingPermissions(session, context.emit, "Interrupted");
+  settleRootTools(session, context.emit, "canceled", "Interrupted");
+  if (hadMainTurn || active?.sent) session.subagents?.cancelRunningForegroundTasks();
+  if (!query) return;
+  const ownsResult = Boolean(active?.sent && hadMainTurn);
+  if (ownsResult) session.pendingInterruptedResults += 1;
+  session.interrupted = hadMainTurn;
+  const withdrawing = new Set(sink.pendingUuids);
+  const notWithdrawn = await sink.withdraw(async (uuid3) => {
+    if (!query.cancelAsyncMessage) return false;
+    try {
+      return await withTimeout(query.cancelAsyncMessage(uuid3), 1e4, "Claude message withdrawal timed out");
+    } catch (error62) {
+      console.warn(`[translate-claude] Could not withdraw message: ${describe3(error62)}`);
+      return false;
+    }
   });
-  context.emit({ type: "session.turn", sessionId: input2.sessionId, turnId, state: "started" });
-  session.sink.push({
-    type: "user",
-    message: { role: "user", content: [{ type: "text", text }] },
-    parent_tool_use_id: null
-  });
-  session.pendingUserAnchors.push({
-    clientMessageId: input2.prompt.clientMessageId,
-    text: `/${input2.prompt.input.name}${args.trim().length > 0 ? ` ${args}` : ""}`
-  });
-  await publishCommands(session, context);
+  const retained = new Set(notWithdrawn);
+  session.pendingUserAnchors = session.pendingUserAnchors.filter((anchor2) => !withdrawing.has(anchor2.uuid) || retained.has(anchor2.uuid));
+  if (session.query !== query || session.mainTurnOrdinal !== mainTurnOrdinal) return;
+  if (!hadMainTurn && notWithdrawn.length === 0) return;
+  if (!ownsResult && active?.sent) session.pendingInterruptedResults += 1;
+  session.interrupted = true;
+  try {
+    await withTimeout(query.interrupt(), 1e4, "Claude interrupt timed out");
+  } catch (error62) {
+    console.warn(`[translate-claude] Interrupt failed: ${describe3(error62)}`);
+  }
 }
 async function steerSession(input2, context, session) {
-  const active = session.active;
-  if (active === null || session.query === null) {
+  const active = session.active ?? session.autonomous;
+  const query = session.query;
+  const sink = session.sink;
+  if (active === null || query === null || session.compacting || session.active !== null && !session.active.sent) {
     context.emit({
       type: "session.prompt_result",
       sessionId: input2.sessionId,
@@ -55452,20 +55747,33 @@ async function steerSession(input2, context, session) {
     });
     return;
   }
-  if (input2.prompt.clearPendingPermissions === true) {
-    denyPendingForSteer(session, (event) => context.emit(event));
+  if (session.closed || (session.active ?? session.autonomous) !== active || session.query !== query || session.sink !== sink) {
+    context.emit({
+      type: "session.prompt_result",
+      sessionId: input2.sessionId,
+      clientMessageId: input2.prompt.clientMessageId,
+      result: { type: "failed", error: { message: "Active turn changed while translating the follow-up" } }
+    });
+    return;
   }
-  session.sink.pushSteer({
+  const uuid3 = (0, import_node_crypto6.randomUUID)();
+  if (input2.prompt.clearPendingPermissions === true) session.permissionClearingEpoch += 1;
+  session.pendingUserAnchors.push({
+    uuid: uuid3,
+    clientMessageId: input2.prompt.clientMessageId,
+    text: rawPromptText(input2.prompt.input.content)
+  });
+  sink.push({
     type: "user",
     message: { role: "user", content: blocks },
     parent_tool_use_id: null,
     priority: "next",
-    uuid: (0, import_node_crypto6.randomUUID)()
-  });
-  session.pendingUserAnchors.push({
-    clientMessageId: input2.prompt.clientMessageId,
-    text: rawPromptText(input2.prompt.input.content)
-  });
+    uuid: uuid3,
+    session_id: session.claudeSessionId ?? ""
+  }, input2.prompt.clearPendingPermissions === true);
+  if (input2.prompt.clearPendingPermissions === true) {
+    denyPendingPermissions(session, context.emit, "Superseded by a follow-up prompt");
+  }
   context.emit({
     type: "session.prompt_result",
     sessionId: input2.sessionId,
@@ -55473,12 +55781,13 @@ async function steerSession(input2, context, session) {
     result: { type: "steer", turnId: active.turnId }
   });
 }
-function denyPendingForSteer(session, emit) {
+function denyPendingPermissions(session, emit, message) {
   for (const permissionId of session.pendingPermissions.keys()) {
     const pending = session.pendingPermissions.get(permissionId);
     if (pending === void 0) continue;
     session.pendingPermissions.delete(permissionId);
-    pending.resolve({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+    pending.cleanup();
+    pending.resolve({ behavior: "deny", message });
     emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
   }
 }
@@ -55492,9 +55801,11 @@ async function buildMessageBlocks(content, context, contextKey) {
   const blocks = [];
   const displayFragments = [];
   let hasContent = false;
+  let slashCommandIndex = -1;
   for (const block of content) {
     if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
       const translated = await translatePromptFragment(block.text, translate);
+      if (!("mimeType" in block) && /^\/[\w:-]+(?:\s|$)/.test(block.text)) slashCommandIndex = blocks.length;
       displayFragments.push({ original: block.text, translated });
       if (translated.trim().length > 0) hasContent = true;
       blocks.push({ type: "text", text: translated });
@@ -55515,32 +55826,62 @@ async function buildMessageBlocks(content, context, contextKey) {
   if (!hasContent) {
     throw new Error("Refusing to send an empty prompt");
   }
+  if (slashCommandIndex >= 0 && slashCommandIndex < blocks.length - 1) {
+    const [command] = blocks.splice(slashCommandIndex, 1);
+    blocks.push(command);
+  }
   if (values.translatePrompts) await context.translator.rememberPromptDisplay(displayFragments, { contextKey });
   return blocks;
 }
-async function ensureQuery(session, context) {
+async function ensureQuery(session, context, preparing) {
+  if (session.query !== null && session.restartForThinking) {
+    session.restartForThinking = false;
+    await resetQuery(session, context.emit, true);
+  }
   if (session.query !== null) return;
+  if (session.closed) throw new Error("Claude session is closed");
   session.subagents?.resetProcessTasks();
   const values = await context.loadValues();
+  if (session.closed || preparing && session.active !== preparing) throw new Error("Claude prompt was canceled during startup");
+  if (session.query !== null) return;
   const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const permissionMode = session.desiredMode ?? void 0;
   const providerOptions = resolveProviderOptions(session);
+  validateThinking(session.desiredThinking, session.desiredModel);
   const thinking = thinkingStartOptions(session.desiredThinking);
-  const effortLevel = thinking.settings !== void 0 && typeof thinking.settings === "object" && thinking.settings !== null && "effortLevel" in thinking.settings ? thinking.settings.effortLevel : void 0;
   const settings = {
     ...providerOptions.settings,
-    // Thinking effort wins over a leftover providerOptions.settings.effortLevel
-    // so a mode picker change is not silently ignored.
-    ...effortLevel !== void 0 ? { effortLevel } : {},
+    ...typeof thinking.settings === "object" ? thinking.settings : {},
     ...session.fastMode ? { fastMode: true } : {}
+  };
+  if (thinking.effort !== void 0) delete settings.effortLevel;
+  const observeEffort = async (input2) => {
+    try {
+      session.subagents?.observeHook(input2);
+    } catch (error62) {
+      console.warn(`[translate-claude] Could not observe child effort: ${describe3(error62)}`);
+    }
+    return {};
   };
   const options = {
     cwd: session.config.cwd,
-    env: { ...process.env, ...omitTranslationBridgeEnv(session.config.env) },
+    env: {
+      ...process.env,
+      ...omitTranslationBridgeEnv(session.config.env),
+      CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1"
+    },
     abortController: session.abort,
     // Token-level stream events drive the mid-turn context ring (the timeline
     // itself still renders complete messages).
     includePartialMessages: true,
+    forwardSubagentText: true,
+    perTaskStopAffordance: true,
+    persistSession: session.config.persist,
+    hooks: {
+      PreToolUse: [{ hooks: [observeEffort] }],
+      PostToolUse: [{ hooks: [observeEffort] }],
+      SubagentStop: [{ hooks: [observeEffort] }]
+    },
     // Mirror the native provider: load the user's settings/CLAUDE.md layers.
     settingSources: ["user", "project", "local"],
     // Required for provider-level file rewind.
@@ -55562,12 +55903,12 @@ async function ensureQuery(session, context) {
     // setPermissionMode("bypassPermissions") does not fail after a restart
     // (native provider parity).
     allowDangerouslySkipPermissions: true,
-    // Leave perTaskStopAffordance undeclared until the client exposes a
-    // stop_task control. The CLI's default then lets Stop end background
-    // tasks too, rather than leaving work the user cannot directly stop.
+    // Like native Paseo, Stop aborts the main turn. Claude can stop a helper
+    // explicitly through TaskStop without killing unrelated background work.
     ...permissionMode !== void 0 ? { permissionMode } : {},
     ...executable !== null ? { pathToClaudeCodeExecutable: executable } : {},
     ...thinking.thinking !== void 0 ? { thinking: thinking.thinking } : {},
+    ...thinking.effort !== void 0 ? { effort: thinking.effort } : {},
     ...Object.keys(settings).length > 0 ? { settings } : {},
     ...providerOptions.spread,
     canUseTool: ((toolName, input2, toolOptions) => requestPermission(
@@ -55580,6 +55921,12 @@ async function ensureQuery(session, context) {
   };
   const servers = normalizeMcpServers(session.config.mcpServers);
   if (servers !== void 0) options.mcpServers = servers;
+  session.sink.close();
+  session.messages.clear();
+  session.sink = new ClaudeMessageInput();
+  session.mainTurnInFlight = false;
+  session.compacting = false;
+  session.commandsPublished = false;
   const query = context.queryFactory({ prompt: session.sink.iterable, options });
   session.query = query;
   session.pump = pumpQuery(session, query, context);
@@ -55696,74 +56043,74 @@ function thinkingStartOptions(thinking) {
   if (thinking === null || thinking === "default") return {};
   if (thinking === "adaptive") return { thinking: { type: "adaptive" } };
   if (thinking === "off") return { thinking: { type: "disabled" } };
-  if (START_EFFORT.has(thinking)) {
-    return { settings: { effortLevel: thinking } };
+  if (thinking === "ultracode") return { thinking: { type: "adaptive" }, effort: "xhigh", settings: { ultracode: true } };
+  if (START_EFFORT.has(thinking) || thinking === "max") {
+    return { thinking: { type: "adaptive" }, effort: thinking };
   }
-  if (thinking === "max") {
-    return { settings: { effortLevel: "xhigh" } };
+  throw new Error(`Unknown Claude thinking option: ${thinking}`);
+}
+function observePermissionMode(session, mode) {
+  const previous = session.desiredMode ?? "default";
+  session.desiredMode = mode === "default" ? null : mode;
+  if (mode === "plan") {
+    if (previous !== "plan") session.planResumeMode = previous;
+  } else session.planResumeMode = mode;
+}
+function validateThinking(thinking, model) {
+  thinkingStartOptions(thinking);
+  if (thinking === "off" && findClaudeModel(model)?.supportsThinkingDisabled !== true) {
+    throw new Error(`Thinking cannot be disabled for model ${model ?? "default"}`);
   }
-  return {};
 }
 async function applyConfigChanges(session, changes) {
+  const model = Object.hasOwn(changes, "model") ? readConfigured(changes.model ?? void 0) : session.desiredModel;
+  const nextModel = model === "default" ? null : model ?? null;
+  const thinking = Object.hasOwn(changes, "thinkingOption") ? readConfigured(changes.thinkingOption ?? void 0) : session.desiredThinking;
+  const nextThinking = thinking === "default" ? null : thinking ?? null;
+  if (Object.hasOwn(changes, "thinkingOption")) validateThinking(nextThinking, nextModel);
+  if (Object.hasOwn(changes, "mode") && changes.mode && !VALID_MODES.has(changes.mode)) throw new Error(`Unknown Claude mode: ${changes.mode}`);
   if (Object.hasOwn(changes, "model")) {
-    const model = changes.model ?? null;
-    session.desiredModel = model === null || model === "default" ? null : model;
-    session.fastModeSupported = claudeModelSupportsFastMode(session.desiredModel);
-    session.contextWindowMaxTokens = findClaudeModel(session.desiredModel)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
-    if (session.fastMode && !session.fastModeSupported) {
-      session.fastMode = false;
-      if (session.query?.applyFlagSettings !== void 0) {
-        await session.query.applyFlagSettings({ fastMode: false }).catch(() => void 0);
-      }
+    if (session.query) {
+      if (!session.query.setModel) throw new Error("Claude does not support live model changes");
+      await session.query.setModel(nextModel ?? void 0);
     }
-    if (session.query?.setModel !== void 0) {
-      await session.query.setModel(session.desiredModel ?? void 0).catch(() => void 0);
+    session.desiredModel = nextModel;
+    session.runtimeModel = null;
+    session.fastModeSupported = claudeModelSupportsFastMode(nextModel);
+    session.contextWindowMaxTokens = findClaudeModel(nextModel)?.contextWindowMaxTokens ?? null;
+    if (session.desiredThinking === "off" && findClaudeModel(nextModel)?.supportsThinkingDisabled !== true) {
+      session.desiredThinking = findClaudeModel(nextModel)?.defaultThinkingOption ?? null;
+      session.restartForThinking = true;
+    }
+    if (session.fastMode && !session.fastModeSupported) {
+      if (session.query) {
+        if (!session.query.applyFlagSettings) throw new Error("Claude does not support live fast-mode changes");
+        await session.query.applyFlagSettings({ fastMode: false });
+      }
+      session.fastMode = false;
     }
   }
   if (Object.hasOwn(changes, "mode")) {
-    const mode = changes.mode ?? null;
-    const previousMode = session.desiredMode ?? "default";
-    if (mode === null || mode === "default") {
-      session.desiredMode = null;
-    } else if (VALID_MODES.has(mode)) {
-      session.desiredMode = mode;
+    const mode = changes.mode ?? "default";
+    if (session.query) {
+      if (!session.query.setPermissionMode) throw new Error("Claude does not support live permission-mode changes");
+      await session.query.setPermissionMode(mode);
     }
-    if (session.desiredMode === "plan") {
-      if (previousMode !== "plan") session.planResumeMode = previousMode;
-    } else {
-      session.planResumeMode = session.desiredMode ?? "default";
-    }
-    if (session.query?.setPermissionMode !== void 0) {
-      await session.query.setPermissionMode(session.desiredMode ?? "default").catch(() => void 0);
-    }
+    observePermissionMode(session, mode);
   }
-  if (Object.hasOwn(changes, "thinkingOption")) {
-    const thinking = changes.thinkingOption ?? null;
-    session.desiredThinking = thinking === null || thinking === "default" || thinking.length === 0 ? null : thinking;
-    if (session.query?.applyFlagSettings !== void 0) {
-      await session.query.applyFlagSettings(thinkingFlagSettings(session.desiredThinking)).catch(() => void 0);
+  if (Object.hasOwn(changes, "thinkingOption") && session.desiredThinking !== nextThinking) {
+    session.desiredThinking = nextThinking;
+    session.restartForThinking = session.query !== null;
+  }
+  if (changes.settings && Object.hasOwn(changes.settings, "fast_mode")) {
+    const enabled = changes.settings.fast_mode === true;
+    if (enabled && !session.fastModeSupported) throw new Error("Fast mode is unavailable for the selected Claude model");
+    if (session.query) {
+      if (!session.query.applyFlagSettings) throw new Error("Claude does not support live fast-mode changes");
+      await session.query.applyFlagSettings({ fastMode: enabled });
     }
+    session.fastMode = enabled;
   }
-  if (Object.hasOwn(changes, "settings")) {
-    const settings = changes.settings ?? {};
-    if (Object.hasOwn(settings, "fast_mode")) {
-      session.fastMode = settings["fast_mode"] === true;
-      if (session.fastMode && !session.fastModeSupported) {
-        session.fastMode = false;
-      }
-      if (session.query?.applyFlagSettings !== void 0) {
-        await session.query.applyFlagSettings({ fastMode: session.fastMode }).catch(() => void 0);
-      }
-    }
-  }
-}
-function thinkingFlagSettings(thinking) {
-  if (thinking === null || thinking === "default") {
-    return { effortLevel: null, alwaysThinkingEnabled: null };
-  }
-  if (thinking === "adaptive") return { effortLevel: null, alwaysThinkingEnabled: true };
-  if (thinking === "off") return { effortLevel: null, alwaysThinkingEnabled: false };
-  return { effortLevel: thinking };
 }
 var catalogModelsCache = null;
 async function probeCatalog(context) {
@@ -55775,7 +56122,7 @@ async function probeModels(context) {
   const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const abort = new AbortController();
   const query = context.queryFactory({
-    prompt: createPromptSink().iterable,
+    prompt: new ClaudeMessageInput().iterable,
     options: {
       cwd: process.cwd(),
       env: { ...process.env },
@@ -55817,6 +56164,7 @@ function thinkingOptionsForModel(info) {
   const options = [
     { id: "default", label: "Default", isDefault: true }
   ];
+  if (findClaudeModel(info.value)?.supportsThinkingDisabled === true) options.push({ id: "off", label: "Off" });
   if (info.supportsAdaptiveThinking === true) {
     options.push({ id: "adaptive", label: "Adaptive" });
   }
@@ -55825,6 +56173,7 @@ function thinkingOptionsForModel(info) {
       options.push({ id: level, label: labelForEffort(level) });
     }
   }
+  if (info.supportedEffortLevels?.includes("xhigh")) options.push({ id: "ultracode", label: "Ultra Code" });
   return options;
 }
 function labelForEffort(level) {
@@ -55850,19 +56199,28 @@ function requestPermission(session, toolName, input2, toolOptions, context) {
   return requestToolPermission(session, toolName, input2, toolOptions, context);
 }
 function waitForPermissionResponse(session, permissionId, request, toolOptions, emit, question, plan = false) {
+  if (session.closed || toolOptions.signal.aborted) {
+    return Promise.resolve({ behavior: "deny", message: "Permission request expired" });
+  }
+  if (session.sink.clearsPermissions) {
+    return Promise.resolve({ behavior: "deny", message: "Superseded by a follow-up prompt" });
+  }
   return new Promise((resolve5) => {
+    const abort = () => {
+      const pending = session.pendingPermissions.get(permissionId);
+      if (!pending) return;
+      session.pendingPermissions.delete(permissionId);
+      pending.cleanup();
+      pending.resolve({ behavior: "deny", message: "Permission request expired" });
+      emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
+    };
     session.pendingPermissions.set(permissionId, {
       resolve: resolve5,
+      cleanup: () => toolOptions.signal.removeEventListener("abort", abort),
       ...question !== void 0 ? { question } : {},
       ...plan ? { plan: true } : {}
     });
-    toolOptions.signal.addEventListener("abort", () => {
-      const pending = session.pendingPermissions.get(permissionId);
-      if (pending === void 0) return;
-      session.pendingPermissions.delete(permissionId);
-      pending.resolve({ behavior: "deny", message: "Permission request expired" });
-      emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
-    });
+    toolOptions.signal.addEventListener("abort", abort, { once: true });
     emit({ type: "session.permission", sessionId: session.id, request });
   });
 }
@@ -55927,6 +56285,12 @@ function buildPlanPermissionActions(resumeMode) {
 }
 async function requestQuestionPermission(session, input2, toolOptions, context) {
   const emit = (event) => context.emit(event);
+  const cancellationEpoch = session.cancellationEpoch;
+  const query = session.query;
+  const permissionClearingEpoch = session.permissionClearingEpoch;
+  if (session.sink.clearsPermissions) {
+    return { behavior: "deny", message: "Superseded by a follow-up prompt" };
+  }
   const permissionId = toolOptions.requestId;
   const requestInput = normalizeQuestionRequestInput(
     JSON.parse(JSON.stringify(input2))
@@ -55944,7 +56308,7 @@ async function requestQuestionPermission(session, input2, toolOptions, context) 
   } catch {
     translatedQuestions = originalQuestions;
   }
-  if (toolOptions.signal.aborted || session.closed) {
+  if (toolOptions.signal.aborted || session.closed || session.cancellationEpoch !== cancellationEpoch || session.query !== query || session.permissionClearingEpoch !== permissionClearingEpoch) {
     return { behavior: "deny", message: "Permission request expired" };
   }
   const summary = summarizeQuestions({ questions: translatedQuestions });
@@ -55967,40 +56331,33 @@ async function respondToPermission(session, permissionId, response, context) {
   const emit = (event) => context.emit(event);
   if (session === void 0) return;
   const pending = session.pendingPermissions.get(permissionId);
-  if (pending === void 0) return;
-  session.pendingPermissions.delete(permissionId);
-  if (response.behavior === "allow") {
-    if (pending.question !== void 0) {
-      await resolveQuestionAllow(pending.question, response, pending.resolve, context, session.contextKey);
-    } else {
-      if (pending.plan === true) {
-        const shouldResumeBypass = response.selectedActionId === "implement_resume" && session.planResumeMode === "bypassPermissions";
-        const targetMode = shouldResumeBypass ? "bypassPermissions" : "acceptEdits";
-        session.desiredMode = targetMode;
-        session.planResumeMode = targetMode;
-        if (session.forkConfiguration) emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
-        if (session.query?.setPermissionMode !== void 0) {
-          await session.query.setPermissionMode(targetMode).catch(() => void 0);
-        }
-        emit({
-          type: "session.config",
-          sessionId: session.id,
-          config: configStateFor(session)
-        });
-      }
-      pending.resolve({
-        behavior: "allow",
-        updatedInput: response.updatedInput,
-        updatedPermissions: response.updatedPermissions
-      });
-    }
-  } else {
-    pending.resolve({
-      behavior: "deny",
-      message: response.message ?? "Denied",
-      interrupt: response.interrupt
+  if (!pending || pending.resolving) return;
+  pending.resolving = true;
+  let result;
+  if (response.behavior === "deny") {
+    result = { behavior: "deny", message: response.message ?? "Denied", interrupt: response.interrupt };
+  } else if (pending.question) {
+    const question = pending.question;
+    result = await new Promise((resolve5) => {
+      void resolveQuestionAllow(question, response, resolve5, context, session.contextKey);
     });
+  } else {
+    result = { behavior: "allow", updatedInput: response.updatedInput, updatedPermissions: response.updatedPermissions };
+    if (pending.plan) {
+      const targetMode = response.selectedActionId === "implement_resume" && session.planResumeMode === "bypassPermissions" ? "bypassPermissions" : "acceptEdits";
+      try {
+        await applyConfigChanges(session, { mode: targetMode });
+        if (session.forkConfiguration) emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
+        emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+      } catch (error62) {
+        result = { behavior: "deny", message: `Could not apply plan permission mode: ${describe3(error62)}` };
+      }
+    }
   }
+  if (session.pendingPermissions.get(permissionId) !== pending) return;
+  session.pendingPermissions.delete(permissionId);
+  pending.cleanup();
+  pending.resolve(result);
   emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
 }
 async function resolveQuestionAllow(question, response, resolve5, context, contextKey) {
@@ -56048,16 +56405,48 @@ async function pumpQuery(session, query, context) {
   }
   finishDeadQuery(session, "Claude exited unexpectedly", emit);
 }
+function settleRootTools(session, emit, status, message) {
+  for (const [id2, name] of session.toolNames) {
+    emit({
+      type: "timeline.item",
+      sessionId: session.id,
+      item: {
+        type: "tool_call",
+        id: id2,
+        callId: id2,
+        name,
+        detail: describeFinishedTool(name, session.toolInputs.get(id2), message),
+        ...status === "failed" ? { status, error: message } : { status, error: null }
+      }
+    });
+  }
+  session.toolNames.clear();
+  session.toolInputs.clear();
+}
 function finishDeadQuery(session, message, emit) {
   session.query = null;
   session.pump = null;
+  session.abort.abort();
+  session.abort = new AbortController();
+  session.sink.close();
+  session.messages.clear();
+  session.pendingUserAnchors = [];
+  session.mainTurnInFlight = false;
+  session.compacting = false;
   const wasInterrupted = session.interrupted;
   session.interrupted = false;
   session.pendingInterruptedResults = 0;
   const active = session.active;
-  if (active !== null) {
+  if (active !== null && (active.announced || !wasInterrupted)) {
     session.active = null;
-    if (wasInterrupted) {
+    if (!active.announced) {
+      emit({
+        type: "session.prompt_result",
+        sessionId: session.id,
+        clientMessageId: active.clientMessageId,
+        result: { type: "failed", error: { message } }
+      });
+    } else if (wasInterrupted) {
       emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "canceled" });
     } else {
       emit({
@@ -56069,12 +56458,14 @@ function finishDeadQuery(session, message, emit) {
       });
     }
   }
+  settleRootTools(session, emit, wasInterrupted ? "canceled" : "failed", message);
   if (session.autonomous !== null) {
     settleAutonomousTurn(session, emit, wasInterrupted ? "canceled" : "failed", wasInterrupted ? void 0 : message);
   }
   if (wasInterrupted) session.subagents?.cancelRunningForegroundTasks();
   session.subagents?.failRunningTasks();
   for (const pending of session.pendingPermissions.values()) {
+    pending.cleanup();
     pending.resolve({ behavior: "deny", message: "Claude session ended" });
   }
   session.pendingPermissions.clear();
@@ -56088,9 +56479,6 @@ function finishDeadQuery(session, message, emit) {
       }
     });
   }
-}
-function isAssistantishSdkMessage(message) {
-  return message.type === "assistant" || message.type === "stream_event" || message.type === "tool_progress" || message.type === "system" && message.subtype === "task_notification";
 }
 function startAutonomousTurn(session, emit) {
   if (session.autonomous !== null) return;
@@ -56112,17 +56500,53 @@ function settleAutonomousTurn(session, emit, state, error62) {
 }
 function handleSdkMessage(session, message, context) {
   const emit = (event) => context.emit(event);
-  if (session.active === null && !session.interrupted && session.pendingInterruptedResults === 0 && isAssistantishSdkMessage(message)) {
+  const lifecycle = message;
+  if (lifecycle.type === "command_lifecycle" && typeof lifecycle.command_uuid === "string" && typeof lifecycle.state === "string" && lifecycle.state !== "queued") {
+    session.sink.started(lifecycle.command_uuid);
+    if (lifecycle.state === "started") session.mainTurnInFlight = true;
+    else session.pendingUserAnchors = session.pendingUserAnchors.filter((anchor2) => anchor2.uuid !== lifecycle.command_uuid);
+    return;
+  }
+  if (message.type === "system" && message.subtype === "init") {
+    session.mainTurnInFlight = true;
+    session.mainTurnOrdinal += 1;
+    session.interrupted = false;
+    session.pendingInterruptedResults = 0;
+    if (message.session_id) {
+      session.claudeSessionId = message.session_id;
+      emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
+    }
+    if (message.model) {
+      session.runtimeModel = message.model;
+      session.contextWindowMaxTokens = findClaudeModel(message.model)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
+    }
+    if (VALID_MODES.has(message.permissionMode)) observePermissionMode(session, message.permissionMode);
+    emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+  }
+  if (message.type === "system" && message.subtype === "session_state_changed") {
+    if (message.state === "idle") {
+      session.mainTurnInFlight = false;
+      settleAutonomousTurn(session, emit, "completed");
+    }
+    return;
+  }
+  if (session.active === null && !session.interrupted && session.pendingInterruptedResults === 0 && message.type === "system" && message.subtype === "init") {
     startAutonomousTurn(session, emit);
   }
   if (session.subagents?.observeSystemMessage(message) === true) return;
   if (message.type === "system") {
     if (message.subtype === "init") void publishCommands(session, context);
     if (message.subtype === "status") {
+      if (message.permissionMode && VALID_MODES.has(message.permissionMode)) {
+        observePermissionMode(session, message.permissionMode);
+        emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
+      }
+      session.compacting = message.status === "compacting";
       noteCompactionStatus(session, message, emit);
       return;
     }
     if (message.subtype === "compact_boundary") {
+      session.compacting = false;
       noteCompactionBoundary(session, message, emit);
       return;
     }
@@ -56135,39 +56559,16 @@ function handleSdkMessage(session, message, context) {
   }
   if (message.type === "stream_event") {
     noteStreamEventUsage(session, message, emit);
+    for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
     noteAssistantContextUsage(session, message.message);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
+    for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
     for (const block of content) {
-      if (typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string") {
-        const text = block.text;
-        if (text.trim().length === 0) continue;
-        emit({
-          type: "timeline.item",
-          sessionId: session.id,
-          item: {
-            type: "assistant_message",
-            id: message.uuid,
-            text,
-            messageId: message.uuid
-          }
-        });
-      } else if (typeof block === "object" && block !== null && block.type === "thinking" && typeof block.thinking === "string") {
-        const thinking = block.thinking;
-        if (thinking.trim().length === 0) continue;
-        emit({
-          type: "timeline.item",
-          sessionId: session.id,
-          item: {
-            type: "reasoning",
-            id: message.uuid,
-            text: thinking
-          }
-        });
-      } else if (typeof block === "object" && block !== null && (block.type === "tool_use" || block.type === "mcp_tool_use" || block.type === "server_tool_use")) {
+      if (typeof block === "object" && block !== null && (block.type === "tool_use" || block.type === "mcp_tool_use" || block.type === "server_tool_use")) {
         const use2 = block;
         if (typeof use2.id !== "string" || typeof use2.name !== "string") continue;
         session.toolNames.set(use2.id, use2.name);
@@ -56211,6 +56612,8 @@ function handleSdkMessage(session, message, context) {
             detail: describeFinishedTool(name, session.toolInputs.get(result.tool_use_id), output2.text)
           }
         });
+        session.toolNames.delete(result.tool_use_id);
+        session.toolInputs.delete(result.tool_use_id);
         for (const [index, image] of output2.images.entries()) {
           const materialized = materializeImageOutput(image.data, image.mimeType);
           emit({
@@ -56228,6 +56631,8 @@ function handleSdkMessage(session, message, context) {
     return;
   }
   if (message.type === "result") {
+    session.mainTurnInFlight = false;
+    session.compacting = false;
     const missingConversation = readMissingConversationError(message, session.claudeSessionId);
     if (missingConversation !== null) {
       session.claudeSessionId = null;
@@ -56262,8 +56667,11 @@ function handleSdkMessage(session, message, context) {
       session.pendingInterruptedResults = 0;
       session.detached = true;
       session.abort.abort();
+      session.sink.close();
+      session.pendingUserAnchors = [];
       session.abort = new AbortController();
       for (const pending of session.pendingPermissions.values()) {
+        pending.cleanup();
         pending.resolve({ behavior: "deny", message: "Claude session ended" });
       }
       session.pendingPermissions.clear();
@@ -56271,7 +56679,7 @@ function handleSdkMessage(session, message, context) {
       session.pump = null;
       return;
     }
-    session.claudeSessionId = message.session_id;
+    if (message.session_id) session.claudeSessionId = message.session_id;
     emit({
       type: "session.persistence",
       sessionId: session.id,
@@ -56287,7 +56695,11 @@ function handleSdkMessage(session, message, context) {
     session.streamOutputTokens = null;
     const wasInterrupted = session.interrupted;
     session.interrupted = false;
-    const active = session.active;
+    if (message.subtype !== "success" || message.is_error) {
+      const reason = message.subtype === "success" ? message.result : message.errors[0] ?? "Claude turn failed";
+      settleRootTools(session, emit, wasInterrupted ? "canceled" : "failed", reason);
+    }
+    const active = session.active?.announced ? session.active : null;
     if (active === null) {
       if (wasInterrupted) {
         settleAutonomousTurn(session, emit, "canceled");
@@ -56525,7 +56937,8 @@ function noteRewindAnchor(session, message, emit) {
   }
   if (session.rewindUserMessageIds.includes(uuid3)) return;
   session.rewindUserMessageIds.push(uuid3);
-  const anchor2 = session.pendingUserAnchors.shift();
+  const matched = session.pendingUserAnchors.findIndex((entry) => entry.uuid === uuid3);
+  const [anchor2] = session.pendingUserAnchors.splice(matched >= 0 ? matched : 0, 1);
   if (anchor2 === void 0) return;
   emit({
     type: "timeline.item",
@@ -56543,9 +56956,12 @@ function noteRewindAnchor(session, message, emit) {
 async function teardownSession(session) {
   if (session.closed) return;
   session.closed = true;
+  session.cancellationEpoch += 1;
+  session.sink.close();
   session.abort.abort();
   session.subagents?.reset();
   for (const pending of session.pendingPermissions.values()) {
+    pending.cleanup();
     pending.resolve({ behavior: "deny", message: "Session closed" });
   }
   session.pendingPermissions.clear();
