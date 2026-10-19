@@ -51,6 +51,32 @@ describe("translate assistant transformer", () => {
       }),
     ).toBeUndefined();
   });
+
+  it("keeps any message with an image on the host renderer", () => {
+    expect(
+      transformAssistantMessage({
+        item: { text: "Done.\n\n![shot](https://example.com/a.png)" },
+        phase: "complete",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("keeps file references the host can open on the host renderer", () => {
+    expect(
+      transformAssistantMessage({
+        item: { text: "Changed `src/app.ts:12` and [the handler](src/server/handler.ts)" },
+        phase: "complete",
+      }),
+    ).toBeUndefined();
+    expect(
+      transformAssistantMessage({ item: { text: "Changed `package.json`" }, phase: "complete" }),
+    ).not.toBeUndefined();
+    // The host does not resolve a `.diff` target, so the translated row keeps
+    // it and the message keeps its translation.
+    expect(
+      transformAssistantMessage({ item: { text: "See [the diff](changes.diff)" }, phase: "complete" }),
+    ).not.toBeUndefined();
+  });
 });
 
 describe("translate reasoning transformer", () => {

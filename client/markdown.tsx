@@ -1,5 +1,6 @@
 import { useMemo } from "react";
-import { Linking, Platform, Text, View } from "react-native";
+import { Platform, Text, View } from "react-native";
+import { openExternalUrl } from "@getpaseo/plugin/client";
 import {
   parseMarkdownBlocks,
   type BlockNode,
@@ -218,12 +219,17 @@ function InlineNodeView({ node, colors }: { node: InlineNode; colors: MarkdownCo
         <Text
           style={{ color: colors.accent }}
           onPress={() => {
-            Linking.openURL(node.href).catch(() => undefined);
+            void openExternalUrl(node.href).catch(() => undefined);
           }}
         >
           <Inline nodes={node.children} colors={colors} />
         </Text>
       );
+    case "image":
+      // Messages carrying images keep the host renderer, so this only shows up
+      // if a translation invents one. Keep the alt text instead of dropping it,
+      // and never echo a data: URI's base64 payload as text.
+      return <Text style={{ color: colors.foreground }}>{node.alt || "(image)"}</Text>;
     case "break":
       return <Text>{"\n"}</Text>;
   }

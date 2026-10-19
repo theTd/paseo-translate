@@ -19,6 +19,7 @@ export type InlineNode =
   | { type: "del"; children: InlineNode[] }
   | { type: "code"; text: string }
   | { type: "link"; children: InlineNode[]; href: string }
+  | { type: "image"; alt: string; src: string }
   | { type: "break" };
 
 export type ListItem = { blocks: BlockNode[] };
@@ -228,6 +229,18 @@ export function parseInline(text: string): InlineNode[] {
       rest = rest.slice(1);
       continue;
     }
+    if (rest.startsWith("![")) {
+      const image = parseLink(rest.slice(1));
+      if (image !== null) {
+        nodes.push({
+          type: "image",
+          alt: inlineText(image.node.children),
+          src: image.node.href,
+        });
+        rest = image.rest;
+        continue;
+      }
+    }
     const link = parseLink(rest);
     if (link !== null) {
       nodes.push(link.node);
@@ -255,6 +268,27 @@ export function parseInline(text: string): InlineNode[] {
 
 function trimTrailingPunctuation(url: string): string {
   return url.replace(/[.,;:!?)\]]+$/, "");
+}
+
+export function inlineText(nodes: readonly InlineNode[]): string {
+  return nodes
+    .map((node) => {
+      switch (node.type) {
+        case "text":
+        case "code":
+          return node.text;
+        case "strong":
+        case "em":
+        case "del":
+        case "link":
+          return inlineText(node.children);
+        case "image":
+          return node.alt;
+        case "break":
+          return " ";
+      }
+    })
+    .join("");
 }
 
 function parseEmphasis(rest: string): { node: InlineNode; rest: string } | null {
@@ -303,7 +337,9 @@ function findCloser(rest: string, marker: string): number {
   }
 }
 
-function parseLink(rest: string): { node: InlineNode; rest: string } | null {
+type LinkNode = Extract<InlineNode, { type: "link" }>;
+
+function parseLink(rest: string): { node: LinkNode; rest: string } | null {
   if (!rest.startsWith("[")) return null;
   let depth = 0;
   let index = -1;

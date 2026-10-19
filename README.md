@@ -337,7 +337,18 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   Assistant originals and translations render as Markdown through the
   plugin's own dependency-free renderer (the daemon's client compiler
   rejects Node builtins anywhere in the client import graph, which rules
-  out the usual markdown packages). User prompts that have nothing to
+  out the usual markdown packages). Messages the translated view cannot
+  reproduce keep the host renderer instead and show only their original:
+  markdown images (`![alt](src)`, and HTML `<img>` tags outside table cells
+  with a web or data-URI source), plus links and inline code that point at a
+  workspace file (`src/app.ts:12`, `src/app.ts#L33`, `./config.yaml`, `file:///...`).
+  The host owns image preview and the daemon-backed file opening that the
+  plugin has no API for, so those rows trade their translation for working
+  images and file links. Anchors (`#section`), http(s)/mailto/tel links,
+  bare filenames (`package.json`, `.env`), slash commands (`/clear`), and
+  bare relative targets the host does not resolve (images, PDFs, diffs)
+  stay translated.
+  User prompts that have nothing to
   translate (blank, serialized attachments, arg-less slash commands,
   provider images) stay on the host renderer; other user prompts render as
   plain text in a plugin-owned right-aligned bubble. Original and translated

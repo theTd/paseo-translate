@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseInline, parseMarkdownBlocks } from "../shared/markdown-parse";
+import { inlineText, parseInline, parseMarkdownBlocks } from "../shared/markdown-parse";
 
 describe("markdown blocks", () => {
   it("parses headings, paragraphs, and rules", () => {
@@ -55,6 +55,23 @@ describe("markdown inline", () => {
         href: "https://example.com/x",
       },
     ]);
+  });
+
+  it("parses images instead of treating them as text plus a link", () => {
+    expect(parseInline("![shot](https://example.com/a.png)")).toEqual([
+      { type: "image", alt: "shot", src: "https://example.com/a.png" },
+    ]);
+    expect(parseInline("before ![a b](c.png) after")).toEqual([
+      { type: "text", text: "before " },
+      { type: "image", alt: "a b", src: "c.png" },
+      { type: "text", text: " after" },
+    ]);
+  });
+
+  it("flattens inline nodes to text using image alt text", () => {
+    expect(inlineText(parseInline("a ![shot](https://example.com/a.png) `code`"))).toBe(
+      "a shot code",
+    );
   });
 
   it("renders unclosed markers literally for streaming partials", () => {

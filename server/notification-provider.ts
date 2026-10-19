@@ -16,7 +16,7 @@ import {
   notificationFallback,
 } from "../shared/notification-preview";
 import { createTranslator, type TranslatorDeps } from "./translate";
-import { parseMarkdownBlocks, type BlockNode, type InlineNode } from "../shared/markdown-parse";
+import { inlineText, parseMarkdownBlocks, type BlockNode } from "../shared/markdown-parse";
 
 const PREVIEW_SOURCE_LIMIT = 2_000;
 
@@ -350,14 +350,6 @@ export function withNotificationTranslation(
 }
 
 function notificationText(markdown: string): string {
-  const inlineText = (nodes: readonly InlineNode[]): string =>
-    nodes
-      .map((node) => {
-        if (node.type === "text" || node.type === "code") return node.text;
-        if (node.type === "break") return " ";
-        return inlineText(node.children);
-      })
-      .join("");
   const blockText = (blocks: readonly BlockNode[]): string =>
     blocks
       .map((block) => {

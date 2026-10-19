@@ -11,23 +11,25 @@ import {
 } from "../shared/translate";
 import { promptTranslationParts } from "../shared/prompt-text";
 import { isNotificationPreview } from "../shared/notification-preview";
+import { requiresHostRenderer } from "../shared/host-rendered-message";
 
 /**
  * Passthrough mapping from a canonical assistant message to the plugin item
  * the renderer owns. The canonical row keeps the agent's original text; only
  * the rendered projection can show a translation.
  *
- * Materialized provider images (`![Image](file://…paseo-attachments…/…)`)
- * return undefined so the host renders them natively with its image
- * pipeline: the translated Markdown view has no image support, and there is
- * no prose worth translating in a lone image reference.
+ * Content the translated view cannot reproduce returns undefined so the host
+ * renders the message natively: images (attachment loading, sizing and the
+ * preview are host-owned), links that are not web URLs, and inline code that is
+ * a workspace path. The host opens those files; the plugin cannot, so a
+ * translated row would swallow the reference.
  */
 export function transformAssistantMessage(input: {
   item: { text: string; messageId?: string };
   phase: "streaming" | "complete";
 }): PluginTimelineTransformResult | undefined {
   if (isNotificationPreview(input.item.messageId)) return { items: [] };
-  if (isProviderImageMarkdown(input.item.text)) return undefined;
+  if (requiresHostRenderer(input.item.text)) return undefined;
   return {
     items: [
       {
