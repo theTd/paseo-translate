@@ -159,6 +159,52 @@ describe("translate service", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("looks up cached translations without fetching misses or using stale settings", async () => {
+    const calls: Captured[] = [];
+    let current = values;
+    const translator = createTranslator({
+      loadConfig: async () => current,
+      fetchFn: translatingFetch(calls, (text) => `T:${text}`),
+    });
+    await expect(translator.getCachedTranslation("Hello", "agent-to-user")).resolves.toBeUndefined();
+    expect(calls).toHaveLength(0);
+    await translator.translate("Hello", "agent-to-user");
+    await expect(translator.getCachedTranslation("Hello", "agent-to-user")).resolves.toBe("T:Hello");
+    await expect(translator.getCachedTranslation("Hello", "user-to-agent")).resolves.toBeUndefined();
+    for (const changed of [
+      { endpointModel: "other" },
+      { agentLanguage: "fr" },
+      { translationDomainContext: "legal documents" },
+      { translationReasoningEffort: "high" as const },
+    ]) {
+      current = { ...values, ...changed };
+      await expect(translator.getCachedTranslation("Hello", "agent-to-user")).resolves.toBeUndefined();
+    }
+    current = values;
+    await expect(translator.getCachedTranslation("Hello", "agent-to-user")).resolves.toBe("T:Hello");
+    await expect(translator.getCachedTranslation(" ", "agent-to-user")).resolves.toBe(" ");
+    await expect(translator.getCachedTranslation("x".repeat(100_001), "agent-to-user")).rejects.toThrow("limit");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("keeps cache-only lookups within the configured session scope", async () => {
+    const calls: Captured[] = [];
+    const context = createTranslationContextManager({ loadConfig: async () => values, sweepIntervalMs: 0 });
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: contextFetch(calls),
+      context,
+    });
+    await translator.translate("Hello", "agent-to-user", { contextKey: "source" });
+    await expect(translator.getCachedTranslation("Hello", "agent-to-user", { contextKey: "source" }))
+      .resolves.toBe("T:Hello");
+    await expect(translator.getCachedTranslation("Hello", "agent-to-user", { contextKey: "fork" }))
+      .resolves.toBeUndefined();
+    await expect(translator.getCachedTranslation("Hello", "agent-to-user")).resolves.toBeUndefined();
+    expect(calls).toHaveLength(1);
+    expect(context.snapshot("source", "agent-to-user", { hardCapChars: 100_000 }).turns).toHaveLength(1);
+  });
+
   it("keeps only the most recently used entries", async () => {
     const calls: Captured[] = [];
     const translator = createTranslator({

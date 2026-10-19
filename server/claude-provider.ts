@@ -898,25 +898,15 @@ async function replayHistory(
  * the translated block):
  * - exact reverse lookup of the fragment recorded at prompt time — no
  *   endpoint call, survives settings changes (trimmed-hash key);
- * - back-translation fallback for sessions predating the reverse index,
- *   billed once per block then served from the normal translation cache.
+ * - a previously cached back-translation for sessions predating the reverse
+ *   index. Cache misses keep the persisted text without calling the endpoint.
  * Only the root timeline gets the fallback: Task sidechain prompts are
  * agent-language by design and must never be back-translated.
  *
- * Explicit tradeoff of the fallback (no language tag distinguishes a
- * translated block from an untranslated one): transcripts that were NEVER
- * translated — prompt translation disabled at the time, or a Claude session
- * imported from another provider — have no exact entries, so every block
- * misses and is back-translated once prompt translation is on. Such text
- * is usually already in the user language, in which case a well-behaved
- * endpoint returns it unchanged and the `back === block` guard below keeps
- * it verbatim; but an endpoint that paraphrases same-language input can
- * rewrite those blocks. Sessions translated under an older language pair
- * have the same exposure (the fallback always uses the CURRENT pair, while
- * the exact path is settings-independent and unaffected). If that ever
- * matters, gate the fallback behind a setting or drop it: exact-only is
- * the conservative mode, and pre-fix sessions then keep their translated
- * text instead of an approximate back-translation.
+ * Replay runs before session.ready, including during CLI import. Network
+ * translation here can exceed the daemon request deadline on long sessions,
+ * so opening history only reads the cache. The fallback uses current
+ * translation settings; exact originals remain settings-independent.
  */
 async function buildReplayRestore(context: DispatchContext): Promise<ReplayUserTextRestore> {
   const lookupExact = (fragment: string): string | undefined => {
@@ -932,7 +922,7 @@ async function buildReplayRestore(context: DispatchContext): Promise<ReplayUserT
       if (restored !== block) return restored;
       // A recorded original identical to its translation (numbers, code,
       // cognates) still counts as a hit: without this the identity case
-      // would fall through to a billed back-translation on every reopen.
+      // would fall through to a cached back-translation on every reopen.
       return hasExactEntry(block) ? block : undefined;
     } catch {
       return undefined;
@@ -949,33 +939,36 @@ async function buildReplayRestore(context: DispatchContext): Promise<ReplayUserT
       return false;
     }
   };
-  let translateBack: ((block: string) => Promise<string | undefined>) | undefined;
+  let restoreCachedBackTranslation: ((block: string) => Promise<string | undefined>) | undefined;
   try {
     const values = await context.loadValues();
     if (values.translatePrompts) {
-      translateBack = async (block: string) => {
+      restoreCachedBackTranslation = async (block: string) => {
         if (block.trim().length === 0 || isSerializedAttachment(block)) return undefined;
         if (block.length > TRANSLATION_TEXT_LIMIT) return undefined;
         try {
-          const back = await translatePromptFragment(block, (fragment) =>
-            context.translator.translate(fragment, "agent-to-user"),
+          const back = await translatePromptFragment(block, async (fragment) =>
+            (await context.translator.getCachedTranslation(fragment, "agent-to-user")) ?? fragment,
           );
           if (back.trim().length === 0 || back === block) return undefined;
           return back;
         } catch (error) {
           console.warn(
-            `[translate] history back-translation failed (${error instanceof Error ? error.message : String(error)}); keeping the translated text`,
+            `[translate] cached history restoration failed (${error instanceof Error ? error.message : String(error)}); keeping the translated text`,
           );
           return undefined;
         }
       };
     }
   } catch {
-    translateBack = undefined;
+    restoreCachedBackTranslation = undefined;
   }
   return {
-    restoreRootBlock: async (block: string) =>
-      exactOriginal(block) ?? (translateBack !== undefined ? (await translateBack(block)) ?? block : block),
+    restoreRootBlock: async (block: string) => {
+      const original = exactOriginal(block);
+      if (original !== undefined) return original;
+      return (await restoreCachedBackTranslation?.(block)) ?? block;
+    },
     restoreChildBlock: (block: string) => exactOriginal(block) ?? block,
   };
 }

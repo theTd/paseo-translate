@@ -16,9 +16,14 @@ function operationId(): string {
   });
 }
 
+/** in_progress responses are polled: large copies and daemon imports run for minutes. */
+const POLL_INTERVAL_MS = 3_000;
+const POLL_LIMIT_MS = 10 * 60_000;
+
 export function ForkConfirmation(props: PluginButtonContentProps & {
   sourceAgentId: string;
   getOperationId(): string;
+  resumeOperation(operationId: string): void;
   startNewOperation(): void;
   onComplete(agentId: string): Promise<void>;
 }) {
@@ -45,7 +50,15 @@ export function ForkConfirmation(props: PluginButtonContentProps & {
         restart.current = false;
         setRestartRequired(false);
       }
-      const result = await fork({ agentId: props.sourceAgentId, operationId: props.getOperationId() });
+      const startedAt = Date.now();
+      let result = await fork({ agentId: props.sourceAgentId, operationId: props.getOperationId() });
+      while (result.kind === "in_progress") {
+        if (result.operationId) props.resumeOperation(result.operationId);
+        if (Date.now() - startedAt >= POLL_LIMIT_MS) throw new Error(t("forkStillRunning"));
+        const pollTick = new Promise<void>((resolve) => { setTimeout(resolve, POLL_INTERVAL_MS); });
+        await pollTick;
+        result = await fork({ agentId: props.sourceAgentId, operationId: props.getOperationId() });
+      }
       if (result.kind === "restart_required") {
         restart.current = true;
         if (mounted.current) { setRestartRequired(true); setError(result.message); }
@@ -125,6 +138,7 @@ export function contributeClaudeSessionFork(client: PluginClientContext): () => 
         operations.set(sourceAgentId, id);
         return id;
       }}
+      resumeOperation={(id) => { operations.set(sourceAgentId, id); }}
       startNewOperation={() => operations.delete(sourceAgentId)}
       onComplete={async (id) => {
         const result = await client.paseo.agents.ref(id).refresh();

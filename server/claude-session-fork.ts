@@ -9,7 +9,7 @@ import { defaultTranslationCacheDirectory } from "./translation-cache-store";
 import { claudeProjectDir } from "./claude-project-dir";
 import { cloneClaudeSession, claudeSessionCloneSchema, type ClaudeSessionClone } from "./claude-session-clone";
 import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration } from "./claude-fork-coordinator";
-import { createPaseoCli } from "./paseo-cli";
+import { createPaseoCli, isPaseoCliRequestTimeout } from "./paseo-cli";
 
 const OPERATION_LABEL = "translate.claude-fork-operation";
 const sourceSchema = z.object({ Id: z.string(), Provider: z.string(), Cwd: z.string() });
@@ -19,6 +19,7 @@ const operationSchema = z.object({
   cwd: z.string(), configDir: z.string(), title: z.string(), copiedFiles: z.number().int().positive().optional(),
   config: claudeForkConfigurationSchema,
   agentId: z.string().optional(),
+  importStartedAt: z.number().int().nonnegative().optional(),
 });
 type Operation = z.output<typeof operationSchema>;
 const persistenceSchema = z.object({ version: z.literal(1), data: z.object({ claudeSessionId: z.uuid(), configDir: z.string() }) });
@@ -37,7 +38,17 @@ export interface ClaudeForkDeps {
   /** Structured argv invocation through the host's process wrapper. */
   cli?: (args: string[]) => Promise<string>;
   clone?: typeof cloneClaudeSession;
+  /** The daemon rejects plugin RPCs after 30s; at this age the call reports in_progress. */
+  inProgressAfterMs?: number;
+  /** Poll the operation label after a CLI timeout without resubmitting the import. */
+  importPollIntervalMs?: number;
+  /** Budget from import submission; expiry preserves the pending import for retry. */
+  importRecoveryTimeoutMs?: number;
 }
+/** Every invocation races the shared run; copies and imports never repeat within one source. */
+const IN_PROGRESS_AFTER_MS = 20_000;
+const IMPORT_POLL_INTERVAL_MS = 1_000;
+const IMPORT_RECOVERY_TIMEOUT_MS = 10 * 60_000;
 
 /** Durable steps allow retry after import or rename failure without copying the session again. */
 export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
@@ -45,7 +56,10 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
   const home = path.resolve(directory, "../../..");
   const cli = deps.cli ?? createPaseoCli(home);
   const clone = deps.clone ?? cloneClaudeSession;
-  const pending = new Map<string, Promise<ClaudeSessionForkResult>>();
+  const inProgressAfter = deps.inProgressAfterMs ?? IN_PROGRESS_AFTER_MS;
+  const importPollInterval = deps.importPollIntervalMs ?? IMPORT_POLL_INTERVAL_MS;
+  const importRecoveryTimeout = deps.importRecoveryTimeoutMs ?? IMPORT_RECOVERY_TIMEOUT_MS;
+  const pending = new Map<string, { operationId: string; result: Promise<ClaudeSessionForkResult> }>();
 
   async function save(file: string, operation: Operation): Promise<void> {
     await mkdir(directory, { recursive: true });
@@ -66,6 +80,19 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
       cursor = page.pageInfo.nextCursor ?? undefined;
     } while (cursor);
     return undefined;
+  }
+
+  async function waitForImported(context: PluginHandlerContext, operationId: string, operation: Operation): Promise<string> {
+    const deadline = operation.importStartedAt! + importRecoveryTimeout;
+    for (;;) {
+      const agentId = await findImported(context, operationId, operation);
+      if (agentId) return agentId;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error("Paseo has not confirmed the fork import yet. Retry this operation to check again; starting a new fork creates a separate copy.");
+      }
+      await new Promise<void>((resolve) => { setTimeout(resolve, Math.min(importPollInterval, remaining)); });
+    }
   }
 
   async function run(input: { agentId: string; operationId: string }, context: PluginHandlerContext): Promise<ClaudeSessionForkResult> {
@@ -141,14 +168,34 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
       configDir: operation.configDir, forkConfig: operation.config } })}`;
     operation.agentId ??= await findImported(context, input.operationId, operation);
     if (!operation.agentId) {
-      const imported = importedSchema.parse(JSON.parse(await cli(["import", handle,
-        "--provider", TRANSLATE_CLAUDE_PROVIDER_ID, "--cwd", operation.cwd,
-        "--label", `${OPERATION_LABEL}=${input.operationId}`])));
-      if (imported.provider !== TRANSLATE_CLAUDE_PROVIDER_ID || path.resolve(imported.cwd) !== path.resolve(operation.cwd)) {
-        throw new Error("Paseo imported an unexpected provider or working directory");
+      if (operation.importStartedAt === undefined) {
+        // Persist the intent before submission: a plugin restart must not
+        // resubmit an import whose daemon-side outcome is still unknown.
+        operation.importStartedAt = Date.now();
+        await save(file, operation);
+        let output: string | undefined;
+        try {
+          output = await cli(["import", handle,
+            "--provider", TRANSLATE_CLAUDE_PROVIDER_ID, "--cwd", operation.cwd,
+            "--label", `${OPERATION_LABEL}=${input.operationId}`]);
+        } catch (error) {
+          if (!isPaseoCliRequestTimeout(error)) {
+            delete operation.importStartedAt;
+            await save(file, operation);
+            throw error;
+          }
+        }
+        if (output !== undefined) {
+          const imported = importedSchema.parse(JSON.parse(output));
+          if (imported.provider !== TRANSLATE_CLAUDE_PROVIDER_ID || path.resolve(imported.cwd) !== path.resolve(operation.cwd)) {
+            throw new Error("Paseo imported an unexpected provider or working directory");
+          }
+          operation.agentId = imported.agentId;
+        }
       }
-      operation.agentId = imported.agentId;
+      operation.agentId ??= await waitForImported(context, input.operationId, operation);
     }
+    delete operation.importStartedAt;
     await save(file, operation);
     // Persist a visible Paseo title as well as the custom-title in Claude storage.
     await cli(["agent", "update", operation.agentId, "--name", operation.title]);
@@ -164,13 +211,26 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
   }
 
   return (input: { agentId: string; operationId: string }, context: PluginHandlerContext) => {
-    const key = `${input.agentId}:${input.operationId}`;
-    const existing = pending.get(key);
-    if (existing) return existing;
-    const result = run(input, context);
-    pending.set(key, result);
-    const clear = () => { if (pending.get(key) === result) pending.delete(key); };
-    void result.then(clear, clear);
-    return result;
+    // One fork in flight per source: a restart with a fresh operation ID must
+    // attach to the running copy instead of cloning the session twice.
+    const existing = pending.get(input.agentId);
+    if (existing && existing.operationId !== input.operationId) {
+      // Hand back the durable retry key before waiting on a run that may
+      // reject: retrying the new key would otherwise create a second copy.
+      return Promise.resolve<ClaudeSessionForkResult>({ kind: "in_progress", operationId: existing.operationId });
+    }
+    const result = existing?.result ?? run(input, context);
+    const clear = () => {
+      if (pending.get(input.agentId)?.result === result) pending.delete(input.agentId);
+    };
+    if (!existing) {
+      pending.set(input.agentId, { operationId: input.operationId, result });
+      void result.then(clear, clear);
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const inProgress = new Promise<ClaudeSessionForkResult>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: "in_progress" }), inProgressAfter);
+    });
+    return Promise.race([result, inProgress]).finally(() => clearTimeout(timer));
   };
 }

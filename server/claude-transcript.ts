@@ -67,9 +67,10 @@ export interface ReplayResult {
  * Claude persists the translated (agent-language) prompts this plugin sent
  * it, so replaying them verbatim would show the user their own messages in
  * the wrong language after a reopen. The provider passes:
- * - `restoreRootBlock`: exact reverse lookup plus a back-translation
- *   fallback for sessions predating the reverse index. Only the root
- *   timeline gets the fallback — Task sidechain prompts are agent-language
+ * - `restoreRootBlock`: exact reverse lookup plus a cached back-translation
+ *   fallback for sessions predating the reverse index. Misses keep the text
+ *   without calling the endpoint. Only the root timeline gets the fallback
+ *   — Task sidechain prompts are agent-language
  *   by design and must never be back-translated.
  * - `restoreChildBlock`: exact reverse lookup only (a miss keeps the block).
  *

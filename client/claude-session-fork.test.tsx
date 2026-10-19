@@ -27,6 +27,7 @@ function buttons(node: React.ReactNode): Array<{ disabled?: boolean; onPress(): 
 
 function render() {
   return buttons(ForkConfirmation({ sourceAgentId: "source-agent", getOperationId: () => state.key, startNewOperation: state.startNew,
+    resumeOperation: (id: string) => { state.key = id; },
     onComplete: state.complete, close: state.close,
     theme: { colors: { surface0: "#000", surface1: "#111", surface2: "#222", border: "#333", foreground: "#fff",
       foregroundMuted: "#aaa", accent: "#00f", accentForeground: "#fff", statusSuccess: "#0f0",
@@ -85,6 +86,39 @@ describe("Claude fork secondary confirmation", () => {
     expect(state.fork.mock.calls.map(([input]) => input.operationId)).toEqual([
       "12345678-1234-4234-8234-123456789abc", "87654321-4321-4321-8321-987654321abc",
     ]);
+  });
+
+  it("polls while the server reports the fork in progress", async () => {
+    vi.useFakeTimers();
+    state.fork.mockResolvedValueOnce({ kind: "in_progress" });
+    const [, confirm] = render();
+    confirm.onPress();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(state.fork).toHaveBeenCalledTimes(2);
+    expect(state.complete).toHaveBeenCalledWith("copy-agent");
+    vi.useRealTimers();
+  });
+
+  it("adopts the running fork's retry key and keeps it after a polling failure", async () => {
+    vi.useFakeTimers();
+    try {
+      const runningId = "87654321-4321-4321-8321-987654321abc";
+      state.fork.mockResolvedValueOnce({ kind: "in_progress", operationId: runningId });
+      state.fork.mockRejectedValueOnce(new Error("Import is still unconfirmed"));
+      const [, confirm] = render();
+      confirm.onPress();
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(state.setters[1]).toHaveBeenCalledWith("Import is still unconfirmed");
+      expect(state.key).toBe(runningId);
+      confirm.onPress();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(state.complete).toHaveBeenCalledWith("copy-agent");
+      expect(state.fork.mock.calls.map(([input]) => input.operationId)).toEqual([
+        "12345678-1234-4234-8234-123456789abc", runningId, runningId,
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("disables confirmation when the original agent is unavailable or has another provider", () => {

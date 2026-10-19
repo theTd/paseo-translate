@@ -9,7 +9,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateClaudeProvider } from "./claude-provider";
 import { ClaudeForkCoordinator } from "./claude-fork-coordinator";
-import { createTranslateHandler } from "./translate";
+import { createTranslateHandler, createTranslator } from "./translate";
 import { createMemoryTranslationCacheStore } from "./translation-cache-store";
 import { translatePromptFragment } from "./prompt-text";
 import { createTranslationContextManager } from "./translation-context";
@@ -3212,7 +3212,8 @@ describe("translate claude provider extended protocol", () => {
     }
   });
 
-  it("back-translates pre-fix transcripts for the root timeline but never for sidecars", async () => {    const fs = await import("node:fs/promises");
+  it("restores cached root back-translations and reaches ready without fetching replay misses", async () => {
+    const fs = await import("node:fs/promises");
     const os = await import("node:os");
     const pathModule = await import("node:path");
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
@@ -3220,17 +3221,20 @@ describe("translate claude provider extended protocol", () => {
     const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
     const projectDir = pathModule.join(configDir, "projects", encoded);
     await fs.mkdir(pathModule.join(projectDir, "cs-fb", "subagents"), { recursive: true });
-    // "Guten Morgen" was never translated through this harness, so no exact
-    // reverse entry exists: the root fallback back-translates it via the
-    // stub endpoint (DE(...)). The sidecar Task prompt is agent-language by
-    // design and must stay untouched.
+    const cacheStore = createMemoryTranslationCacheStore();
+    const translator = createTranslator({ loadConfig: async () => values, cacheStore, fetchFn: translatingFetch() });
+    for (const text of ["Guten Morgen", "Bisheriger Befehl", "Task prompt"]) {
+      await translator.translate(text, "agent-to-user");
+    }
+    await translator.translate("Original prompt", "user-to-agent");
+    await translator.translate("DE(Original prompt)", "agent-to-user");
+    // Root blocks can use existing back-translations. Misses stay verbatim;
+    // sidecars restore exact originals only, even when a fallback is cached.
     await fs.writeFile(
       pathModule.join(projectDir, "cs-fb.jsonl"),
       [
-        JSON.stringify({
-          type: "user",
-          message: { content: [{ type: "text", text: "Guten Morgen" }] },
-        }),
+        ...["Guten Morgen", "Uncached prompt", "/cmd Bisheriger Befehl", "/cmd Uncached arguments", "DE(Original prompt)"]
+          .map((text) => JSON.stringify({ type: "user", message: { content: [{ type: "text", text }] } })),
         JSON.stringify({
           type: "assistant",
           message: { content: [{ type: "text", text: "Hallo" }] },
@@ -3243,12 +3247,14 @@ describe("translate claude provider extended protocol", () => {
     );
     await fs.writeFile(
       pathModule.join(projectDir, "cs-fb", "subagents", "agent-c1.jsonl"),
-      JSON.stringify({ type: "user", message: { role: "user", content: "Task prompt" } }),
+      ["Task prompt", "DE(Original prompt)"]
+        .map((text) => JSON.stringify({ type: "user", message: { role: "user", content: text } })).join("\n"),
     );
     const previous = process.env["CLAUDE_CONFIG_DIR"];
     process.env["CLAUDE_CONFIG_DIR"] = configDir;
     try {
-      const { events, send } = await createHarness();
+      const fetchFn = vi.fn(async () => { throw new Error("Replay must not call the endpoint"); });
+      const { events, send } = await createHarness(undefined, cacheStore, undefined, undefined, undefined, fetchFn);
       await send({
         ...openInput,
         config: { ...openInput.config, cwd },
@@ -3261,10 +3267,16 @@ describe("translate claude provider extended protocol", () => {
         .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
       expect(rootTexts).toContain("DE(Guten Morgen)");
       expect(rootTexts).not.toContain("Guten Morgen");
+      expect(rootTexts).toContain("Uncached prompt");
+      expect(rootTexts).toContain("/cmd DE(Bisheriger Befehl)");
+      expect(rootTexts).toContain("/cmd Uncached arguments");
+      expect(rootTexts).toContain("Original prompt");
+      expect(rootTexts).not.toContain("DE(DE(Original prompt))");
       const childTexts = events
         .filter((event) => event.type === "timeline.item" && event.sessionId === "subagent:s:tu-c1")
         .map((event) => (event.type === "timeline.item" && "text" in event.item ? event.item.text : null));
-      expect(childTexts).toEqual(["Task prompt"]);
+      expect(childTexts).toEqual(["Task prompt", "Original prompt"]);
+      expect(fetchFn).not.toHaveBeenCalled();
     } finally {
       if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
       else process.env["CLAUDE_CONFIG_DIR"] = previous;

@@ -52786,7 +52786,7 @@ function rememberOriginalFragment(cache, translated, original) {
 }
 function createTranslator(deps) {
   const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
-  async function setup(text, direction, contextKey) {
+  async function prepareCacheLookup(text, direction, contextKey) {
     if (text.trim().length === 0) return { trivial: text };
     if (text.length > TRANSLATION_TEXT_LIMIT) {
       throw new Error(
@@ -52802,9 +52802,6 @@ function createTranslator(deps) {
     );
     const context = deps.context;
     const useContext = context !== void 0 && contextKey !== void 0 && values.translationContextEnabled;
-    const snapshot = useContext ? context.snapshot(contextKey, direction, {
-      hardCapChars: values.translationContextMaxChars * 2
-    }) : void 0;
     const key = cacheKey({
       text,
       direction,
@@ -52816,9 +52813,18 @@ function createTranslator(deps) {
       reasoningEffort: values.translationReasoningEffort,
       ...useContext ? { scopeKey: contextKey } : {}
     });
+    return { key, values, systemPrompt, scopeKey: useContext ? contextKey : void 0 };
+  }
+  async function setup(text, direction, contextKey) {
+    const lookup = await prepareCacheLookup(text, direction, contextKey);
+    if ("trivial" in lookup) return lookup;
+    const { key, values, systemPrompt, scopeKey } = lookup;
+    const snapshot = scopeKey !== void 0 ? deps.context?.snapshot(scopeKey, direction, {
+      hardCapChars: values.translationContextMaxChars * 2
+    }) : void 0;
     const cached2 = cache.get(key);
     if (cached2 !== void 0) {
-      if (useContext) context.touch(contextKey);
+      if (scopeKey !== void 0) deps.context?.touch(scopeKey);
       return { cached: cached2 };
     }
     const client = createLlmClient(
@@ -52852,7 +52858,7 @@ ${snapshot.memory}` : systemPrompt;
       prefixMessages: messages,
       systemPrompt,
       userContent,
-      ...useContext ? { recordContext: { scopeKey: contextKey } } : {}
+      ...scopeKey !== void 0 ? { recordContext: { scopeKey } } : {}
     };
   }
   function requestMessages(prepared) {
@@ -52883,6 +52889,11 @@ ${snapshot.memory}` : systemPrompt;
     return deps.context !== void 0 && contextKey !== void 0 && values.translationContextEnabled ? contextKey : void 0;
   }
   return {
+    async getCachedTranslation(text, direction, options) {
+      const lookup = await prepareCacheLookup(text, direction, options?.contextKey);
+      if ("trivial" in lookup) return lookup.trivial;
+      return cache.get(lookup.key);
+    },
     async rememberPromptDisplay(fragments, options) {
       const values = await deps.loadConfig();
       const scope = promptDisplayScope(values, options?.contextKey);
@@ -56009,33 +56020,37 @@ async function buildReplayRestore(context) {
       return false;
     }
   };
-  let translateBack;
+  let restoreCachedBackTranslation;
   try {
     const values = await context.loadValues();
     if (values.translatePrompts) {
-      translateBack = async (block) => {
+      restoreCachedBackTranslation = async (block) => {
         if (block.trim().length === 0 || isSerializedAttachment(block)) return void 0;
         if (block.length > TRANSLATION_TEXT_LIMIT) return void 0;
         try {
           const back = await translatePromptFragment(
             block,
-            (fragment) => context.translator.translate(fragment, "agent-to-user")
+            async (fragment) => await context.translator.getCachedTranslation(fragment, "agent-to-user") ?? fragment
           );
           if (back.trim().length === 0 || back === block) return void 0;
           return back;
         } catch (error62) {
           console.warn(
-            `[translate] history back-translation failed (${error62 instanceof Error ? error62.message : String(error62)}); keeping the translated text`
+            `[translate] cached history restoration failed (${error62 instanceof Error ? error62.message : String(error62)}); keeping the translated text`
           );
           return void 0;
         }
       };
     }
   } catch {
-    translateBack = void 0;
+    restoreCachedBackTranslation = void 0;
   }
   return {
-    restoreRootBlock: async (block) => exactOriginal(block) ?? (translateBack !== void 0 ? await translateBack(block) ?? block : block),
+    restoreRootBlock: async (block) => {
+      const original = exactOriginal(block);
+      if (original !== void 0) return original;
+      return await restoreCachedBackTranslation?.(block) ?? block;
+    },
     restoreChildBlock: (block) => exactOriginal(block) ?? block
   };
 }

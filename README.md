@@ -169,7 +169,12 @@ the app after each turn.
   Paseo. Both sessions share the working directory. Finish foreground and
   background work and resolve permissions before forking; the source remains
   resumable under its original ID. Import/title failures can be retried without
-  creating another copy. Forks preserve custom system instructions and process
+  creating another copy. The daemon caps plugin RPCs at 30s, so a fork that
+  exceeds it answers `in_progress` and the confirmation polls the durable
+  operation until it settles; copies and imports never repeat for one source
+  while a fork is in flight. A CLI daemon-response timeout keeps the import
+  pending: the operation finds the eventual agent by its saved label, including
+  after a plugin restart, instead of submitting another import. Forks preserve custom system instructions and process
   environment overrides, with new Paseo agent identities and tool wiring. They
   are opened through Paseo's session list or the fork operation's retry, and
   excluded from generic Claude session import to prevent duplicate writers.
@@ -352,6 +357,8 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   Replayed tool screenshots and compaction markers are restored; internal summaries,
   synthetic messages and control placeholders stay hidden. Very large histories use
   memory proportional to the transcript, matching the native provider.
+  User prompts restore exact originals or already cached back-translations; cache
+  misses keep the stored text so opening or importing never waits for a translation endpoint.
 - Restart fan-out: after a daemon restart, many replayed messages open
   translation jobs at once. Same-session starts that land within 80ms share
   one tagged endpoint call (parse failure falls back to per-item). `busy`

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { createPaseoCli } from "./paseo-cli";
+import { createPaseoCli, isPaseoCliRequestTimeout } from "./paseo-cli";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -28,5 +28,21 @@ describe("installed Paseo CLI argv transport", () => {
     roots.push(root);
     await expect(createPaseoCli(root, path.join(root, "daemon.js"))(["--version"]))
       .rejects.toThrow("@getpaseo/cli/dist/index.js");
+  });
+
+  it("recognizes the CLI's JSON daemon timeout in a real failed process", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "paseo-cli-timeout-"));
+    roots.push(root);
+    const cliDirectory = path.join(root, "node_modules", "@getpaseo", "cli", "dist");
+    await mkdir(cliDirectory, { recursive: true });
+    await writeFile(path.join(cliDirectory, "index.js"),
+      'console.error(JSON.stringify({ error: { code: "DAEMON_REQUEST_TIMEOUT", message: "Timeout waiting for message (60000ms)" } })); process.exitCode = 1;');
+    const cli = createPaseoCli(root, path.join(root, "daemon.js"));
+    const failure = await cli(["import", "handle"]).catch((error: unknown) => error);
+    expect(isPaseoCliRequestTimeout(failure)).toBe(true);
+    expect(isPaseoCliRequestTimeout({ code: "DAEMON_REQUEST_TIMEOUT" })).toBe(true);
+    expect(isPaseoCliRequestTimeout(new Error("Import rejected"))).toBe(false);
+    expect(isPaseoCliRequestTimeout(new Error('Command failed: {"code":"AGENT_IMPORT_FAILED"}'))).toBe(false);
+    expect(isPaseoCliRequestTimeout(null)).toBe(false);
   });
 });

@@ -11,8 +11,12 @@ import { claudeProjectDir } from "./claude-project-dir";
 import type { ClaudeSessionForkResult } from "../shared/claude-session-fork";
 
 function forked(result: ClaudeSessionForkResult) {
-  if (result.kind !== "forked") throw new Error(result.message);
+  if (result.kind !== "forked") throw new Error(result.kind === "restart_required" ? result.message : result.kind);
   return result;
+}
+
+function daemonRequestTimeout(): Error {
+  return new Error('Command failed: paseo import\n{"error":{"code":"DAEMON_REQUEST_TIMEOUT","message":"Timeout waiting for message (60000ms)"}}');
 }
 
 const roots: string[] = [];
@@ -96,7 +100,7 @@ describe("Translate Claude fork operation", () => {
     const before = await readFile(f.transcript);
     const handler = createClaudeSessionForkHandler(f.deps);
     const [first, second] = await Promise.all([handler(f.request, f.context), handler(f.request, f.context)]);
-    if (first.kind !== "forked") throw new Error(first.message);
+    if (first.kind !== "forked") throw new Error(first.kind === "restart_required" ? first.message : first.kind);
     expect(second).toEqual(first);
     expect(f.clone).toHaveBeenCalledTimes(1);
     expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
@@ -145,6 +149,98 @@ describe("Translate Claude fork operation", () => {
     expect(forked(await createClaudeSessionForkHandler(f.deps)(f.request, f.context)).agentId).toBe(registeredId);
     expect(f.clone).toHaveBeenCalledTimes(1);
     expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
+  });
+
+  it("keeps a timed-out import in progress and recovers its late registration without resubmitting", async () => {
+    const f = await fixture();
+    const original = f.cli.getMockImplementation()!;
+    let importArgs: string[] | undefined;
+    let submitted: () => void = () => {};
+    const submission = new Promise<void>((resolve) => { submitted = resolve; });
+    f.cli.mockImplementation(async (args: string[]) => {
+      if (args[0] !== "import") return original(args);
+      importArgs = args;
+      submitted();
+      throw daemonRequestTimeout();
+    });
+    const deps = { ...f.deps, inProgressAfterMs: 10, importPollIntervalMs: 1, importRecoveryTimeoutMs: 2_000 };
+    const handler = createClaudeSessionForkHandler(deps);
+    const first = handler(f.request, f.context);
+    await submission;
+    await expect(first).resolves.toEqual({ kind: "in_progress" });
+    await expect(handler({ ...f.request, operationId: randomUUID() }, f.context))
+      .resolves.toEqual({ kind: "in_progress", operationId: f.request.operationId });
+    expect(f.state.target).toBeUndefined();
+    expect(f.clone).toHaveBeenCalledTimes(1);
+    expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
+
+    // The daemon completes the original request after the CLI has disconnected.
+    await original(importArgs!);
+    const registeredId = f.state.target!.id;
+    let result = await handler(f.request, f.context);
+    for (let attempts = 0; result.kind === "in_progress" && attempts < 100; attempts++) {
+      result = await handler(f.request, f.context);
+    }
+    expect(forked(result).agentId).toBe(registeredId);
+    expect(f.state.target!.title).toContain("(fork ");
+    expect(f.clone).toHaveBeenCalledTimes(1);
+    expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
+    const [journal] = (await readdir(f.deps.directory)).filter((name) => name.endsWith(".json"));
+    const saved = JSON.parse(await readFile(path.join(f.deps.directory, journal), "utf8"));
+    expect(saved.agentId).toBe(registeredId);
+    expect(saved.importStartedAt).toBeUndefined();
+  });
+
+  it("preserves an unconfirmed import after its recovery budget expires without submitting it again", async () => {
+    const f = await fixture();
+    const original = f.cli.getMockImplementation()!;
+    let importArgs: string[] | undefined;
+    f.cli.mockImplementation(async (args: string[]) => {
+      if (args[0] !== "import") return original(args);
+      importArgs = args;
+      throw daemonRequestTimeout();
+    });
+    const deps = { ...f.deps, importPollIntervalMs: 1, importRecoveryTimeoutMs: 30 };
+    const handler = createClaudeSessionForkHandler(deps);
+    await expect(handler(f.request, f.context)).rejects.toThrow("Retry this operation");
+    await expect(createClaudeSessionForkHandler(deps)(f.request, f.context)).rejects.toThrow("Retry this operation");
+    expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
+
+    await original(importArgs!);
+    const result = forked(await createClaudeSessionForkHandler(deps)(f.request, f.context));
+    expect(result.agentId).toBe(f.state.target!.id);
+    expect(f.clone).toHaveBeenCalledTimes(1);
+    expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
+  });
+
+  it("returns the durable operation key to attached attempts before an unconfirmed import fails", async () => {
+    const f = await fixture();
+    const original = f.cli.getMockImplementation()!;
+    let importArgs: string[] | undefined;
+    let submitted: () => void = () => {};
+    const submission = new Promise<void>((resolve) => { submitted = resolve; });
+    f.cli.mockImplementation(async (args: string[]) => {
+      if (args[0] !== "import") return original(args);
+      importArgs = args;
+      submitted();
+      throw daemonRequestTimeout();
+    });
+    const deps = { ...f.deps, importPollIntervalMs: 1, importRecoveryTimeoutMs: 40 };
+    const handler = createClaudeSessionForkHandler(deps);
+    const failure = expect(handler(f.request, f.context)).rejects.toThrow("Retry this operation");
+    await submission;
+    const attached = await handler({ ...f.request, operationId: randomUUID() }, f.context);
+    expect(attached).toEqual({ kind: "in_progress", operationId: f.request.operationId });
+    if (attached.kind !== "in_progress" || !attached.operationId) throw new Error("Missing retry key");
+    const retry = { ...f.request, operationId: attached.operationId };
+    await failure;
+    await expect(createClaudeSessionForkHandler(deps)(retry, f.context)).rejects.toThrow("Retry this operation");
+    expect(f.clone).toHaveBeenCalledTimes(1);
+    expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
+
+    await original(importArgs!);
+    expect(forked(await createClaudeSessionForkHandler(deps)(retry, f.context)).agentId).toBe(f.state.target!.id);
+    expect(f.clone).toHaveBeenCalledTimes(1);
   });
 
   it("recovers a verified copy published before the operation journal was updated", async () => {
@@ -206,5 +302,51 @@ describe("Translate Claude fork operation", () => {
     f.state.busy = true;
     await expect(createClaudeSessionForkHandler(f.deps)(f.request, f.context)).rejects.toThrow("Background tasks");
     expect(f.clone).not.toHaveBeenCalled();
+  });
+
+  it("reports in progress while a long import runs, then finishes on the next call", async () => {
+    const f = await fixture();
+    const original = f.cli.getMockImplementation()!;
+    let openImport: () => void = () => {};
+    const importGate = new Promise<void>((resolve) => { openImport = resolve; });
+    f.cli.mockImplementation(async (args: string[]) => {
+      if (args[0] === "import") await importGate;
+      return original(args);
+    });
+    const handler = createClaudeSessionForkHandler({ ...f.deps, inProgressAfterMs: 10 });
+    await expect(handler(f.request, f.context)).resolves.toEqual({ kind: "in_progress" });
+    openImport();
+    let settled = await handler(f.request, f.context);
+    for (let attempts = 0; settled.kind === "in_progress" && attempts < 100; attempts++) {
+      settled = await handler(f.request, f.context);
+    }
+    const result = forked(settled);
+    expect(result.agentId).toBe(f.state.target?.id);
+    expect(f.clone).toHaveBeenCalledTimes(1);
+    expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
+  });
+
+  it("lets a restarted operation attach to the fork already in flight", async () => {
+    const f = await fixture();
+    const original = f.cli.getMockImplementation()!;
+    let openImport: () => void = () => {};
+    const importGate = new Promise<void>((resolve) => { openImport = resolve; });
+    f.cli.mockImplementation(async (args: string[]) => {
+      if (args[0] === "import") await importGate;
+      return original(args);
+    });
+    const handler = createClaudeSessionForkHandler({ ...f.deps, inProgressAfterMs: 10 });
+    await expect(handler(f.request, f.context)).resolves.toEqual({ kind: "in_progress" });
+    await expect(handler({ ...f.request, operationId: randomUUID() }, f.context))
+      .resolves.toEqual({ kind: "in_progress", operationId: f.request.operationId });
+    openImport();
+    let settled = await handler(f.request, f.context);
+    for (let attempts = 0; settled.kind === "in_progress" && attempts < 100; attempts++) {
+      settled = await handler(f.request, f.context);
+    }
+    const result = forked(settled);
+    expect(result.agentId).toBe(f.state.target?.id);
+    expect(f.clone).toHaveBeenCalledTimes(1);
+    expect(f.cli.mock.calls.filter(([args]) => args[0] === "import")).toHaveLength(1);
   });
 });

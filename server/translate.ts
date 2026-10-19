@@ -72,6 +72,12 @@ export interface TranslateCallOptions {
 export interface Translator {
   rememberPromptDisplay(fragments: readonly PromptTranslationFragment[], options?: TranslateCallOptions): Promise<void>;
   restorePromptDisplay(text: string, options?: TranslateCallOptions): Promise<string | undefined>;
+  /** Uses the normal translation cache key; a miss never calls the endpoint. */
+  getCachedTranslation(
+    text: string,
+    direction: TranslateDirection,
+    options?: TranslateCallOptions,
+  ): Promise<string | undefined>;
   translate(
     text: string,
     direction: TranslateDirection,
@@ -106,7 +112,7 @@ export interface Translator {
    * trimmed translated text only) so a reopened session restores its
    * originals even after endpoint or language settings changed. Returns
    * undefined on a miss; the caller keeps the translated text or falls back
-   * to a back-translation.
+   * to a cached back-translation.
    */
   restoreOriginalFragment(translatedFragment: string): string | undefined;
 }
@@ -122,7 +128,7 @@ export interface Translator {
  * every user→agent translation now occupies two entries, so the effective
  * forward capacity is roughly halved and the JSONL file grows twice as fast
  * (same compaction rules apply). Evicting a reverse entry only degrades to
- * the replay back-translation fallback — never to a wrong text.
+ * a cached replay back-translation or the persisted text.
  *
  * The trimmed key is many-to-one by design: distinct originals that happen
  * to translate to the same trimmed text share one entry (last-write-wins)
@@ -169,12 +175,18 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     recordContext?: { scopeKey: string };
   };
   type SetupResult = { trivial: string } | { cached: string } | PreparedMiss;
+  type CacheLookup = { trivial: string } | {
+    key: string;
+    values: TranslateSettingsValues;
+    systemPrompt: string;
+    scopeKey: string | undefined;
+  };
 
-  async function setup(
+  async function prepareCacheLookup(
     text: string,
     direction: TranslateDirection,
     contextKey?: string,
-  ): Promise<SetupResult> {
+  ): Promise<CacheLookup> {
     if (text.trim().length === 0) return { trivial: text } as const;
     if (text.length > TRANSLATION_TEXT_LIMIT) {
       throw new Error(
@@ -191,13 +203,6 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     const context = deps.context;
     const useContext =
       context !== undefined && contextKey !== undefined && values.translationContextEnabled;
-    // The hard cap bounds active sessions that outpace the idle compaction
-    // policy: past twice the configured size the oldest pairs drop out.
-    const snapshot = useContext
-      ? context.snapshot(contextKey, direction, {
-          hardCapChars: values.translationContextMaxChars * 2,
-        })
-      : undefined;
     // The key covers everything that changes the output: direction,
     // language pair, effective system prompt, endpoint (base URL + model +
     // wire protocol, so switching providers invalidates), reasoning effort,
@@ -222,12 +227,30 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       reasoningEffort: values.translationReasoningEffort,
       ...(useContext ? { scopeKey: contextKey } : {}),
     });
+    return { key, values, systemPrompt, scopeKey: useContext ? contextKey : undefined };
+  }
+
+  async function setup(
+    text: string,
+    direction: TranslateDirection,
+    contextKey?: string,
+  ): Promise<SetupResult> {
+    const lookup = await prepareCacheLookup(text, direction, contextKey);
+    if ("trivial" in lookup) return lookup;
+    const { key, values, systemPrompt, scopeKey } = lookup;
+    // The hard cap bounds active sessions that outpace the idle compaction
+    // policy: past twice the configured size the oldest pairs drop out.
+    const snapshot = scopeKey !== undefined
+      ? deps.context?.snapshot(scopeKey, direction, {
+          hardCapChars: values.translationContextMaxChars * 2,
+        })
+      : undefined;
     const cached = cache.get(key);
     // get() refreshes recency inside the store; a hit skips the endpoint.
     if (cached !== undefined) {
       // A cache hit is still translation activity: keep the idle clock from
       // judging a hot-cache session as idle and compacting it mid-flow.
-      if (useContext) context.touch(contextKey);
+      if (scopeKey !== undefined) deps.context?.touch(scopeKey);
       return { cached } as const;
     }
     const client = createLlmClient(
@@ -261,7 +284,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       prefixMessages: messages,
       systemPrompt,
       userContent,
-      ...(useContext ? { recordContext: { scopeKey: contextKey } } : {}),
+      ...(scopeKey !== undefined ? { recordContext: { scopeKey } } : {}),
     } as const;
   }
 
@@ -329,6 +352,11 @@ export function createTranslator(deps: TranslatorDeps): Translator {
   }
 
   return {
+    async getCachedTranslation(text, direction, options) {
+      const lookup = await prepareCacheLookup(text, direction, options?.contextKey);
+      if ("trivial" in lookup) return lookup.trivial;
+      return cache.get(lookup.key);
+    },
     async rememberPromptDisplay(fragments, options) {
       const values = await deps.loadConfig();
       const scope = promptDisplayScope(values, options?.contextKey);
