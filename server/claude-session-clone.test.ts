@@ -159,6 +159,27 @@ describe("complete Claude session cloning", () => {
     expect(await readFile(file)).toEqual(bytes);
   });
 
+  it.each([false, true])("preserves tool-output bytes while remapping identifiers (malformed UTF-8=%s)", async (malformed) => {
+    const source = await fixture();
+    const results = path.join(source.project, source.sourceId, "tool-results");
+    await mkdir(results);
+    const file = path.join(results, "result.txt");
+    const prefix = Buffer.concat([Buffer.from("\ufeffSaved output: 你好 "),
+      malformed ? Buffer.from([0xc2, 0x0a, 0xff]) : Buffer.from("§\n")]);
+    const suffix = malformed ? Buffer.from([0xe2, 0x82]) : Buffer.from("\r\n");
+    const unchanged = ` embedded: _${source.sourceId}_ x${source.child}x `;
+    const original = Buffer.concat([prefix,
+      Buffer.from(`${source.sourceId}\r\nagentId: ${source.child}\ntool: ${source.tool}${unchanged}`), suffix]);
+    await writeFile(file, original);
+
+    const copy = await cloneClaudeSession({ transcript: source.transcript, configDir: source.configDir });
+    const expected = Buffer.concat([prefix,
+      Buffer.from(`${copy.newSessionId}\r\nagentId: ${copy.identifierMapping[source.child]}\ntool: ${copy.identifierMapping[source.tool]}${unchanged}`), suffix]);
+    expect(await readFile(path.join(source.project, copy.newSessionId, "tool-results", "result.txt"))).toEqual(expected);
+    expect(await readFile(file)).toEqual(original);
+    expect(await readFile(source.transcript)).toEqual(source.original);
+  });
+
   it.each(["transcript", "subagent"])("rejects invalid UTF-8 in %s before publishing a copy", async (location) => {
     const source = await fixture();
     const file = location === "transcript" ? source.transcript

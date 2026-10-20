@@ -204,8 +204,16 @@ export async function cloneClaudeSession(input: {
   const source = await snapshot(path.resolve(input.transcript), path.resolve(input.configDir));
   const mapping = mappings(source, newId);
   const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`(?<![A-Za-z0-9_])(?:${[...mapping.keys()].sort((a, b) => b.length - a.length).map(escape).join("|")})(?![A-Za-z0-9_])`, "g");
+  const identifierPattern = (keys: Iterable<string>) => new RegExp(`(?<![A-Za-z0-9_])(?:${[...keys].sort((a, b) => b.length - a.length).map(escape).join("|")})(?![A-Za-z0-9_])`, "g");
+  const pattern = identifierPattern(mapping.keys());
   const rewrite = (value: string) => value.replace(pattern, (id) => mapping.get(id)!);
+  // A Latin-1 view maps each byte to one character without decoding UTF-8.
+  // Saved tool output may contain truncated characters; preserve all bytes
+  // outside identifier matches, including malformed sequences and BOMs.
+  const byteMapping = new Map([...mapping].map(([from, to]) => [
+    Buffer.from(from, "utf8").toString("latin1"), Buffer.from(to, "utf8").toString("latin1"),
+  ]));
+  const bytePattern = identifierPattern(byteMapping.keys());
   function transform(value: unknown): unknown {
     if (typeof value === "string") return rewrite(value);
     if (Array.isArray(value)) return value.map(transform);
@@ -228,9 +236,10 @@ export async function cloneClaudeSession(input: {
     let copy = bytes;
     if (file === source.transcript || file.startsWith(sessionTree + path.sep)) {
       if (/\.(jsonl?|txt)$/.test(file)) {
-        const original = text(file, bytes);
+        const structured = /\.jsonl?$/.test(file);
+        const original = structured ? text(file, bytes) : bytes.toString("latin1");
         let rewritten: string;
-        if (/\.jsonl?$/.test(file)) {
+        if (structured) {
           const parsed = records(file, original);
           rewritten = original.replace(/"(?:\\.|[^"\\])*"/g, (token) => {
             const value = JSON.parse(token) as string;
@@ -240,10 +249,11 @@ export async function cloneClaudeSession(input: {
           if (!isDeepStrictEqual(records(file, rewritten), parsed.map(transform))) {
             throw new Error(`Fork JSON structural verification failed: ${file}`);
           }
-        } else rewritten = rewrite(original);
-        pattern.lastIndex = 0;
-        if (pattern.test(rewritten)) throw new Error(`Original identifier remains in ${file}`);
-        copy = Buffer.from(rewritten, "utf8");
+        } else rewritten = original.replace(bytePattern, (id) => byteMapping.get(id)!);
+        const verificationPattern = structured ? pattern : bytePattern;
+        verificationPattern.lastIndex = 0;
+        if (verificationPattern.test(rewritten)) throw new Error(`Original identifier remains in ${file}`);
+        copy = Buffer.from(rewritten, structured ? "utf8" : "latin1");
       }
     }
     const target = destination(file);
