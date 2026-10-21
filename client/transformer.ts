@@ -19,10 +19,9 @@ import { requiresHostRenderer } from "../shared/host-rendered-message";
  * the rendered projection can show a translation.
  *
  * Content the translated view cannot reproduce returns undefined so the host
- * renders the message natively: images (attachment loading, sizing and the
- * preview are host-owned), links that are not web URLs, and inline code that is
- * a workspace path. The host opens those files; the plugin cannot, so a
- * translated row would swallow the reference.
+ * renders images natively (attachment loading, sizing and the preview are
+ * host-owned). File links and inline paths stay eligible for translation;
+ * otherwise most final code-change summaries silently lose their translation.
  */
 export function transformAssistantMessage(input: {
   item: { text: string; messageId?: string };

@@ -61,13 +61,21 @@ describe("translate assistant transformer", () => {
     ).toBeUndefined();
   });
 
-  it("keeps file references the host can open on the host renderer", () => {
-    expect(
-      transformAssistantMessage({
-        item: { text: "Changed `src/app.ts:12` and [the handler](src/server/handler.ts)" },
-        phase: "complete",
-      }),
-    ).toBeUndefined();
+  it.each(["streaming", "complete"] as const)(
+    "keeps final summaries with file references eligible for translation (%s)",
+    (phase) => {
+      const text = "Changed `src/app.ts:12` and [the handler](src/server/handler.ts)";
+      const result = transformAssistantMessage({ item: { text, messageId: "final-1" }, phase });
+      expect(result?.items[0]).toMatchObject({ type: "plugin", kind: "translated-message" });
+      expect(translatedMessageDataSchema.parse(result?.items[0].data)).toEqual({
+        text,
+        phase,
+        messageId: "final-1",
+      });
+    },
+  );
+
+  it("translates summaries with bare filenames and relative targets", () => {
     expect(
       transformAssistantMessage({ item: { text: "Changed `package.json`" }, phase: "complete" }),
     ).not.toBeUndefined();
@@ -76,6 +84,13 @@ describe("translate assistant transformer", () => {
     expect(
       transformAssistantMessage({ item: { text: "See [the diff](changes.diff)" }, phase: "complete" }),
     ).not.toBeUndefined();
+  });
+
+  it("does not stop translating when a file reference arrives in the last chunk", () => {
+    for (const text of ["Fixed the bug.", "Fixed the bug in `src/app.ts`."]) {
+      expect(transformAssistantMessage({ item: { text }, phase: "streaming" })?.items[0])
+        .toMatchObject({ kind: "translated-message", data: { text, phase: "streaming" } });
+    }
   });
 });
 

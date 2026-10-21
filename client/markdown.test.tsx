@@ -77,4 +77,22 @@ describe("translated markdown links", () => {
 
     expect(state.openExternalUrl).toHaveBeenCalledExactlyOnceWith("https://paseo.sh/plugins");
   });
+
+  it.each(["src/app.ts:12", "./config.yaml", "/tmp/app.ts", "file:///tmp/app.ts", "C:/repo/app.ts"])(
+    "keeps the file target readable and copyable without a dead external link: %s",
+    (target) => {
+      const result = render(`Changed [the handler](${target}).`);
+      expect(plainText(result)).toBe(`Changed the handler (${target}).`);
+      expect(pressableTexts(result)).toHaveLength(0);
+      expect(state.openExternalUrl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not duplicate a file target that is already the link label", () => {
+    expect(plainText(render("See [src/app.ts](src/app.ts)"))).toBe("See src/app.ts");
+  });
+
+  it("keeps inline file paths verbatim", () => {
+    expect(plainText(render("Fixed `src/app.ts:12`."))).toBe("Fixed src/app.ts:12.");
+  });
 });

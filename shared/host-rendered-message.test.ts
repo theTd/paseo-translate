@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { looksLikeWorkspacePath, requiresHostRenderer } from "./host-rendered-message";
+import { requiresHostRenderer } from "./host-rendered-message";
 
 const HASH = "b".repeat(64);
 
@@ -30,29 +30,29 @@ describe("host-rendered message detection", () => {
     );
   });
 
-  it("keeps file links the host resolves on the host renderer", () => {
-    expect(requiresHostRenderer("see [app](src/app.ts:12)")).toBe(true);
-    expect(requiresHostRenderer("see [file](file:///tmp/x.md)")).toBe(true);
-    expect(requiresHostRenderer("see [report](./docs/report.pdf)")).toBe(true);
-    expect(requiresHostRenderer("see [chart](/tmp/chart.png)")).toBe(true);
-    expect(requiresHostRenderer("see [chart](file:///tmp/chart.png)")).toBe(true);
-    expect(requiresHostRenderer("see [app](C:/repo/src/app.ts)")).toBe(true);
-    expect(requiresHostRenderer("see [app](C:\\repo\\src\\app.ts)")).toBe(true);
+  it("translates file links instead of silently skipping the entire reply", () => {
+    expect(requiresHostRenderer("see [app](src/app.ts:12)")).toBe(false);
+    expect(requiresHostRenderer("see [file](file:///tmp/x.md)")).toBe(false);
+    expect(requiresHostRenderer("see [report](./docs/report.pdf)")).toBe(false);
+    expect(requiresHostRenderer("see [chart](/tmp/chart.png)")).toBe(false);
+    expect(requiresHostRenderer("see [chart](file:///tmp/chart.png)")).toBe(false);
+    expect(requiresHostRenderer("see [app](C:/repo/src/app.ts)")).toBe(false);
+    expect(requiresHostRenderer("see [app](C:\\repo\\src\\app.ts)")).toBe(false);
   });
 
-  it("keeps host-supported path shapes on the host renderer", () => {
-    expect(requiresHostRenderer("check `src/app.ts:12` next")).toBe(true);
-    expect(requiresHostRenderer("check `src/app.ts#L33` next")).toBe(true);
-    expect(requiresHostRenderer("check `C:\\repo\\app.ts` next")).toBe(true);
-    expect(requiresHostRenderer("check `/etc/hosts` next")).toBe(true);
+  it("translates inline paths including line suffixes", () => {
+    expect(requiresHostRenderer("check `src/app.ts:12` next")).toBe(false);
+    expect(requiresHostRenderer("check `src/app.ts#L33` next")).toBe(false);
+    expect(requiresHostRenderer("check `C:\\repo\\app.ts` next")).toBe(false);
+    expect(requiresHostRenderer("check `/etc/hosts` next")).toBe(false);
   });
 
-  it("keeps explicit roots regardless of extension, because the host does", () => {
-    expect(requiresHostRenderer("open `./report.pdf`")).toBe(true);
-    expect(requiresHostRenderer("open `~/Downloads/a.png`")).toBe(true);
-    expect(requiresHostRenderer("open `C:\\repo\\a.png`")).toBe(true);
-    expect(requiresHostRenderer("open `file:///tmp/a.png`")).toBe(true);
-    expect(requiresHostRenderer("open `/tmp/a.png`")).toBe(true);
+  it("translates image paths that are references rather than embedded images", () => {
+    expect(requiresHostRenderer("open `./report.pdf`")).toBe(false);
+    expect(requiresHostRenderer("open `~/Downloads/a.png`")).toBe(false);
+    expect(requiresHostRenderer("open `C:\\repo\\a.png`")).toBe(false);
+    expect(requiresHostRenderer("open `file:///tmp/a.png`")).toBe(false);
+    expect(requiresHostRenderer("open `/tmp/a.png`")).toBe(false);
   });
 
   it("translates web links, anchors, custom schemes, slash commands, and prose", () => {
@@ -65,10 +65,10 @@ describe("host-rendered message detection", () => {
     expect(requiresHostRenderer("plain prose with no references")).toBe(false);
   });
 
-  it("keeps dotfile targets, which the host opens", () => {
-    expect(requiresHostRenderer("see [config](.gitignore)")).toBe(true);
-    expect(requiresHostRenderer("see [config](docs/.gitignore)")).toBe(true);
-    expect(requiresHostRenderer("check `docs/.gitignore` next")).toBe(true);
+  it("translates dotfile targets", () => {
+    expect(requiresHostRenderer("see [config](.gitignore)")).toBe(false);
+    expect(requiresHostRenderer("see [config](docs/.gitignore)")).toBe(false);
+    expect(requiresHostRenderer("check `docs/.gitignore` next")).toBe(false);
   });
 
   it("translates bare relative targets the host would not open", () => {
@@ -86,30 +86,5 @@ describe("host-rendered message detection", () => {
   it("translates code blocks even when they contain paths and images", () => {
     expect(requiresHostRenderer("```\nsrc/app.ts\n```")).toBe(false);
     expect(requiresHostRenderer("```md\n![shot](https://example.com/a.png)\n```")).toBe(false);
-  });
-
-  it("recognizes path shapes without flagging identifiers", () => {
-    expect(looksLikeWorkspacePath("src/app.ts")).toBe(true);
-    expect(looksLikeWorkspacePath("src/app.ts:12-20")).toBe(true);
-    expect(looksLikeWorkspacePath("src/app.ts:12:5")).toBe(true);
-    expect(looksLikeWorkspacePath("src/app.ts#L33")).toBe(true);
-    expect(looksLikeWorkspacePath("src/app.ts(12)")).toBe(true);
-    expect(looksLikeWorkspacePath("./config.yaml")).toBe(true);
-    expect(looksLikeWorkspacePath("../shared/a.ts")).toBe(true);
-    expect(looksLikeWorkspacePath("~/notes/a.md")).toBe(true);
-    expect(looksLikeWorkspacePath("C:\\repo\\app.ts")).toBe(true);
-    expect(looksLikeWorkspacePath("file:///tmp/a.md")).toBe(true);
-    expect(looksLikeWorkspacePath("/etc/hosts")).toBe(true);
-    expect(looksLikeWorkspacePath("/a.md")).toBe(true);
-    expect(looksLikeWorkspacePath("package.json")).toBe(false);
-    expect(looksLikeWorkspacePath(".env")).toBe(false);
-    expect(looksLikeWorkspacePath("and/or")).toBe(false);
-    expect(looksLikeWorkspacePath("A/B")).toBe(false);
-    expect(looksLikeWorkspacePath("docs/v2")).toBe(false);
-    expect(looksLikeWorkspacePath("/clear")).toBe(false);
-    expect(looksLikeWorkspacePath("useEffect")).toBe(false);
-    expect(looksLikeWorkspacePath("npm run build")).toBe(false);
-    expect(looksLikeWorkspacePath("src/photo.png")).toBe(false);
-    expect(looksLikeWorkspacePath("docs/report.pdf")).toBe(false);
   });
 });

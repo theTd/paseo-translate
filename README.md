@@ -337,17 +337,15 @@ After editing plugin source, apply changes with `paseo plugin reload translate`.
   Assistant originals and translations render as Markdown through the
   plugin's own dependency-free renderer (the daemon's client compiler
   rejects Node builtins anywhere in the client import graph, which rules
-  out the usual markdown packages). Messages the translated view cannot
-  reproduce keep the host renderer instead and show only their original:
+  out the usual markdown packages). Messages with embedded images keep the
+  host renderer instead and show only their original:
   markdown images (`![alt](src)`, and HTML `<img>` tags outside table cells
-  with a web or data-URI source), plus links and inline code that point at a
-  workspace file (`src/app.ts:12`, `src/app.ts#L33`, `./config.yaml`, `file:///...`).
-  The host owns image preview and the daemon-backed file opening that the
-  plugin has no API for, so those rows trade their translation for working
-  images and file links. Anchors (`#section`), http(s)/mailto/tel links,
-  bare filenames (`package.json`, `.env`), slash commands (`/clear`), and
-  bare relative targets the host does not resolve (images, PDFs, diffs)
-  stay translated.
+  with a web or data-URI source). The host owns image preview, which the
+  plugin has no API for. File links and inline paths (`src/app.ts:12`,
+  `src/app.ts#L33`, `./config.yaml`, `file:///...`) stay translated so final
+  summaries do not silently lose translation. File references remain readable
+  and copyable, but native click-to-open is unavailable in these plugin rows.
+  Web links continue to open through the host's external browser opener.
   User prompts that have nothing to
   translate (blank, serialized attachments, arg-less slash commands,
   provider images) stay on the host renderer; other user prompts render as

@@ -215,6 +215,18 @@ function InlineNodeView({ node, colors }: { node: InlineNode; colors: MarkdownCo
         <Text style={{ fontFamily: MONOSPACE, backgroundColor: CODE_BACKGROUND }}>{node.text}</Text>
       );
     case "link":
+      // The public opener only supports HTTP(S). Keep file targets visible and
+      // copyable rather than making them look like working native file links.
+      if (!/^https?:\/\//i.test(node.href)) {
+        const labelIsTarget = node.children.length === 1 &&
+          node.children[0].type === "text" && node.children[0].text === node.href;
+        return (
+          <Text>
+            <Inline nodes={node.children} colors={colors} />
+            {!labelIsTarget && !node.href.startsWith("#") ? ` (${node.href})` : null}
+          </Text>
+        );
+      }
       return (
         <Text
           style={{ color: colors.accent }}
