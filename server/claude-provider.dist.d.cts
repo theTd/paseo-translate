@@ -8,6 +8,7 @@ import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
  */
 export declare function createTranslateClaudeProvider(deps: {
   forkCoordinator?: import("./claude-fork-coordinator").ClaudeForkCoordinator;
+  cacheCoordinator?: import("./claude-cache-compaction").ClaudeCacheCompactionCoordinator;
   /** Loads validated translate settings; rejects while unconfigured. */
   loadConfig(): Promise<Record<string, unknown>>;
   /** Translation endpoint override for tests. */

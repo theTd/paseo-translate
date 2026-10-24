@@ -55521,6 +55521,7 @@ function createTranslateClaudeProvider(deps) {
     }),
     forkClaudeSession,
     forkCoordinator: deps.forkCoordinator,
+    cacheCoordinator: deps.cacheCoordinator,
     unregisterForks,
     loadValues: () => deps.loadConfig(),
     emit(event) {
@@ -55560,6 +55561,7 @@ function createTranslateClaudeProvider(deps) {
         async close() {
           if (connectionClosed) return;
           connectionClosed = true;
+          for (const session of sessions.values()) session.cacheUnregister?.();
           for (const session of sessions.values()) {
             const close = async () => {
               unregisterForks.get(session.id)?.();
@@ -55615,6 +55617,7 @@ async function dispatch(input2, context, capabilities) {
       (0, import_provider.requireProviderCapabilities)(capabilities, input2);
       const session = context.sessions.get(input2.sessionId);
       if (session === void 0) throw new Error(`Unknown session: ${input2.sessionId}`);
+      context.cacheCoordinator?.invalidate(session.contextKey);
       try {
         await applyConfigChanges(session, input2.changes);
       } catch (error62) {
@@ -55740,6 +55743,12 @@ async function rewindConversationOnce(session, messageId, context) {
   });
 }
 async function resetQuery(session, emit, preserveActive = null) {
+  if (session.cacheMaintenance) {
+    session.cacheMaintenance = null;
+    session.cacheFinish?.(false);
+  }
+  session.cacheInvalidate?.();
+  session.cacheBackgroundTasks.clear();
   session.detached = true;
   session.sink.close();
   session.abort.abort();
@@ -55817,6 +55826,8 @@ async function openSession(input2, context, capabilities) {
     }
   }
   const session = {
+    cacheMaintenance: null,
+    cacheBackgroundTasks: /* @__PURE__ */ new Set(),
     forkConfiguration: importConfig !== void 0,
     id: input2.sessionId,
     config: input2.config,
@@ -55870,9 +55881,51 @@ async function openSession(input2, context, capabilities) {
     session.supportsSubsessions
   );
   context.sessions.set(input2.sessionId, session);
+  session.cacheInvalidate = () => context.cacheCoordinator?.invalidate(contextKey);
+  session.cacheFinish = (success2) => context.cacheCoordinator?.finish(contextKey, success2);
+  session.cacheUnregister = context.cacheCoordinator?.register(
+    contextKey,
+    input2.config.providerOptions?.translateClaudeCache,
+    {
+      snapshot: () => ({
+        contextTokens: session.contextUsage?.usedTokens ?? null,
+        idle: session.config.persist && Boolean(session.query) && !session.closed && !session.detached && !session.queryRestartNeeded && !session.active && !session.autonomous && !session.mainTurnInFlight && !session.compacting && !session.cacheMaintenance && !session.pendingPermissions.size && !session.toolNames.size && !session.sink.pendingUuids.length && !session.cacheBackgroundTasks.size && !session.subagents?.hasRunningTasks()
+      }),
+      compact: async (guard) => {
+        const reserve = async () => {
+          if (!guard()) return false;
+          const uuid3 = (0, import_node_crypto6.randomUUID)();
+          session.cacheMaintenance = { uuid: uuid3, boundarySeen: false, sent: false };
+          startAutonomousTurn(session, context.emit);
+          if (session.closed || session.cacheMaintenance?.uuid !== uuid3 || !session.autonomous) return false;
+          context.emit({
+            type: "timeline.item",
+            sessionId: session.id,
+            item: {
+              type: "notification",
+              id: `afk-compact-${uuid3}`,
+              level: "info",
+              message: "Automatically compacting idle context before estimated cache expiry."
+            }
+          });
+          if (session.cacheMaintenance?.uuid !== uuid3 || session.closed) return false;
+          try {
+            session.cacheMaintenance.sent = true;
+            deliverClaudeMessage(session, uuid3, [{ type: "text", text: "/compact" }]);
+          } catch (error62) {
+            session.cacheMaintenance = null;
+            settleAutonomousTurn(session, context.emit, "failed", describe3(error62));
+            throw error62;
+          }
+          return true;
+        };
+        return context.forkCoordinator ? context.forkCoordinator.exclusive(contextKey, reserve) : reserve();
+      }
+    }
+  );
   if (context.forkCoordinator) {
     context.unregisterForks.set(session.id, context.forkCoordinator.register(session.contextKey, async () => {
-      if (session.closed || session.active || session.autonomous || session.pendingPermissions.size || session.subagents?.hasRunningTasks()) {
+      if (session.closed || session.active || session.autonomous || session.cacheMaintenance || session.cacheBackgroundTasks.size || session.pendingPermissions.size || session.subagents?.hasRunningTasks()) {
         throw new Error("Wait for Claude and its background tasks to finish, and resolve pending permissions before forking");
       }
       if (!session.claudeSessionId) throw new Error("Send a message first so Claude has a persisted session to fork");
@@ -55882,6 +55935,10 @@ async function openSession(input2, context, capabilities) {
         configDir: import_node_path7.default.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
         config: {
           ...session.config,
+          ...context.cacheCoordinator ? { providerOptions: {
+            ...session.config.providerOptions,
+            translateClaudeCache: context.cacheCoordinator.status(contextKey).preferences
+          } } : {},
           model: session.desiredModel ?? void 0,
           mode: session.desiredMode ?? void 0,
           thinkingOption: session.desiredThinking ?? void 0,
@@ -56124,6 +56181,8 @@ function localRewindArguments(input2) {
 async function promptSession(input2, context) {
   const session = context.sessions.get(input2.sessionId);
   if (session === void 0 || session.closed) throw new Error(`Unknown session: ${input2.sessionId}`);
+  if (session.cacheMaintenance) await interruptSession(session, context);
+  context.cacheCoordinator?.prompt(session.contextKey);
   const command = localRewindArguments(input2.prompt.input);
   if (input2.prompt.delivery === "steer" && command !== void 0) {
     context.emit({
@@ -56195,13 +56254,7 @@ async function promptSession(input2, context) {
     if (session.closed || session.active !== active) return;
     session.pendingUserAnchors.push({ uuid: active.messageUuid, clientMessageId: active.clientMessageId, text: original });
     active.sent = true;
-    session.sink.push({
-      type: "user",
-      uuid: active.messageUuid,
-      session_id: session.claudeSessionId ?? "",
-      parent_tool_use_id: null,
-      message: { role: "user", content: blocks }
-    });
+    deliverClaudeMessage(session, active.messageUuid, blocks);
     await publishCommands(session, context);
   } catch (error62) {
     if (session.closed || session.active !== active) return;
@@ -56223,6 +56276,15 @@ async function promptSession(input2, context) {
       });
     }
   }
+}
+function deliverClaudeMessage(session, uuid3, blocks) {
+  session.sink.push({
+    type: "user",
+    uuid: uuid3,
+    session_id: session.claudeSessionId ?? "",
+    parent_tool_use_id: null,
+    message: { role: "user", content: blocks }
+  });
 }
 async function executeLocalRewind(session, input2, active, context, args) {
   const requested = args.trim();
@@ -56269,12 +56331,18 @@ async function executeLocalRewind(session, input2, active, context, args) {
   context.emit({ type: "session.turn", sessionId: session.id, turnId: active.turnId, state: "completed" });
 }
 async function interruptSession(session, context) {
+  const maintenance = session.cacheMaintenance;
+  if (session.cacheMaintenance) {
+    session.cacheMaintenance = null;
+    context.cacheCoordinator?.finish(session.contextKey, false);
+  }
+  context.cacheCoordinator?.invalidate(session.contextKey);
   session.cancellationEpoch += 1;
   const active = session.active;
   const query = session.query;
   const sink = session.sink;
   const mainTurnOrdinal = session.mainTurnOrdinal;
-  const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid));
+  const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid)) || Boolean(maintenance?.sent && !sink.hasUnstarted(maintenance.uuid));
   if (active?.kind === "rewind") {
     session.active = null;
     session.queryRestartNeeded = true;
@@ -56308,7 +56376,7 @@ async function interruptSession(session, context) {
   settleRootTools(session, context.emit, "canceled", "Interrupted");
   if (hadMainTurn || active?.sent) session.subagents?.cancelRunningForegroundTasks();
   if (!query) return;
-  const ownsResult = Boolean(active?.sent && hadMainTurn);
+  const ownsResult = Boolean((active?.sent || maintenance?.sent) && hadMainTurn);
   if (ownsResult) session.pendingInterruptedResults += 1;
   session.interrupted = hadMainTurn;
   const withdrawing = new Set(sink.pendingUuids);
@@ -56325,7 +56393,7 @@ async function interruptSession(session, context) {
   session.pendingUserAnchors = session.pendingUserAnchors.filter((anchor2) => !withdrawing.has(anchor2.uuid) || retained.has(anchor2.uuid));
   if (session.query !== query || session.mainTurnOrdinal !== mainTurnOrdinal) return;
   if (!hadMainTurn && notWithdrawn.length === 0) return;
-  if (!ownsResult && active?.sent) session.pendingInterruptedResults += 1;
+  if (!ownsResult && (active?.sent || maintenance?.sent)) session.pendingInterruptedResults += 1;
   session.interrupted = true;
   try {
     await withTimeout(query.interrupt(), 1e4, "Claude interrupt timed out");
@@ -57022,7 +57090,13 @@ async function pumpQuery(session, query, context) {
   try {
     for await (const message of query) {
       if (session.closed || session.detached || session.query !== query) return;
+      const maintenance = session.cacheMaintenance !== null;
+      observeCacheBackgroundTask(session, message);
+      if (!(message.type === "result" && session.pendingInterruptedResults > 0)) {
+        context.cacheCoordinator?.observe(session.contextKey, message, cacheTtlOverride(session), maintenance);
+      }
       handleSdkMessage(session, message, context);
+      if (message.type !== "stream_event") context.cacheCoordinator?.refresh();
     }
   } catch (error62) {
     if (session.closed) return;
@@ -57030,6 +57104,9 @@ async function pumpQuery(session, query, context) {
       session.detached = false;
       return;
     }
+    context.cacheCoordinator?.finish(session.contextKey, false);
+    context.cacheCoordinator?.invalidate(session.contextKey);
+    session.cacheMaintenance = null;
     finishDeadQuery(session, describe3(error62), emit);
     return;
   }
@@ -57038,7 +57115,36 @@ async function pumpQuery(session, query, context) {
     session.detached = false;
     return;
   }
+  context.cacheCoordinator?.finish(session.contextKey, false);
+  context.cacheCoordinator?.invalidate(session.contextKey);
+  session.cacheMaintenance = null;
   finishDeadQuery(session, "Claude exited unexpectedly", emit);
+}
+function cacheTtlOverride(session) {
+  const env = session.config.env.CLAUDE_CODE_PROMPT_CACHE_TTL ?? process.env.CLAUDE_CODE_PROMPT_CACHE_TTL;
+  if (env === "5m" || env === "1h") return env;
+  const settings = session.config.providerOptions?.settings;
+  if (typeof settings === "object" && settings !== null) {
+    const ttl = settings.promptCacheTtl;
+    if (ttl === "5m" || ttl === "1h") return ttl;
+  }
+  return void 0;
+}
+function observeCacheBackgroundTask(session, message) {
+  const task = message;
+  if (task.type !== "system" || typeof task.parent_tool_use_id === "string") return;
+  if (task.subtype === "background_tasks_changed" && Array.isArray(task.tasks)) {
+    const live = new Set(task.tasks.map((entry) => entry.task_id ?? entry.id));
+    for (const id2 of session.cacheBackgroundTasks) if (!live.has(id2)) session.cacheBackgroundTasks.delete(id2);
+  }
+  if (typeof task.task_id !== "string") return;
+  if (task.subtype === "task_started" && task.task_type === "local_bash") session.cacheBackgroundTasks.add(task.task_id);
+  if (task.subtype === "task_notification" || task.subtype === "task_updated") {
+    const status = task.patch?.status ?? task.status;
+    if (status === "completed" || status === "failed" || status === "killed" || status === "canceled") {
+      session.cacheBackgroundTasks.delete(task.task_id);
+    }
+  }
 }
 function settleRootTools(session, emit, status, message) {
   for (const [id2, name] of session.toolNames) {
@@ -57153,6 +57259,7 @@ function handleSdkMessage(session, message, context) {
       emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
     }
     if (message.model) {
+      if (session.runtimeModel !== null && session.runtimeModel !== message.model) session.cacheInvalidate?.();
       session.runtimeModel = message.model;
       session.contextWindowMaxTokens = findClaudeModel(message.model)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
     }
@@ -57183,6 +57290,7 @@ function handleSdkMessage(session, message, context) {
     }
     if (message.subtype === "compact_boundary") {
       session.compacting = false;
+      if (session.cacheMaintenance) session.cacheMaintenance.boundarySeen = true;
       noteCompactionBoundary(session, message, emit);
       return;
     }
@@ -57195,6 +57303,7 @@ function handleSdkMessage(session, message, context) {
   }
   if (message.type === "stream_event") {
     noteStreamEventUsage(session, message, emit);
+    if (session.cacheMaintenance) return;
     for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
       if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
       emit({ type: "timeline.item", sessionId: session.id, item });
@@ -57204,6 +57313,7 @@ function handleSdkMessage(session, message, context) {
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
     noteAssistantContextUsage(session, message.message);
+    if (session.cacheMaintenance) return;
     const content = message.message.content;
     if (!Array.isArray(content)) return;
     for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
@@ -57232,6 +57342,10 @@ function handleSdkMessage(session, message, context) {
     return;
   }
   if (message.type === "user" && message.parent_tool_use_id === null) {
+    if (session.cacheMaintenance && message.uuid === session.cacheMaintenance.uuid) {
+      session.sink.started(session.cacheMaintenance.uuid);
+      return;
+    }
     noteRewindAnchor(session, message, emit);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
@@ -57275,6 +57389,11 @@ function handleSdkMessage(session, message, context) {
     session.compacting = false;
     const missingConversation = readMissingConversationError(message, session.claudeSessionId);
     if (missingConversation !== null) {
+      if (session.cacheMaintenance) {
+        session.cacheMaintenance = null;
+        context.cacheCoordinator?.finish(session.contextKey, false);
+      }
+      context.cacheCoordinator?.invalidate(session.contextKey);
       session.claudeSessionId = null;
       emit({
         type: "session.persistence",
@@ -57328,6 +57447,20 @@ function handleSdkMessage(session, message, context) {
     if (session.pendingInterruptedResults > 0) {
       session.pendingInterruptedResults -= 1;
       session.interrupted &&= session.pendingInterruptedResults > 0;
+      return;
+    }
+    if (session.cacheMaintenance) {
+      const maintenance = session.cacheMaintenance;
+      session.cacheMaintenance = null;
+      session.sink.started(maintenance.uuid);
+      const success2 = maintenance.boundarySeen && message.subtype === "success" && !message.is_error;
+      context.cacheCoordinator?.finish(session.contextKey, success2);
+      settleAutonomousTurn(
+        session,
+        emit,
+        success2 ? "completed" : "failed",
+        success2 ? void 0 : "Automatic compaction did not report a successful native compaction boundary"
+      );
       return;
     }
     recordModelContextWindow(session, message.modelUsage);
@@ -57557,9 +57690,14 @@ function noteCompactionBoundary(session, message, emit) {
 }
 function readCompactionMetadata(message) {
   const record2 = message;
-  const metadata = typeof record2.compaction === "object" && record2.compaction !== null ? record2.compaction : typeof record2.metadata === "object" && record2.metadata !== null ? record2.metadata : void 0;
+  const metadata = typeof record2.compact_metadata === "object" && record2.compact_metadata !== null ? record2.compact_metadata : typeof record2.compaction === "object" && record2.compaction !== null ? record2.compaction : typeof record2.metadata === "object" && record2.metadata !== null ? record2.metadata : void 0;
   if (metadata === void 0) return void 0;
-  const source = metadata;
+  const raw = metadata;
+  const source = {
+    trigger: raw.trigger,
+    preTokens: raw.pre_tokens ?? raw.preTokens,
+    postTokens: raw.post_tokens ?? raw.postTokens
+  };
   return {
     ...typeof source.trigger === "string" ? { trigger: source.trigger } : {},
     ...typeof source.preTokens === "number" && Number.isFinite(source.preTokens) ? { preTokens: source.preTokens } : {},
@@ -57569,6 +57707,7 @@ function readCompactionMetadata(message) {
 function noteRewindAnchor(session, message, emit) {
   const uuid3 = message.uuid;
   if (typeof uuid3 !== "string" || uuid3.length === 0) return;
+  session.sink.started(uuid3);
   const content = message.message?.content;
   if (Array.isArray(content) && content.some(
     (block) => typeof block === "object" && block !== null && block.type === "tool_result"
@@ -57596,6 +57735,7 @@ function noteRewindAnchor(session, message, emit) {
 async function teardownSession(session) {
   if (session.closed) return;
   session.closed = true;
+  session.cacheUnregister?.();
   session.cancellationEpoch += 1;
   session.sink.close();
   session.abort.abort();

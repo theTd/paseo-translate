@@ -10,6 +10,7 @@ import {
 import { TranslateSettingsScreen } from "./client/settings-screen";
 import { detectSystemLocale, translate } from "./client/i18n";
 import { contributeClaudeSessionFork } from "./client/claude-session-fork";
+import { ClaudeCacheDefaultsScreen, contributeClaudeCacheControls } from "./client/claude-cache-controls";
 import {
   NOTIFICATION_BOUNDARY_KIND,
   notificationBoundarySchema,
@@ -75,5 +76,9 @@ export default function contribute(client: PluginClientContext) {
     icon: "Languages",
     Component: TranslateSettingsScreen,
   });
-  return contributeClaudeSessionFork(client);
+  const removeCacheSettings = client.addSettingsScreen({ id: "claude-cache", title: "Claude AFK defaults",
+    icon: "Clock", Component: ClaudeCacheDefaultsScreen });
+  const removeFork = contributeClaudeSessionFork(client);
+  const removeCache = contributeClaudeCacheControls(client);
+  return () => { removeFork(); removeCache(); removeCacheSettings(); };
 }

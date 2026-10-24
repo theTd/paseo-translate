@@ -129,6 +129,39 @@ logos with a small translation badge at the bottom right. The generic ACP wrappe
 uses Paseo's agent fallback icon with the same badge. ACP sessions spawn the inner agent through the
 translating proxy; the direct providers talk to Claude Code or Codex natively.
 
+## Claude cache countdown and AFK compaction
+
+Claude sessions have a **Claude cache** composer pill showing the estimated
+remaining prompt-cache lifetime. Open it to configure that session's AFK
+auto-compaction switch, minimum context tokens, and seconds before expiry.
+**Claude AFK defaults** in plugin settings controls newly created Claude
+sessions only. Defaults are off, **200,000 tokens**, and **300 seconds**;
+existing sessions stay off until explicitly configured. A session override
+survives reopening and is independent of later global-default changes.
+
+When enabled, AFK compaction uses Claude's native `/compact`. It runs only
+after the current run and all pending/background work have finished, with
+context **strictly above** the threshold. There is no inactivity timer. It
+targets five minutes before a one-hour cache's estimated expiry; five-minute
+caches are excluded. New user work takes priority, and missed/expired
+deadlines are skipped. Unchanged context is not compacted repeatedly. The
+scheduler runs on the daemon while the app is closed, but never opens dormant
+sessions just to compact them.
+
+The countdown is an estimate for the observed conversation prefix, not an
+authoritative session-wide deadline. It uses request-start observations and
+cache usage, including observed five-minute/one-hour writes or an explicit
+runtime cache-lifetime override. When timing or lifetime is unknown, automatic
+compaction stays off for that observation. Model/configuration changes and
+process restarts invalidate observations; reopening never invents a fresh TTL.
+Compaction status and any failure are visible in the pill/timeline.
+
+Compaction consumes tokens and summarizes context; it does not necessarily
+save money. If Claude's native context-full compaction occurs below 200k,
+the default AFK threshold will not be reached. Manual `/compact` and Claude's
+native auto-compaction settings remain independent. The new controls use
+English or Simplified Chinese, with English fallback for other interface locales.
+
 ## Direct Claude Code provider
 
 The plugin also registers **Translate (Claude Code)**: a direct provider that
@@ -324,6 +357,8 @@ serialized-attachment passthrough, system-prompt translation, and the
 fail-closed path where a blocked prompt never reaches the agent.
 
 After editing plugin source, apply changes with `paseo plugin reload translate`.
+Reloading the provider plugin can affect active sessions; obtain explicit
+approval before running it while sessions are in use.
 
 ## Limitations
 

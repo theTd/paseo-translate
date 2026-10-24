@@ -9,6 +9,7 @@ import {
 } from "@getpaseo/plugin/server/provider";
 import { createTranslateClaudeProvider } from "./claude-provider";
 import { ClaudeForkCoordinator } from "./claude-fork-coordinator";
+import { ClaudeCacheCompactionCoordinator } from "./claude-cache-compaction";
 import { createTranslateHandler, createTranslator } from "./translate";
 import { createMemoryTranslationCacheStore } from "./translation-cache-store";
 import { translatePromptFragment } from "./prompt-text";
@@ -252,6 +253,7 @@ async function createHarness(
   context?: import("./translation-context").TranslationContextManager,
   forkCoordinator?: ClaudeForkCoordinator,
   fetchFn: typeof fetch = translatingFetch(),
+  cacheCoordinator?: ClaudeCacheCompactionCoordinator,
 ) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
@@ -260,6 +262,7 @@ async function createHarness(
     fetchFn,
     queryFactory: fake.factory,
     forkCoordinator,
+    cacheCoordinator,
     ...(cacheStore !== undefined ? { cacheStore } : {}),
     ...(context !== undefined ? { context } : {}),
   });
@@ -3450,6 +3453,128 @@ describe("PATH claude resolution", () => {
       await fs.rm(shimDir, { recursive: true, force: true });
       await fs.rm(exeDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("Claude AFK compaction integration", () => {
+  const prefs = { enabled: true, thresholdTokens: 200_000, leadSeconds: 300 };
+  const requesting = { type: "system", subtype: "status", status: "requesting" } as unknown as SDKMessage;
+  const usage = { type: "stream_event", parent_tool_use_id: null, event: { type: "message_start", message: {
+    usage: { input_tokens: 50, cache_creation_input_tokens: 250_000,
+      cache_creation: { ephemeral_1h_input_tokens: 250_000, ephemeral_5m_input_tokens: 0 } },
+  } } } as unknown as SDKMessage;
+
+  async function setup() {
+    const clock = { now: 1_000_000 };
+    const cache = new ClaudeCacheCompactionCoordinator({ get: () => undefined, set: () => {} }, () => clock.now);
+    const h = await createHarness({ translatePrompts: false }, undefined, undefined, undefined,
+      new ClaudeForkCoordinator(), undefined, cache);
+    await h.send({ ...openInput, config: { ...openInput.config, providerOptions: { translateClaudeCache: prefs } } });
+    return { ...h, cache, clock };
+  }
+
+  it("uses the native command, rebases current-SDK metadata, and hides maintenance prompt/summary", async () => {
+    const h = await setup();
+    h.fake.use(async function* (pushed) {
+      yield pushed as SDKMessage;
+      yield claudeTurnInit();
+      if (JSON.stringify(pushed.message.content).includes("/compact")) {
+        yield { type: "system", subtype: "status", status: "compacting" } as unknown as SDKMessage;
+        yield { type: "system", subtype: "compact_boundary", compact_metadata: {
+          trigger: "manual", pre_tokens: 250_050, post_tokens: 12_000 } } as unknown as SDKMessage;
+        yield assistantText("internal-summary", "PRIVATE SUMMARY");
+      } else { yield requesting; yield usage; yield assistantText("answer", "Done"); }
+      yield resultSuccess("cs-1", "Done");
+    });
+    try {
+      await h.send(promptInput("Work"));
+      await waitFor(h.events, (event) => event.type === "session.turn" && event.state === "completed");
+      expect(h.cache.status("s").contextTokens).toBe(250_050);
+      h.clock.now += 55 * 60_000; h.cache.refresh();
+      await vi.waitFor(() => expect(h.cache.status("s").state).toBe("compacted"));
+      expect(h.fake.state.received).toHaveLength(2);
+      expect(h.fake.state.received[1].message.content).toEqual([{ type: "text", text: "/compact" }]);
+      expect(h.cache.status("s").contextTokens).toBe(12_000);
+      expect(h.events).toContainEqual(expect.objectContaining({ type: "timeline.item", item:
+        expect.objectContaining({ type: "compaction", status: "completed", preTokens: 250_050 }) }));
+      expect(JSON.stringify(h.events)).not.toContain("PRIVATE SUMMARY");
+      const prompts = h.events.filter((event) => event.type === "timeline.item" && event.item.type === "user_message");
+      expect(prompts).toHaveLength(1);
+    } finally { await h.registration.close(); h.cache.dispose(); }
+  });
+
+  it("does not compact while a background shell survives the root turn", async () => {
+    const h = await setup();
+    h.fake.use(async function* (pushed) {
+      yield pushed as SDKMessage; yield claudeTurnInit(); yield requesting; yield usage;
+      yield { type: "system", subtype: "task_started", task_type: "local_bash", task_id: "shell" } as unknown as SDKMessage;
+      yield resultSuccess("cs-1", "Background work continues");
+    });
+    try {
+      await h.send(promptInput("Work"));
+      await waitFor(h.events, (event) => event.type === "session.turn" && event.state === "completed");
+      h.clock.now += 55 * 60_000; h.cache.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(h.fake.state.received).toHaveLength(1);
+      expect(h.cache.status("s").scheduledAt).toBeNull();
+    } finally { await h.registration.close(); h.cache.dispose(); }
+  });
+
+  it("cancels its own compaction for a user prompt and keeps the old result from settling the new turn", async () => {
+    const h = await setup();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    h.fake.use(async function* (pushed) {
+      yield pushed as SDKMessage; yield claudeTurnInit();
+      if (JSON.stringify(pushed.message.content).includes("/compact")) {
+        yield { type: "system", subtype: "status", status: "compacting" } as unknown as SDKMessage;
+        await pending;
+        yield resultSuccess("cs-1", "Old maintenance result");
+      } else { yield requesting; yield usage; yield resultSuccess("cs-1", "User work completed"); }
+    });
+    try {
+      await h.send(promptInput("Work"));
+      await waitFor(h.events, (event) => event.type === "session.turn" && event.state === "completed");
+      h.clock.now += 55 * 60_000; h.cache.refresh();
+      await vi.waitFor(() => expect(h.fake.state.received).toHaveLength(2));
+      await h.send(promptInput("Next user prompt", "next-prompt"));
+      expect(h.fake.state.interrupted).toBe(1);
+      release();
+      await vi.waitFor(() => expect(h.fake.state.received).toHaveLength(3));
+      const ack = h.events.find((event) => event.type === "session.prompt_result" && event.clientMessageId === "next-prompt");
+      if (ack?.type !== "session.prompt_result" || ack.result.type !== "turn") throw new Error("Missing next-turn acknowledgement");
+      const nextId = ack.result.turnId;
+      await waitFor(h.events, (event) => event.type === "session.turn" && event.turnId === nextId && event.state === "completed");
+      expect(h.events.filter((event) => event.type === "session.turn" && event.turnId === nextId && event.state === "completed")).toHaveLength(1);
+    } finally { release(); await h.registration.close(); h.cache.dispose(); }
+  });
+
+  it("clears maintenance ownership when file rewind replaces the live query", async () => {
+    const h = await setup();
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    h.fake.use(async function* (pushed) {
+      yield pushed as SDKMessage; yield claudeTurnInit();
+      if (JSON.stringify(pushed.message.content).includes("/compact")) {
+        yield { type: "system", subtype: "status", status: "compacting" } as unknown as SDKMessage;
+        await pending;
+      } else { yield requesting; yield usage; yield assistantText(randomUUID(), "Visible reply"); }
+      yield resultSuccess("cs-1", "Done");
+    });
+    try {
+      await h.send(promptInput("First prompt"));
+      await waitFor(h.events, (event) => event.type === "session.turn" && event.state === "completed");
+      h.clock.now += 55 * 60_000; h.cache.refresh();
+      await vi.waitFor(() => expect(h.fake.state.received).toHaveLength(2));
+      h.fake.state.options!.abortController!.signal.addEventListener("abort", release, { once: true });
+      await h.send({ type: "session.revert", requestId: "file-rewind", sessionId: "s", scope: "files",
+        token: h.fake.state.received[0].uuid! });
+      expect(h.cache.status("s").state).not.toBe("compacting");
+      expect(h.fake.state.spawnCount).toBe(2);
+      await h.send(promptInput("Next prompt", "after-rewind"));
+      await vi.waitFor(() => expect(h.events.filter((event) => event.type === "timeline.item" &&
+        event.item.type === "assistant_message" && event.item.text === "Visible reply")).toHaveLength(2));
+    } finally { release(); await h.registration.close(); h.cache.dispose(); }
   });
 });
 

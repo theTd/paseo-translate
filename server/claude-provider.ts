@@ -106,6 +106,7 @@ export type ClaudeQueryFactory = (params: {
 
 export interface ClaudeProviderDeps extends TranslatorDeps {
   forkCoordinator?: ClaudeForkCoordinator;
+  cacheCoordinator?: import("./claude-cache-compaction").ClaudeCacheCompactionCoordinator;
   resolveVersion?: (executable: string | null) => Promise<string | undefined>;
   /** Test seam; defaults to the real claude-agent-sdk query. */
   queryFactory?: ClaudeQueryFactory;
@@ -196,6 +197,11 @@ type ProviderPermissionActions = NonNullable<
 >;
 
 interface ClaudeSession {
+  cacheUnregister?: () => void;
+  cacheInvalidate?: () => void;
+  cacheFinish?: (success: boolean) => void;
+  cacheMaintenance: { uuid: string; boundarySeen: boolean; sent: boolean } | null;
+  cacheBackgroundTasks: Set<string>;
   forkConfiguration: boolean;
   id: string;
   config: ProviderSessionConfig;
@@ -316,6 +322,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
     }),
     forkClaudeSession,
     forkCoordinator: deps.forkCoordinator,
+    cacheCoordinator: deps.cacheCoordinator,
     unregisterForks,
     loadValues: () => deps.loadConfig(),
     emit(event) {
@@ -364,6 +371,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
         async close() {
           if (connectionClosed) return;
           connectionClosed = true;
+          for (const session of sessions.values()) session.cacheUnregister?.();
           for (const session of sessions.values()) {
             const close = async () => {
               unregisterForks.get(session.id)?.();
@@ -382,6 +390,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
 }
 
 interface DispatchContext {
+  cacheCoordinator?: import("./claude-cache-compaction").ClaudeCacheCompactionCoordinator;
   forkCoordinator?: ClaudeForkCoordinator;
   unregisterForks: Map<string, () => void>;
   sessions: Map<string, ClaudeSession>;
@@ -439,6 +448,7 @@ async function dispatch(
       requireProviderCapabilities(capabilities, input);
       const session = context.sessions.get(input.sessionId);
       if (session === undefined) throw new Error(`Unknown session: ${input.sessionId}`);
+      context.cacheCoordinator?.invalidate(session.contextKey);
       try { await applyConfigChanges(session, input.changes); }
       catch (error) {
         context.emit({ type: "session.config", sessionId: session.id, config: configStateFor(session) });
@@ -613,6 +623,12 @@ async function resetQuery(
   emit: (event: ProviderEvent) => void,
   preserveActive: ClaudeSession["active"] = null,
 ): Promise<void> {
+  if (session.cacheMaintenance) {
+    session.cacheMaintenance = null;
+    session.cacheFinish?.(false);
+  }
+  session.cacheInvalidate?.();
+  session.cacheBackgroundTasks.clear();
   session.detached = true;
   session.sink.close();
   session.abort.abort();
@@ -691,6 +707,8 @@ async function openSession(
     }
   }
   const session: ClaudeSession = {
+    cacheMaintenance: null,
+    cacheBackgroundTasks: new Set(),
     forkConfiguration: importConfig !== undefined,
     id: input.sessionId,
     config: input.config,
@@ -744,9 +762,45 @@ async function openSession(
     session.supportsSubsessions,
   );
   context.sessions.set(input.sessionId, session);
+  session.cacheInvalidate = () => context.cacheCoordinator?.invalidate(contextKey);
+  session.cacheFinish = (success) => context.cacheCoordinator?.finish(contextKey, success);
+  session.cacheUnregister = context.cacheCoordinator?.register(contextKey,
+    input.config.providerOptions?.translateClaudeCache, {
+      snapshot: () => ({ contextTokens: session.contextUsage?.usedTokens ?? null,
+        idle: session.config.persist && Boolean(session.query) && !session.closed && !session.detached && !session.queryRestartNeeded &&
+          !session.active && !session.autonomous && !session.mainTurnInFlight && !session.compacting &&
+          !session.cacheMaintenance && !session.pendingPermissions.size && !session.toolNames.size &&
+          !session.sink.pendingUuids.length && !session.cacheBackgroundTasks.size && !session.subagents?.hasRunningTasks() }),
+      compact: async (guard) => {
+        const reserve = async () => {
+          if (!guard()) return false;
+          const uuid = randomUUID();
+          session.cacheMaintenance = { uuid, boundarySeen: false, sent: false };
+          startAutonomousTurn(session, context.emit);
+          // Host listeners can synchronously submit a prompt or Stop on started.
+          if (session.closed || session.cacheMaintenance?.uuid !== uuid || !session.autonomous) return false;
+          context.emit({ type: "timeline.item", sessionId: session.id,
+            item: { type: "notification", id: `afk-compact-${uuid}`, level: "info",
+              message: "Automatically compacting idle context before estimated cache expiry." } });
+          if (session.cacheMaintenance?.uuid !== uuid || session.closed) return false;
+          try {
+            session.cacheMaintenance.sent = true;
+            deliverClaudeMessage(session, uuid, [{ type: "text", text: "/compact" }]);
+          }
+          catch (error) {
+            session.cacheMaintenance = null;
+            settleAutonomousTurn(session, context.emit, "failed", describe(error));
+            throw error;
+          }
+          return true;
+        };
+        return context.forkCoordinator ? context.forkCoordinator.exclusive(contextKey, reserve) : reserve();
+      },
+    });
   if (context.forkCoordinator) {
     context.unregisterForks.set(session.id, context.forkCoordinator.register(session.contextKey, async () => {
-      if (session.closed || session.active || session.autonomous || session.pendingPermissions.size ||
+      if (session.closed || session.active || session.autonomous ||
+        session.cacheMaintenance || session.cacheBackgroundTasks.size || session.pendingPermissions.size ||
         session.subagents?.hasRunningTasks()) {
         throw new Error("Wait for Claude and its background tasks to finish, and resolve pending permissions before forking");
       }
@@ -754,7 +808,10 @@ async function openSession(
       if (session.query) await resetQuery(session, context.emit);
       return { claudeSessionId: session.claudeSessionId,
         configDir: path.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
-        config: { ...session.config, model: session.desiredModel ?? undefined,
+        config: { ...session.config,
+          ...(context.cacheCoordinator ? { providerOptions: { ...session.config.providerOptions,
+            translateClaudeCache: context.cacheCoordinator.status(contextKey).preferences } } : {}),
+          model: session.desiredModel ?? undefined,
           mode: session.desiredMode ?? undefined, thinkingOption: session.desiredThinking ?? undefined,
           settings: { ...session.config.settings, fast_mode: session.fastMode } },
       };
@@ -1073,6 +1130,9 @@ async function promptSession(
 ): Promise<void> {
   const session = context.sessions.get(input.sessionId);
   if (session === undefined || session.closed) throw new Error(`Unknown session: ${input.sessionId}`);
+  // A user prompt takes priority over our own maintenance, never another user turn.
+  if (session.cacheMaintenance) await interruptSession(session, context);
+  context.cacheCoordinator?.prompt(session.contextKey);
   const command = localRewindArguments(input.prompt.input);
   if (input.prompt.delivery === "steer" && command !== undefined) {
     context.emit({ type: "session.prompt_result", sessionId: session.id,
@@ -1137,9 +1197,7 @@ async function promptSession(
     if (session.closed || session.active !== active) return;
     session.pendingUserAnchors.push({ uuid: active.messageUuid, clientMessageId: active.clientMessageId, text: original });
     active.sent = true;
-    session.sink.push({ type: "user", uuid: active.messageUuid,
-      session_id: session.claudeSessionId ?? "", parent_tool_use_id: null,
-      message: { role: "user", content: blocks } });
+    deliverClaudeMessage(session, active.messageUuid, blocks);
     await publishCommands(session, context);
   } catch (error) {
     if (session.closed || session.active !== active) return;
@@ -1152,6 +1210,12 @@ async function promptSession(
         clientMessageId: active.clientMessageId, result: { type: "failed", error: { message: describe(error) } } });
     }
   }
+}
+
+/** Shared command/message delivery; callers own reservation and lifecycle first. */
+function deliverClaudeMessage(session: ClaudeSession, uuid: NonNullable<SDKUserMessage["uuid"]>, blocks: SdkContentBlock[]): void {
+  session.sink.push({ type: "user", uuid, session_id: session.claudeSessionId ?? "",
+    parent_tool_use_id: null, message: { role: "user", content: blocks } });
 }
 
 /** /rewind is Paseo's local file-checkpoint command, never an LLM prompt. */
@@ -1196,12 +1260,19 @@ async function executeLocalRewind(
 }
 
 async function interruptSession(session: ClaudeSession, context: DispatchContext): Promise<void> {
+  const maintenance = session.cacheMaintenance;
+  if (session.cacheMaintenance) {
+    session.cacheMaintenance = null;
+    context.cacheCoordinator?.finish(session.contextKey, false);
+  }
+  context.cacheCoordinator?.invalidate(session.contextKey);
   session.cancellationEpoch += 1;
   const active = session.active;
   const query = session.query;
   const sink = session.sink;
   const mainTurnOrdinal = session.mainTurnOrdinal;
-  const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid));
+  const hadMainTurn = session.mainTurnInFlight || Boolean(active?.sent && !sink.hasUnstarted(active.messageUuid)) ||
+    Boolean(maintenance?.sent && !sink.hasUnstarted(maintenance.uuid));
   if (active?.kind === "rewind") {
     // A checkpoint control request cannot steer or share a process with its
     // replacement. Abort before publishing cancellation so a reentrant prompt
@@ -1233,7 +1304,7 @@ async function interruptSession(session: ClaudeSession, context: DispatchContext
   if (hadMainTurn || active?.sent) session.subagents?.cancelRunningForegroundTasks();
   if (!query) return;
   // Establish result ownership before an asynchronous control request can yield.
-  const ownsResult = Boolean(active?.sent && hadMainTurn);
+  const ownsResult = Boolean((active?.sent || maintenance?.sent) && hadMainTurn);
   if (ownsResult) session.pendingInterruptedResults += 1;
   session.interrupted = hadMainTurn;
   const withdrawing = new Set(sink.pendingUuids);
@@ -1246,7 +1317,7 @@ async function interruptSession(session: ClaudeSession, context: DispatchContext
   session.pendingUserAnchors = session.pendingUserAnchors.filter((anchor) => !withdrawing.has(anchor.uuid) || retained.has(anchor.uuid));
   if (session.query !== query || session.mainTurnOrdinal !== mainTurnOrdinal) return;
   if (!hadMainTurn && notWithdrawn.length === 0) return;
-  if (!ownsResult && active?.sent) session.pendingInterruptedResults += 1;
+  if (!ownsResult && (active?.sent || maintenance?.sent)) session.pendingInterruptedResults += 1;
   session.interrupted = true;
   // The captured query owns this stop; never interrupt a replacement process.
   try { await withTimeout(query.interrupt(), 10_000, "Claude interrupt timed out"); }
@@ -2188,7 +2259,13 @@ async function pumpQuery(
   try {
     for await (const message of query) {
       if (session.closed || session.detached || session.query !== query) return;
+      const maintenance = session.cacheMaintenance !== null;
+      observeCacheBackgroundTask(session, message);
+      if (!(message.type === "result" && session.pendingInterruptedResults > 0)) {
+        context.cacheCoordinator?.observe(session.contextKey, message, cacheTtlOverride(session), maintenance);
+      }
       handleSdkMessage(session, message, context);
+      if (message.type !== "stream_event") context.cacheCoordinator?.refresh();
     }
   } catch (error) {
     if (session.closed) return;
@@ -2196,6 +2273,9 @@ async function pumpQuery(
       session.detached = false;
       return;
     }
+    context.cacheCoordinator?.finish(session.contextKey, false);
+    context.cacheCoordinator?.invalidate(session.contextKey);
+    session.cacheMaintenance = null;
     finishDeadQuery(session, describe(error), emit);
     return;
   }
@@ -2204,7 +2284,42 @@ async function pumpQuery(
     session.detached = false;
     return;
   }
+  context.cacheCoordinator?.finish(session.contextKey, false);
+  context.cacheCoordinator?.invalidate(session.contextKey);
+  session.cacheMaintenance = null;
   finishDeadQuery(session, "Claude exited unexpectedly", emit);
+}
+
+function cacheTtlOverride(session: ClaudeSession): "5m" | "1h" | undefined {
+  const env = session.config.env.CLAUDE_CODE_PROMPT_CACHE_TTL ?? process.env.CLAUDE_CODE_PROMPT_CACHE_TTL;
+  if (env === "5m" || env === "1h") return env;
+  const settings = session.config.providerOptions?.settings;
+  if (typeof settings === "object" && settings !== null) {
+    const ttl = (settings as Record<string, unknown>).promptCacheTtl;
+    if (ttl === "5m" || ttl === "1h") return ttl;
+  }
+  return undefined;
+}
+
+/** Include background shells, which deliberately do not appear as subagent panes. */
+function observeCacheBackgroundTask(session: ClaudeSession, message: SDKMessage): void {
+  const task = message as unknown as { type: string; subtype?: string; task_id?: string;
+    task_type?: string; tasks?: Array<{ task_id?: string; id?: string }>;
+    parent_tool_use_id?: unknown; status?: string; patch?: { status?: string } };
+  if (task.type !== "system" || typeof task.parent_tool_use_id === "string") return;
+  if (task.subtype === "background_tasks_changed" && Array.isArray(task.tasks)) {
+    const live = new Set(task.tasks.map((entry) => entry.task_id ?? entry.id));
+    for (const id of session.cacheBackgroundTasks) if (!live.has(id)) session.cacheBackgroundTasks.delete(id);
+  }
+  if (typeof task.task_id !== "string") return;
+  // Agent/workflow completion levels are already tracked by ClaudeSubagentTracker.
+  if (task.subtype === "task_started" && task.task_type === "local_bash") session.cacheBackgroundTasks.add(task.task_id);
+  if (task.subtype === "task_notification" || task.subtype === "task_updated") {
+    const status = task.patch?.status ?? task.status;
+    if (status === "completed" || status === "failed" || status === "killed" || status === "canceled") {
+      session.cacheBackgroundTasks.delete(task.task_id);
+    }
+  }
 }
 
 /**
@@ -2349,6 +2464,7 @@ function handleSdkMessage(
       emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
     }
     if (message.model) {
+      if (session.runtimeModel !== null && session.runtimeModel !== message.model) session.cacheInvalidate?.();
       session.runtimeModel = message.model;
       session.contextWindowMaxTokens = findClaudeModel(message.model)?.contextWindowMaxTokens ?? session.contextWindowMaxTokens;
     }
@@ -2392,6 +2508,7 @@ function handleSdkMessage(
     }
     if (message.subtype === "compact_boundary") {
       session.compacting = false;
+      if (session.cacheMaintenance) session.cacheMaintenance.boundarySeen = true;
       noteCompactionBoundary(session, message, emit);
       return;
     }
@@ -2407,6 +2524,7 @@ function handleSdkMessage(
     // rendering complete messages. Sidechain frames already returned above
     // so they never move the parent ring.
     noteStreamEventUsage(session, message, emit);
+    if (session.cacheMaintenance) return;
     for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
       if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
       emit({ type: "timeline.item", sessionId: session.id, item });
@@ -2416,6 +2534,7 @@ function handleSdkMessage(
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {
     noteAssistantContextUsage(session, message.message);
+    if (session.cacheMaintenance) return;
     const content = message.message.content;
     if (!Array.isArray(content)) return;
     for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
@@ -2445,6 +2564,10 @@ function handleSdkMessage(
     return;
   }
   if (message.type === "user" && message.parent_tool_use_id === null) {
+    if (session.cacheMaintenance && message.uuid === session.cacheMaintenance.uuid) {
+      session.sink.started(session.cacheMaintenance.uuid);
+      return;
+    }
     noteRewindAnchor(session, message, emit);
     const content = message.message.content;
     if (!Array.isArray(content)) return;
@@ -2510,6 +2633,11 @@ function handleSdkMessage(
     // the only reliable signal.
     const missingConversation = readMissingConversationError(message, session.claudeSessionId);
     if (missingConversation !== null) {
+      if (session.cacheMaintenance) {
+        session.cacheMaintenance = null;
+        context.cacheCoordinator?.finish(session.contextKey, false);
+      }
+      context.cacheCoordinator?.invalidate(session.contextKey);
       session.claudeSessionId = null;
       emit({
         type: "session.persistence",
@@ -2573,6 +2701,16 @@ function handleSdkMessage(
     if (session.pendingInterruptedResults > 0) {
       session.pendingInterruptedResults -= 1;
       session.interrupted &&= session.pendingInterruptedResults > 0;
+      return;
+    }
+    if (session.cacheMaintenance) {
+      const maintenance = session.cacheMaintenance;
+      session.cacheMaintenance = null;
+      session.sink.started(maintenance.uuid);
+      const success = maintenance.boundarySeen && message.subtype === "success" && !message.is_error;
+      context.cacheCoordinator?.finish(session.contextKey, success);
+      settleAutonomousTurn(session, emit, success ? "completed" : "failed",
+        success ? undefined : "Automatic compaction did not report a successful native compaction boundary");
       return;
     }
     // The per-model context windows recorded on every result keep the ring
@@ -2976,13 +3114,17 @@ function readCompactionMetadata(
 ): { trigger?: string; preTokens?: number; postTokens?: number } | undefined {
   const record = message as Record<string, unknown>;
   const metadata =
-    typeof record.compaction === "object" && record.compaction !== null
+    typeof record.compact_metadata === "object" && record.compact_metadata !== null
+      ? record.compact_metadata
+      : typeof record.compaction === "object" && record.compaction !== null
       ? record.compaction
       : typeof record.metadata === "object" && record.metadata !== null
         ? record.metadata
         : undefined;
   if (metadata === undefined) return undefined;
-  const source = metadata as { trigger?: unknown; preTokens?: unknown; postTokens?: unknown };
+  const raw = metadata as Record<string, unknown>;
+  const source = { trigger: raw.trigger, preTokens: raw.pre_tokens ?? raw.preTokens,
+    postTokens: raw.post_tokens ?? raw.postTokens };
   return {
     ...(typeof source.trigger === "string" ? { trigger: source.trigger } : {}),
     ...(typeof source.preTokens === "number" && Number.isFinite(source.preTokens)
@@ -3007,6 +3149,7 @@ function noteRewindAnchor(
 ): void {
   const uuid = (message as { uuid?: unknown }).uuid;
   if (typeof uuid !== "string" || uuid.length === 0) return;
+  session.sink.started(uuid);
   // Tool-result frames are user-shaped too; only real user messages anchor.
   const content = (message as SDKUserMessage).message?.content;
   if (Array.isArray(content) && content.some(
@@ -3039,6 +3182,7 @@ function noteRewindAnchor(
 async function teardownSession(session: ClaudeSession): Promise<void> {
   if (session.closed) return;
   session.closed = true;
+  session.cacheUnregister?.();
   session.cancellationEpoch += 1;
   session.sink.close();
   session.abort.abort();

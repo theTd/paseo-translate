@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { OwnedSubscription, PaseoAgentListResult } from "@getpaseo/client";
+import { observeAgentList } from "./agent-list-observer";
 import { Pressable, Text, View } from "react-native";
 import { useAgent, useRpc, useSettings, type PluginButtonContentProps,
   type PluginButtonRegistration, type PluginClientContext, type PluginAgentPanelProps } from "@getpaseo/plugin/client";
@@ -119,7 +119,6 @@ function ForkResult({ agentId, navigation, theme }: PluginAgentPanelProps) {
 export function contributeClaudeSessionFork(client: PluginClientContext): () => void {
   const registrations = new Map<string, { workspaceId: string; button: PluginButtonRegistration }>();
   const operations = new Map<string, string>();
-  const lifetime = new AbortController();
   let stopped = false;
   const title = translate(detectSystemLocale(), "forkSession");
   const removePanel = client.addWorkspacePanel({ id: "claude-fork-result", title,
@@ -150,64 +149,10 @@ export function contributeClaudeSessionFork(client: PluginClientContext): () => 
       button: { title, label: title, icon: "GitFork", behavior: { kind: "popover", Content } } });
     registrations.set(sourceAgentId, { workspaceId, button });
   }
-  type Agent = PaseoAgentListResult["entries"][number]["agent"];
-  interface Page {
-    active: boolean;
-    agents: Map<string, Agent>;
-    next?: Page;
-    subscription?: OwnedSubscription<PaseoAgentListResult>;
-    unsubscribe?: () => void;
-  }
-  function release(page: Page | undefined): void {
-    if (!page) return;
-    page.active = false;
-    release(page.next);
-    page.unsubscribe?.();
-    void page.subscription?.release().catch((error) => console.error("Claude fork observation release failed", error));
-  }
-  function reconcile(): void {
-    const agents = new Map<string, Agent>();
-    for (let page: Page | undefined = firstPage; page; page = page.next) {
-      for (const [id, agent] of page.agents) agents.set(id, agent);
-    }
-    for (const id of registrations.keys()) if (!agents.has(id)) remove(id);
-    for (const agent of agents.values()) register(agent);
-  }
-  function observePage(cursor?: string): Page {
-    const page: Page = { active: true, agents: new Map() };
-    void client.paseo.agents.list({ page: { limit: 200, cursor }, subscribe: {}, signal: lifetime.signal })
-      .then(({ subscription }) => {
-        page.subscription = subscription;
-        if (stopped || !page.active) { release(page); return; }
-        page.unsubscribe = subscription.subscribe({
-          snapshot: ({ entries, pageInfo }) => {
-            if (stopped || !page.active) return;
-            release(page.next);
-            page.next = undefined;
-            page.agents = new Map(entries.map(({ agent }) => [agent.id, agent]));
-            if (pageInfo.nextCursor) page.next = observePage(pageInfo.nextCursor);
-            reconcile();
-          },
-          update: (message) => {
-            if (stopped || !page.active || message.type !== "agent_update") return;
-            const update = message.payload;
-            if (update.kind !== "remove") firstPage.agents.set(update.agent.id, update.agent);
-            for (let current: Page | undefined = firstPage; current; current = current.next) {
-              if (update.kind === "remove") current.agents.delete(update.agentId);
-              else if (current.agents.has(update.agent.id)) current.agents.set(update.agent.id, update.agent);
-            }
-            if (update.kind === "remove") remove(update.agentId);
-            else register(update.agent);
-          },
-        });
-      }).catch((error) => { if (!stopped && page.active) console.error("Claude fork button observation failed", error); });
-    return page;
-  }
-  const firstPage = observePage();
+  const stopObservation = observeAgentList(client, register, remove);
   return () => {
     stopped = true;
-    lifetime.abort();
-    release(firstPage);
+    stopObservation();
     for (const id of registrations.keys()) remove(id);
     operations.clear();
     removePanel();
