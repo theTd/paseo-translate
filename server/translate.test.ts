@@ -44,6 +44,7 @@ const values: TranslateSettingsValues = {
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
   translationDomainContext: "",
+  translationExtraRules: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
@@ -1053,8 +1054,14 @@ describe("display translation batching", () => {
     expect(calls).toHaveLength(1);
     // The duplicate text was packed once, not twice.
     expect(calls[0]?.user.match(/<ti n=/g) ?? []).toHaveLength(2);
-    // Every occurrence, the duplicate included, reports one completion.
-    expect(events.filter((event) => event.done).map((event) => event.index)).toEqual([0, 1, 2]);
+    // Every occurrence, the duplicate included, reports one completion (the
+    // duplicate settles together with the entry it joined).
+    expect(
+      events
+        .filter((event) => event.done)
+        .map((event) => event.index)
+        .sort(),
+    ).toEqual([0, 1, 2]);
     // A later single-item request for the same text is a cache hit.
     await expect(translator.translate("Same reply", "agent-to-user")).resolves.toBe("DE:Same reply");
     expect(calls).toHaveLength(1);

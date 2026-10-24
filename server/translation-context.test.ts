@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   CONTEXT_MEMORY_KEY_PREFIX,
   createTranslationContextManager,
+  crossDirectionTurns,
 } from "./translation-context";
 import { createMemoryTranslationCacheStore } from "./translation-cache-store";
-import type { TranslateSettingsValues } from "../shared/translate";
+import {
+  TRANSLATION_INPUT_OPEN_TAG,
+  wrapTranslationInput,
+  type TranslateSettingsValues,
+} from "../shared/translate";
 
 const values: TranslateSettingsValues = {
   endpointBaseUrl: "https://llm.example/v1",
@@ -14,6 +19,7 @@ const values: TranslateSettingsValues = {
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
   translationDomainContext: "",
+  translationExtraRules: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: ["agent"],
@@ -72,7 +78,7 @@ function recordPair(
 }
 
 describe("translation context manager", () => {
-  it("records turns per direction and snapshots a copy", () => {
+  it("records turns per direction, adds reversed cross-direction pairs, and snapshots a copy", () => {
     const manager = createTranslationContextManager({
       loadConfig: async () => values,
       sweepIntervalMs: 0,
@@ -80,14 +86,40 @@ describe("translation context manager", () => {
     manager.record("s", "user-to-agent", "hello", "hallo");
     manager.record("s", "agent-to-user", "welt", "world");
     const snapshot = manager.snapshot("s", "user-to-agent", { hardCapChars: 1_000 });
-    expect(snapshot.turns).toEqual([{ user: "hello", assistant: "hallo" }]);
+    // Same-direction pairs first (stable request prefix), then the other
+    // lane reversed into this direction: the agent's reply terms teach how
+    // the user's wording maps back to the agent's.
+    expect(snapshot.turns).toEqual([
+      { user: "hello", assistant: "hallo" },
+      { user: wrapTranslationInput("world"), assistant: "welt" },
+    ]);
     expect(snapshot.memory).toBe("");
     expect(
       manager.snapshot("s", "agent-to-user", { hardCapChars: 1_000 }).turns,
-    ).toEqual([{ user: "welt", assistant: "world" }]);
+    ).toEqual([
+      { user: "welt", assistant: "world" },
+      { user: wrapTranslationInput("hallo"), assistant: "hello" },
+    ]);
     // Mutating the snapshot must not leak into the committed transcript.
     (snapshot.turns as unknown[]).push({ user: "x", assistant: "y" });
-    expect(manager.snapshot("s", "user-to-agent", { hardCapChars: 1_000 }).turns).toHaveLength(1);
+    expect(manager.snapshot("s", "user-to-agent", { hardCapChars: 1_000 }).turns).toHaveLength(2);
+  });
+
+  it("bounds reversed cross-direction pairs by a char budget, newest first", () => {
+    const turns = [
+      { user: wrapTranslationInput("old"), assistant: "alt" },
+      { user: wrapTranslationInput("huge"), assistant: "x".repeat(50) },
+      { user: wrapTranslationInput("new"), assistant: "neu" },
+    ];
+    // The oversized pair is skipped, not a stop: the older short one fits.
+    expect(crossDirectionTurns(turns, 20)).toEqual([
+      { user: wrapTranslationInput("alt"), assistant: "old" },
+      { user: wrapTranslationInput("neu"), assistant: "new" },
+    ]);
+    expect(crossDirectionTurns(turns, 6)).toEqual([
+      { user: wrapTranslationInput("neu"), assistant: "new" },
+    ]);
+    expect(crossDirectionTurns(turns, 0)).toEqual([]);
   });
 
   it("scopes transcripts by session key", () => {
@@ -124,9 +156,15 @@ describe("translation context manager", () => {
     for (const direction of ["user-to-agent", "agent-to-user"] as const) {
       const snapshot = manager.snapshot("s", direction, { hardCapChars: 100_000 });
       expect(snapshot.memory).toBe("MEM: glossary");
-      // Only the newest few turns survive compaction.
-      expect(snapshot.turns).toHaveLength(6);
-      expect(snapshot.turns.at(-1)).toEqual({ user: "source-9", assistant: "target-9" });
+      // Only the newest few turns survive compaction, in both lanes.
+      const own = snapshot.turns.filter((turn) => !turn.user.startsWith(TRANSLATION_INPUT_OPEN_TAG));
+      expect(own).toHaveLength(6);
+      expect(own.at(-1)).toEqual({ user: "source-9", assistant: "target-9" });
+      expect(snapshot.turns).toHaveLength(12);
+      expect(snapshot.turns.at(-1)).toEqual({
+        user: wrapTranslationInput("target-9"),
+        assistant: "source-9",
+      });
     }
   });
 
@@ -201,10 +239,16 @@ describe("translation context manager", () => {
     manager.record("s", "agent-to-user", "cccc", "dddd"); // 8 chars
     manager.record("s", "user-to-agent", "eeee", "ffff"); // 8 chars, newest
     const snapshot = manager.snapshot("s", "user-to-agent", { hardCapChars: 16 });
-    expect(snapshot.turns).toEqual([{ user: "eeee", assistant: "ffff" }]);
+    expect(snapshot.turns).toEqual([
+      { user: "eeee", assistant: "ffff" },
+      { user: wrapTranslationInput("dddd"), assistant: "cccc" },
+    ]);
     expect(
       manager.snapshot("s", "agent-to-user", { hardCapChars: 100_000 }).turns,
-    ).toEqual([{ user: "cccc", assistant: "dddd" }]);
+    ).toEqual([
+      { user: "cccc", assistant: "dddd" },
+      { user: wrapTranslationInput("ffff"), assistant: "eeee" },
+    ]);
   });
 
   it("seeds a fresh scope from the persisted memory and persists compaction results", async () => {

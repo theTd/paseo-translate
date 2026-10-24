@@ -6,6 +6,7 @@ import { describeFinishedTool, describeRunningTool } from "./claude-tool-details
 import { claudeProjectDir } from "./claude-project-dir";
 import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
 import { isClaudeSyntheticUserEntry, isClaudeTranscriptNoise } from "./claude-transcript-content";
+import type { PromptTranslationFragment } from "../shared/prompt-text";
 
 /**
  * Best-effort history replay for the Translate (Claude Code) provider.
@@ -82,6 +83,14 @@ export interface ReplayResult {
 export interface ReplayUserTextRestore {
   restoreRootBlock: (translatedBlock: string) => Promise<string> | string;
   restoreChildBlock: (translatedBlock: string) => Promise<string> | string;
+  /**
+   * Receives each replayed root user message as (shown text, text Claude
+   * actually received) pairs per block, so the provider can register the
+   * exact prompt display. Without it the app would translate the shown
+   * text again — a second request whose result can differ from what the
+   * agent got (always so for back-translated or unrestored blocks).
+   */
+  rememberRootMessage?: (fragments: PromptTranslationFragment[]) => Promise<void> | void;
 }
 
 function readString(value: unknown): string | undefined {
@@ -160,6 +169,7 @@ async function collectEntry(
   entry: ReplayEntry,
   idSeed: string,
   restoreUserBlock?: (translatedBlock: string) => Promise<string> | string,
+  rememberUserMessage?: (fragments: PromptTranslationFragment[]) => Promise<void> | void,
 ): Promise<void> {
   const timestamp = normalizeReplayTimestamp(entry.timestamp);
   if (entry.type === "system" && entry.subtype === "compact_boundary") {
@@ -267,24 +277,35 @@ async function collectEntry(
         return translatedBlock;
       }
     };
+    const remember = async (fragments: PromptTranslationFragment[]): Promise<void> => {
+      if (rememberUserMessage === undefined || fragments.length === 0) return;
+      try {
+        await rememberUserMessage(fragments);
+      } catch {
+        // Display registration is an optimization; replay never fails on it.
+      }
+    };
     // Sidecar prompts serialize as a bare string rather than a block array.
     if (typeof content === "string") {
       const text = content.trim();
       if (text.length > 0 && !isClaudeTranscriptNoise(text)) {
+        const restored = await restoreBlock(text);
         pushItem(
           collector,
           withTimestamp({
             type: "user_message",
             id: `${idSeed}`,
-            text: await restoreBlock(text),
+            text: restored,
             ...rewindIdentity(entry),
           } satisfies ProviderTimelineItem),
         );
+        await remember([{ original: restored, translated: text }]);
       }
       return;
     }
     if (!Array.isArray(content)) return;
     const texts: string[] = [];
+    const fragments: PromptTranslationFragment[] = [];
     for (const block of content) {
       if (typeof block !== "object" || block === null) continue;
       const record = block as { type?: unknown };
@@ -293,7 +314,11 @@ async function collectEntry(
         // Per-block restore BEFORE joining: forward translation ran per
         // block, so block boundaries are the only exact lookup keys. A
         // joined-string lookup would miss every multi-block turn.
-        if (text !== undefined && !isClaudeTranscriptNoise(text)) texts.push(await restoreBlock(text));
+        if (text !== undefined && !isClaudeTranscriptNoise(text)) {
+          const restored = await restoreBlock(text);
+          texts.push(restored);
+          fragments.push({ original: restored, translated: text });
+        }
       } else if (record.type === "tool_result") {
         const result = block as { tool_use_id?: unknown; content?: unknown; is_error?: unknown };
         if (typeof result.tool_use_id !== "string") continue;
@@ -335,6 +360,7 @@ async function collectEntry(
             ...rewindIdentity(entry),
         } satisfies ProviderTimelineItem),
       );
+      await remember(fragments);
     }
   }
 }
@@ -422,7 +448,13 @@ async function readReplayInner(
     ) {
       continue;
     }
-    await collectEntry(root, entry, `replay-${seed++}`, restore?.restoreRootBlock);
+    await collectEntry(
+      root,
+      entry,
+      `replay-${seed++}`,
+      restore?.restoreRootBlock,
+      restore?.rememberRootMessage,
+    );
   }
 
   const children = await readReplayChildren(projectDir, claudeSessionId, root, restore);

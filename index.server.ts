@@ -15,10 +15,12 @@ import { createClaudeSessionForkHandler } from "./server/claude-session-fork";
 import { forkClaudeSessionRpc } from "./shared/claude-session-fork";
 import { createTranslateHandler } from "./server/translate";
 import {
+  createTranslateStreamCancelHandler,
   createTranslateStreamManager,
   createTranslateStreamPollHandler,
   createTranslateStreamStartHandler,
 } from "./server/translate";
+import { createTranslationInflightRegistry } from "./server/translation-inflight";
 import {
   createPersistentTranslationCacheStore,
   defaultTranslationCacheDirectory,
@@ -31,6 +33,7 @@ import {
   TRANSLATE_PROVIDER_IDS,
   translateProvidersRpc,
   translateSettings,
+  translateStreamCancelRpc,
   translateStreamPollRpc,
   translateStreamStartRpc,
   translateTextRpc,
@@ -71,7 +74,11 @@ export default function contribute(server: PluginServerContext) {
       maxEntries: CONTEXT_MEMORY_CAPACITY,
     }),
   });
-  const deps = { loadConfig, cacheStore, context };
+  // One single-flight registry, shared like the cache: the prompt path, the
+  // display jobs of every client and the notification previews join one
+  // running request per text instead of each billing their own.
+  const inflight = createTranslationInflightRegistry();
+  const deps = { loadConfig, cacheStore, context, inflight };
   const forkCoordinator = new ClaudeForkCoordinator();
   const cacheDefaults = server.registerSettings(claudeCacheSettings);
   const cacheCoordinator = new ClaudeCacheCompactionCoordinator(createClaudeCachePreferenceStore(
@@ -105,6 +112,7 @@ export default function contribute(server: PluginServerContext) {
   const streamManager = createTranslateStreamManager(deps);
   server.handle(translateStreamStartRpc, createTranslateStreamStartHandler(streamManager));
   server.handle(translateStreamPollRpc, createTranslateStreamPollHandler(streamManager));
+  server.handle(translateStreamCancelRpc, createTranslateStreamCancelHandler(streamManager));
   server.handle(translateProvidersRpc, createProvidersHandler());
   return () => {
     offSessionOpen();

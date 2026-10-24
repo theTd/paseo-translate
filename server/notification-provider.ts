@@ -5,11 +5,13 @@ import type {
   ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
 import {
+  TRANSLATION_TEXT_LIMIT,
   isDataUriImageOnlyText,
   isProviderImageMarkdown,
   resolveTranslationContextKey,
   type TranslateSettingsValues,
 } from "../shared/translate";
+import { requiresHostRenderer } from "../shared/host-rendered-message";
 import {
   NOTIFICATION_BOUNDARY_KIND,
   NOTIFICATION_PREVIEW_PREFIX,
@@ -18,13 +20,24 @@ import {
 import { createTranslator, type TranslatorDeps } from "./translate";
 import { inlineText, parseMarkdownBlocks, type BlockNode } from "../shared/markdown-parse";
 
+/** Source cap for items the app never translates itself (legacy plain-text preview). */
 const PREVIEW_SOURCE_LIMIT = 2_000;
+/** Visible preview length; longer previews end in an ellipsis. */
+const PREVIEW_TEXT_LIMIT = 220;
 
 interface NotificationSession {
   contextKey: string;
   turnId: string | null;
   lastEndedTurnId: string | null;
-  segment: string;
+  /**
+   * The trailing run of assistant rows exactly as the app will hold them:
+   * keyed by message id (the app merges deltas per message id), each value
+   * the concatenated deltas of that row. The completion preview translates
+   * these texts verbatim, so its translations are the very cache entries
+   * the reply renderer asks for, instead of a second, differently-keyed
+   * translation of a plain-text excerpt.
+   */
+  run: Map<string, string>;
   snapshots: Map<string, string>;
   previousWasAssistant: boolean;
   epoch: number;
@@ -75,7 +88,7 @@ export function withNotificationTranslation(
             contextKey: id,
             turnId: null,
             lastEndedTurnId: null,
-            segment: "",
+            run: new Map(),
             snapshots: new Map(),
             previousWasAssistant: false,
             epoch: 0,
@@ -99,11 +112,23 @@ export function withNotificationTranslation(
           return session.values;
         }
       };
-      const preview = async (
+      /** Plain-text excerpt of a source the app does not translate itself. */
+      const plainPreviewTranslation = async (
+        source: string,
+        session: NotificationSession,
+        signal: AbortSignal,
+      ): Promise<string> => {
+        const plainSource = notificationText(source.slice(0, PREVIEW_SOURCE_LIMIT));
+        if (!plainSource) throw new Error("No notification prose");
+        return untilAborted(
+          translator.translate(plainSource, "agent-to-user", { contextKey: session.contextKey }),
+          signal,
+        );
+      };
+      const permissionPreview = async (
         source: string,
         session: NotificationSession,
         values: TranslateSettingsValues,
-        reason: "finished" | "permission",
         signal: AbortSignal,
       ): Promise<string> => {
         try {
@@ -111,18 +136,87 @@ export function withNotificationTranslation(
           if (!source.trim() || isDataUriImageOnlyText(source) || isProviderImageMarkdown(source)) {
             throw new Error("No notification prose");
           }
-          const plainSource = notificationText(source.slice(0, PREVIEW_SOURCE_LIMIT));
-          if (!plainSource) throw new Error("No notification prose");
-          const text = await untilAborted(
-            translator.translate(plainSource, "agent-to-user", { contextKey: session.contextKey }),
-            signal,
-          );
-          const plainText = notificationText(text);
+          const plainText = notificationText(await plainPreviewTranslation(source, session, signal));
           if (!plainText) throw new Error("Empty notification translation");
-          return plainText.length > 220 ? `${plainText.slice(0, 217).trimEnd()}...` : plainText;
+          return clipPreview(plainText, false);
         } catch {
-          return notificationFallback(values.userLanguage, reason);
+          return notificationFallback(values.userLanguage, "permission");
         }
+      };
+      /**
+       * Completion preview from the turn's trailing assistant rows. Each row
+       * the app renders through the translated view is translated verbatim
+       * — the reply renderer's own cache key — so opening the conversation
+       * afterwards is a cache hit (or joins the still-running request)
+       * rather than a second translation. The wait ends as soon as enough
+       * translated text exists for the preview, or after one endpoint
+       * timeout; the current row keeps translating into the cache, while
+       * later rows are left to the app (they may never be read). With reply
+       * translation off the app never reads those entries, so every row
+       * uses the bounded plain-text excerpt instead.
+       */
+      const finishedPreview = async (
+        rows: readonly string[],
+        session: NotificationSession,
+        values: TranslateSettingsValues,
+        signal: AbortSignal,
+      ): Promise<string> => {
+        const fallback = notificationFallback(values.userLanguage, "finished");
+        const prose = rows.filter(
+          (text) => text.trim().length > 0 && !isDataUriImageOnlyText(text) && !isProviderImageMarkdown(text),
+        );
+        if (prose.length === 0 || signal.aborted) return fallback;
+        const finished: string[] = [];
+        let partial = "";
+        const plainSoFar = (current: string) =>
+          notificationText([...finished, current].filter((text) => text.length > 0).join("\n\n"));
+        return new Promise<string>((resolve) => {
+          let settled = false;
+          const finish = (text: string, complete: boolean) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            signal.removeEventListener("abort", onAbort);
+            resolve(text.length > 0 ? clipPreview(text, !complete) : fallback);
+          };
+          // A partial translation is still a faithful preview (it is clipped
+          // anyway); only an empty one falls back to the generic message.
+          const timer = setTimeout(() => finish(plainSoFar(partial), false), values.translationTimeoutMs);
+          const onAbort = () => finish("", false);
+          signal.addEventListener("abort", onAbort, { once: true });
+          void (async () => {
+            for (const source of prose) {
+              if (settled) return;
+              partial = "";
+              // Full-row translation only pays off when the app will read it;
+              // with reply translation off, a short plain excerpt suffices.
+              const shared =
+                values.translateResponses &&
+                !requiresHostRenderer(source) &&
+                source.length <= TRANSLATION_TEXT_LIMIT;
+              const translated = shared
+                ? await translator.translateStream(
+                    source,
+                    "agent-to-user",
+                    (delta) => {
+                      partial += delta;
+                      const plain = plainSoFar(partial);
+                      if (plain.length > PREVIEW_TEXT_LIMIT) finish(plain, false);
+                    },
+                    { contextKey: session.contextKey, signal },
+                  )
+                : await plainPreviewTranslation(source, session, signal);
+              finished.push(translated);
+              partial = "";
+              const plain = plainSoFar("");
+              if (plain.length > PREVIEW_TEXT_LIMIT) {
+                finish(plain, false);
+                return;
+              }
+            }
+            finish(plainSoFar(""), true);
+          })().catch(() => finish(plainSoFar(""), false));
+        });
       };
       const handle = async (event: ProviderEvent, session: NotificationSession, epoch: number) => {
         if (event.type === "request.completed" || event.type === "request.failed") {
@@ -139,12 +233,12 @@ export function withNotificationTranslation(
           return;
         const signal = session.abort.signal;
         if (event.type === "session.closed" || event.type === "session.runtime_failed") {
-          session.segment = "";
+          session.run.clear();
           session.snapshots.clear();
         }
         if (event.type === "session.turn" && event.state === "started") {
           session.turnId = event.turnId;
-          session.segment = "";
+          session.run.clear();
           session.snapshots.clear();
           session.previousWasAssistant = false;
         }
@@ -167,10 +261,18 @@ export function withNotificationTranslation(
               ? event.item.text.slice(previous.length)
               : event.item.text;
             session.snapshots.set(event.item.id, event.item.text);
-            // Match the host adapter's snapshot-to-delta mapping, including non-prefix text blocks.
-            if (delta.length > 0) {
-              if (!session.previousWasAssistant) session.segment = "";
-              session.segment = (session.segment + delta).slice(0, PREVIEW_SOURCE_LIMIT);
+            // Match the host adapter's snapshot-to-delta mapping (including
+            // non-prefix text blocks) and the app's row assembly: deltas join
+            // per message id with CRs stripped, and a whitespace-only first
+            // chunk never opens a row.
+            const chunk = delta.replace(/\r/g, "");
+            if (chunk.length > 0) {
+              if (!session.previousWasAssistant) session.run.clear();
+              const rowId = event.item.messageId ?? event.item.id;
+              const existing = session.run.get(rowId);
+              if (existing !== undefined || /\S/.test(chunk)) {
+                session.run.set(rowId, (existing ?? "") + chunk);
+              }
               session.previousWasAssistant = true;
             }
           } else {
@@ -182,7 +284,7 @@ export function withNotificationTranslation(
           const values = await loadValues(session);
           if (values?.translateNotifications) {
             const source = permissionSummary(event.request);
-            const title = await preview(source, session, values, "permission", signal);
+            const title = await permissionPreview(source, session, values, signal);
             if (closed || session.closed || epoch !== session.epoch) return;
             emit({ ...event, request: { ...event.request, title, description: "" } });
             return;
@@ -217,8 +319,7 @@ export function withNotificationTranslation(
                 session.lastEndedTurnId = event.turnId;
                 return;
               }
-              const source = session.segment;
-              const text = await preview(source, session, values, "finished", signal);
+              const text = await finishedPreview([...session.run.values()], session, values, signal);
               if (closed || session.closed) return;
               if (epoch !== session.epoch) {
                 session.turnId = null;
@@ -347,6 +448,12 @@ export function withNotificationTranslation(
       };
     },
   };
+}
+
+/** Clips to the preview length; an unfinished translation always ends in an ellipsis. */
+function clipPreview(text: string, partial: boolean): string {
+  if (text.length > PREVIEW_TEXT_LIMIT) return `${text.slice(0, PREVIEW_TEXT_LIMIT - 3).trimEnd()}...`;
+  return partial ? `${text.trimEnd()}...` : text;
 }
 
 function notificationText(markdown: string): string {

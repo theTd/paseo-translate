@@ -2,6 +2,8 @@ import { completeStreamFirst, createLlmClient, type ChatMessage } from "./llm-cl
 import type { TranslationCacheStore } from "./translation-cache-store";
 import {
   resolveLanguagePair,
+  unwrapTranslationInput,
+  wrapTranslationInput,
   type TranslateDirection,
   type TranslateSettingsValues,
 } from "../shared/translate";
@@ -65,6 +67,42 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60_000;
  * the un-distilled kept turns of a day-old idle scope are the accepted loss.
  */
 const SCOPE_EVICT_MIN_IDLE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Budget (source + translation chars) for opposite-direction pairs in one
+ * request. The conversation's two lanes describe the same concepts: a reply
+ * that echoes the user's own wording should come back in that wording, and
+ * a prompt that quotes a translated reply should map back to the agent's
+ * original term. Bounded because agent replies are long and the
+ * user→agent request sits on the fail-closed prompt path.
+ */
+export const CROSS_DIRECTION_CONTEXT_CHARS = 8_000;
+
+/**
+ * The newest opposite-direction pairs that fit the budget, chronological and
+ * reversed into the requesting direction: the stored translation becomes the
+ * source and the stored source becomes the expected output. Placed after
+ * the same-direction turns so the append-only part of the request prefix
+ * stays stable for endpoint prompt caching.
+ */
+export function crossDirectionTurns(
+  turns: readonly TranslationTurn[],
+  budgetChars: number,
+): TranslationTurn[] {
+  const picked: TranslationTurn[] = [];
+  let remaining = budgetChars;
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    const turn = turns[index];
+    if (turn === undefined) continue;
+    const source = unwrapTranslationInput(turn.user);
+    const size = source.length + turn.assistant.length;
+    // Skip (not stop at) an oversized pair: an older, shorter one may fit.
+    if (size > remaining) continue;
+    remaining -= size;
+    picked.push({ user: wrapTranslationInput(turn.assistant), assistant: source });
+  }
+  return picked.reverse();
+}
 
 /** Memory-store key prefix; exported for tests that seed persisted memories. */
 export const CONTEXT_MEMORY_KEY_PREFIX = "context-memory:v1:";
@@ -227,7 +265,15 @@ export function createTranslationContextManager(deps: TranslationContextManagerD
     ): TranslationContextSnapshot {
       const state = scopeState(scopeKey);
       trimTo(state, options.hardCapChars);
-      return { memory: state.memory, turns: [...state.turns[direction]] };
+      const opposite: TranslateDirection =
+        direction === "user-to-agent" ? "agent-to-user" : "user-to-agent";
+      return {
+        memory: state.memory,
+        turns: [
+          ...state.turns[direction],
+          ...crossDirectionTurns(state.turns[opposite], CROSS_DIRECTION_CONTEXT_CHARS),
+        ],
+      };
     },
 
     /** Appends one successful translation to the scope's transcript. */

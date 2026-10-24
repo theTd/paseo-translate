@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { completeStreamFirst, createLlmClient } from "./llm-client";
+import { completeStreamFirst, createLlmClient, isTranslationCanceled } from "./llm-client";
 
 interface CapturedCall {
   url: string;
@@ -424,5 +424,124 @@ describe("responses protocol", () => {
     await expect(client.stream([{ role: "user", content: "x" }], () => {})).rejects.toThrow(
       /streamed no message text/,
     );
+  });
+});
+
+describe("stream timeout and cancellation", () => {
+  const config = {
+    baseUrl: "https://llm.example/v1",
+    apiKey: "k",
+    model: "mt",
+    timeoutMs: 100,
+    protocol: "chat-completions" as const,
+  };
+
+  /** SSE body that emits `chunks` with `gapMs` between them, honoring aborts. */
+  function pacedFetch(chunks: string[], gapMs: number, calls: { count: number }): typeof fetch {
+    return (async (_url: string | URL | Request, init?: RequestInit) => {
+      calls.count += 1;
+      const signal = init?.signal as AbortSignal | undefined;
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const onAbort = () => controller.error(new DOMException("aborted", "AbortError"));
+          signal?.addEventListener("abort", onAbort, { once: true });
+          for (const chunk of chunks) {
+            await new Promise((resolve) => setTimeout(resolve, gapMs));
+            if (signal?.aborted) return;
+            controller.enqueue(encoder.encode(sseData(chunk)));
+          }
+          signal?.removeEventListener("abort", onAbort);
+          controller.close();
+        },
+      });
+      return new Response(stream as unknown as ConstructorParameters<typeof Response>[0], {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+  }
+
+  it("bounds the gaps between chunks, not the total duration of a healthy stream", async () => {
+    const calls = { count: 0 };
+    const client = createLlmClient(config, {
+      fetchFn: pacedFetch(["a", "b", "c", "d", "e", "f"], 40, calls),
+    });
+    // ~240ms in total with a 100ms timeout: progress keeps it alive.
+    await expect(client.stream([{ role: "user", content: "x" }], () => undefined)).resolves.toBe("abcdef");
+    expect(calls.count).toBe(1);
+  });
+
+  it("cuts off a stream that goes silent for one timeout", async () => {
+    const calls = { count: 0 };
+    const client = createLlmClient(config, { fetchFn: pacedFetch(["a", "b"], 300, calls) });
+    await expect(client.stream([{ role: "user", content: "x" }], () => undefined)).rejects.toThrow(
+      "stalled",
+    );
+  });
+
+  it("does not let keep-alive comments hold a stuck stream open", async () => {
+    const encoder = new TextEncoder();
+    const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal as AbortSignal | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          signal?.addEventListener(
+            "abort",
+            () => controller.error(new DOMException("aborted", "AbortError")),
+            { once: true },
+          );
+          controller.enqueue(encoder.encode(sseData("a")));
+          // Heartbeats only, for far longer than one timeout.
+          const aborted = () => signal?.aborted === true;
+          for (let beat = 0; beat < 50 && !aborted(); beat += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            if (!aborted()) controller.enqueue(encoder.encode(": keep-alive\n\n"));
+          }
+        },
+      });
+      return new Response(stream as unknown as ConstructorParameters<typeof Response>[0], {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    const client = createLlmClient(config, { fetchFn });
+    const startedAt = Date.now();
+    await expect(client.stream([{ role: "user", content: "x" }], () => undefined)).rejects.toThrow(
+      "stalled",
+    );
+    // One timeout after the last data event, not after ~2s of heartbeats.
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+  });
+
+  it("cancels without a fallback request when the caller aborts", async () => {
+    const calls = { count: 0 };
+    const client = createLlmClient(
+      { ...config, timeoutMs: 5_000 },
+      { fetchFn: pacedFetch(["a", "b", "c"], 50, calls) },
+    );
+    const controller = new AbortController();
+    const deltas: string[] = [];
+    const pending = completeStreamFirst(
+      client,
+      [{ role: "user", content: "x" }],
+      (delta) => {
+        deltas.push(delta);
+        controller.abort();
+      },
+      { signal: controller.signal },
+    );
+    await expect(pending).rejects.toSatisfy(isTranslationCanceled);
+    expect(deltas).toEqual(["a"]);
+    expect(calls.count).toBe(1);
+  });
+
+  it("rejects at once when the caller already aborted", async () => {
+    const calls = { count: 0 };
+    const client = createLlmClient(config, { fetchFn: pacedFetch(["a"], 1, calls) });
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      client.complete([{ role: "user", content: "x" }], { signal: controller.signal }),
+    ).rejects.toSatisfy(isTranslationCanceled);
+    expect(calls.count).toBe(0);
   });
 });

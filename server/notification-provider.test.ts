@@ -11,6 +11,9 @@ import {
   findLatestAssistantMessageFromTimeline,
 } from "@getpaseo/protocol/agent-attention-notification";
 import { withNotificationTranslation } from "./notification-provider";
+import { createTranslateStreamManager, type TranslatorDeps } from "./translate";
+import { createMemoryTranslationCacheStore } from "./translation-cache-store";
+import { createTranslationInflightRegistry } from "./translation-inflight";
 import { translateSettings, unwrapTranslationInput } from "../shared/translate";
 import { isNotificationPreview, notificationFallback } from "../shared/notification-preview";
 
@@ -27,8 +30,12 @@ async function harness(
     enabled?: boolean;
     language?: string;
     translate?: (text: string) => string | Promise<string>;
-  pluginTimeline?: boolean;
-  replyTranslationEnabled?: boolean;
+    pluginTimeline?: boolean;
+    replyTranslationEnabled?: boolean;
+    /** Replaces the JSON endpoint stub (the source is still recorded). */
+    respond?: (source: string) => Response | Promise<Response>;
+    cacheStore?: TranslatorDeps["cacheStore"];
+    inflight?: TranslatorDeps["inflight"];
   } = {},
 ) {
   let values = translateSettings.schema.parse({
@@ -75,21 +82,25 @@ async function harness(
       };
     },
   };
-  const wrapped = withNotificationTranslation(inner, {
+  const deps: TranslatorDeps = {
     loadConfig: async () => {
       if (configFailure) throw new Error("settings unavailable");
       return values;
     },
+    ...(options.cacheStore ? { cacheStore: options.cacheStore } : {}),
+    ...(options.inflight ? { inflight: options.inflight } : {}),
     fetchFn: (async (_url, init) => {
       const body = JSON.parse(String(init?.body));
       const source = unwrapTranslationInput(
         body.messages.find((message: { role: string }) => message.role === "user").content,
       );
       requests.push(source);
+      if (options.respond) return options.respond(source);
       const text = await (options.translate?.(source) ?? `译文：${source}`);
       return new Response(JSON.stringify({ choices: [{ message: { content: text } }] }));
     }) as typeof fetch,
-  });
+  };
+  const wrapped = withNotificationTranslation(inner, deps);
   const connection = await wrapped.connect({
     versions: [1],
     capabilities:
@@ -154,6 +165,7 @@ async function harness(
         isNotificationPreview(event.item.messageId),
     );
   return {
+    deps,
     connection,
     events,
     receive,
@@ -197,8 +209,8 @@ describe("notification provider", () => {
     await h.connection.close();
   });
 
-  it("uses the final translated segment without leaking original or incremental snapshots", async () => {
-    const h = await harness({ translate: () => "任务已完成。" });
+  it("uses the final translated rows without leaking original or incremental snapshots", async () => {
+    const h = await harness({ translate: (source) => (source === "Done" ? "任务已完成" : "！") });
     await h.open();
     h.turn("started");
     h.text("Progress", "progress");
@@ -212,8 +224,11 @@ describe("notification provider", () => {
     h.text("!", "last");
     h.turn("completed");
     await h.flush();
-    expect(h.requests).toEqual(["Done!"]);
-    expect(completionBody(h.events)).toBe("任务已完成。");
+    // Each trailing row is translated verbatim, exactly as the app renders
+    // it (separate message ids are separate rows), so the reply renderer
+    // later hits the same cache entries instead of translating again.
+    expect(h.requests).toEqual(["Done", "!"]);
+    expect(completionBody(h.events)).toBe("任务已完成 ！");
     expect(h.previews()).toHaveLength(1);
     expect(
       h.events.findIndex((event) => event.type === "session.turn" && event.state === "completed"),
@@ -300,14 +315,15 @@ describe("notification provider", () => {
     await h.connection.close();
   });
 
-  it("bounds preview requests and accepts identical successful translations", async () => {
+  it("translates the row verbatim for reuse, clips the preview, accepts identical translations", async () => {
     const h = await harness({ translate: (source) => source });
     await h.open();
     h.turn("started");
     h.text("A".repeat(8_000));
     h.turn("completed");
     await h.flush();
-    expect(h.requests[0]).toHaveLength(2_000);
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0]).toHaveLength(8_000);
     expect(completionBody(h.events)).toBe(`${"A".repeat(217)}...`);
     await h.connection.close();
   });
@@ -319,7 +335,7 @@ describe("notification provider", () => {
     h.text("## Done\n\n**Tests** passed.");
     h.turn("completed");
     await h.flush();
-    expect(h.requests).toEqual(["Done Tests passed."]);
+    expect(h.requests).toEqual(["## Done\n\n**Tests** passed."]);
     expect(completionBody(h.events)).toBe(notificationFallback("zh", "finished"));
     await h.connection.close();
   });
@@ -673,6 +689,97 @@ describe("notification provider", () => {
       "session.closed",
     ]);
     expect(h.events.at(-2)).toMatchObject({ item: { text: "Original before close" } });
+    await h.connection.close();
+  });
+});
+
+describe("notification preview shares the reply translation", () => {
+  type StreamManager = ReturnType<typeof createTranslateStreamManager>;
+  async function pollUntilDone(manager: StreamManager, jobId: string): Promise<string> {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const result = await manager.poll({ jobId });
+      if (result.done) return result.text;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("translation job did not finish");
+  }
+  const sse = (content: string) =>
+    `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
+
+  it("serves the app's reply translation from the preview's request", async () => {
+    const reply = "## Done\n\nAll **tests** passed.";
+    const h = await harness({
+      translate: (source) => `ZH:${source}`,
+      cacheStore: createMemoryTranslationCacheStore(),
+      inflight: createTranslationInflightRegistry(),
+    });
+    await h.open();
+    h.turn("started");
+    h.text(reply);
+    h.turn("completed");
+    await h.flush();
+    expect(h.requests).toEqual([reply]);
+    const manager = createTranslateStreamManager(h.deps, { coalesceDelayMs: 0 });
+    const { jobId } = await manager.start({ text: reply, direction: "agent-to-user", sessionKey: "s" });
+    await expect(pollUntilDone(manager, jobId)).resolves.toBe(`ZH:${reply}`);
+    // Opening the conversation after the notification bills nothing.
+    expect(h.requests).toHaveLength(1);
+    manager.dispose();
+    await h.connection.close();
+  });
+
+  it("keeps the bounded plain excerpt when reply translation is off", async () => {
+    const reply = "x".repeat(5_000);
+    const h = await harness({
+      replyTranslationEnabled: false,
+      cacheStore: createMemoryTranslationCacheStore(),
+      inflight: createTranslationInflightRegistry(),
+    });
+    await h.open();
+    h.turn("started");
+    h.text(reply);
+    h.turn("completed");
+    await h.flush();
+    // The app never reads a full-row translation here, so none is billed.
+    expect(h.requests).toEqual(["x".repeat(2_000)]);
+    await h.connection.close();
+  });
+
+  it("emits the preview from the first streamed text and lets the app join the running request", async () => {
+    const release = deferred<void>();
+    const encoder = new TextEncoder();
+    const head = "甲".repeat(300);
+    const tail = "乙".repeat(50);
+    const h = await harness({
+      cacheStore: createMemoryTranslationCacheStore(),
+      inflight: createTranslationInflightRegistry(),
+      respond: () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            async start(controller) {
+              controller.enqueue(encoder.encode(sse(head)));
+              await release.promise;
+              controller.enqueue(encoder.encode(sse(tail)));
+              controller.close();
+            },
+          }) as unknown as ConstructorParameters<typeof Response>[0],
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    await h.open();
+    h.turn("started");
+    h.text("Long reply");
+    const completed = h.wait((event) => event.type === "session.turn" && event.state === "completed");
+    h.turn("completed");
+    // The turn completes while the translation is still streaming.
+    await completed;
+    expect(completionBody(h.events)).toBe(`${"甲".repeat(217)}...`);
+    const manager = createTranslateStreamManager(h.deps, { coalesceDelayMs: 0 });
+    const { jobId } = await manager.start({ text: "Long reply", direction: "agent-to-user", sessionKey: "s" });
+    release.resolve();
+    await expect(pollUntilDone(manager, jobId)).resolves.toBe(head + tail);
+    expect(h.requests).toHaveLength(1);
+    manager.dispose();
     await h.connection.close();
   });
 });

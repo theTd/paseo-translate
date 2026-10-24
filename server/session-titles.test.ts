@@ -13,6 +13,7 @@ const values: TranslateSettingsValues = {
   translationReasoningEffort: "default" as const,
   translationSystemPrompt: "",
   translationDomainContext: "",
+  translationExtraRules: "",
   userLanguage: "en",
   agentLanguage: "de",
   innerAgentCommand: [],

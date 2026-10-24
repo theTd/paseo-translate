@@ -17,14 +17,16 @@ const copy = {
     sessionHint: "Compacts finished runs above the threshold while the cache is warm. Five-minute caches are excluded.",
     estimate: "Estimated cache remaining", usage: "Context tokens", loading: "Loading…", failed: "Unable to load cache status",
     saved: "Saved", invalid: "Enter a positive whole-number threshold and a lead between 5 and 1800 seconds.",
-    unknown: "Unknown", expired: "Expired", compacting: "Compacting", compacted: "Compacted", noCache: "No cache observed", compactionFailed: "Compaction failed" },
+    unknown: "Unknown", expired: "Expired", compacting: "Compacting", compacted: "Compacted", noCache: "No cache observed", compactionFailed: "Compaction failed",
+    pillExpired: "Expired", pillCompacting: "Compacting", pillCompacted: "Compacted", pillNoCache: "—", pillFailed: "Failed" },
   "zh-CN": { title: "Claude 缓存", defaults: "Claude 挂机压缩默认设置", enabled: "挂机自动压缩",
     threshold: "上下文 Token 阈值", lead: "缓存到期前提前秒数", save: "保存",
     defaultsHint: "仅对新建 Claude 会话生效，已有会话保留各自设置。",
     sessionHint: "仅在本轮及后台工作结束、上下文超过阈值且缓存仍有效时压缩。5 分钟缓存不参与自动压缩。",
     estimate: "缓存预计剩余时间", usage: "上下文 Token 数", loading: "加载中…", failed: "无法加载缓存状态",
     saved: "已保存", invalid: "阈值须为正整数，提前时间须为 5 至 1800 秒的整数。",
-    unknown: "未知", expired: "已到期", compacting: "正在压缩", compacted: "已压缩", noCache: "未观测到缓存", compactionFailed: "压缩失败" },
+    unknown: "未知", expired: "已到期", compacting: "正在压缩", compacted: "已压缩", noCache: "未观测到缓存", compactionFailed: "压缩失败",
+    pillExpired: "已到期", pillCompacting: "压缩中", pillCompacted: "已压缩", pillNoCache: "—", pillFailed: "失败" },
 };
 
 function useCopy() {
@@ -58,6 +60,21 @@ function statusLabel(snapshot: ClaudeCacheSnapshot, now: number, strings: Return
   if (snapshot.expiresAt === null) return strings.unknown;
   if (snapshot.expiresAt <= now) return strings.expired;
   return `≈${cacheCountdown(snapshot.expiresAt, now)}`;
+}
+
+/**
+ * Pill text: the bare countdown or a one-word state. The composer row is
+ * shared with the host's pills and narrow on phones; the full status lives
+ * in the button title (tooltip, accessibility label, sheet title).
+ */
+function pillStatus(snapshot: ClaudeCacheSnapshot, now: number, strings: ReturnType<typeof useCopy>): string {
+  if (snapshot.state === "compacting") return strings.pillCompacting;
+  if (snapshot.state === "compacted") return strings.pillCompacted;
+  if (snapshot.state === "no-cache") return strings.pillNoCache;
+  if (snapshot.state === "failed") return strings.pillFailed;
+  if (snapshot.expiresAt === null) return "?";
+  if (snapshot.expiresAt <= now) return strings.pillExpired;
+  return cacheCountdown(snapshot.expiresAt, now);
 }
 
 export function CachePreferencesForm({ value, saving, onSave }: {
@@ -128,12 +145,13 @@ function CachePopover(props: PluginButtonContentProps) {
 }
 
 /** Only mounted composer icons poll; all registered/history agents do not get timers. */
-function CacheIcon(props: PluginButtonIconProps & { onLabel(label: string): void }) {
+function CacheIcon(props: PluginButtonIconProps & { onPresentation(label: string, title: string): void }) {
   const strings = useCopy();
   const status = useCacheStatus(props.context === "agent" ? props.agentId : "");
   const now = useServerClock(status.data);
-  const label = `${strings.title} ${status.isError ? "?" : status.data ? statusLabel(status.data, now, strings) : "…"}`;
-  useEffect(() => { props.onLabel(label); }, [label, props.onLabel]);
+  const label = status.isError ? "?" : status.data ? pillStatus(status.data, now, strings) : "…";
+  const title = `${strings.title}: ${status.isError ? strings.failed : status.data ? statusLabel(status.data, now, strings) : strings.loading}`;
+  useEffect(() => { props.onPresentation(label, title); }, [label, title, props.onPresentation]);
   return <Text style={{ color: props.color, fontSize: props.size }}>◷</Text>;
 }
 
@@ -148,10 +166,10 @@ export function contributeClaudeCacheControls(client: PluginClientContext): () =
     if (registrations.get(agent.id)?.workspaceId === agent.workspaceId) return;
     remove(agent.id);
     let button: PluginButtonRegistration | undefined;
-    const onLabel = (label: string) => button?.update({ label });
-    const Icon = (props: PluginButtonIconProps) => <CacheIcon {...props} onLabel={onLabel} />;
+    const onPresentation = (label: string, nextTitle: string) => button?.update({ label, title: nextTitle });
+    const Icon = (props: PluginButtonIconProps) => <CacheIcon {...props} onPresentation={onPresentation} />;
     button = client.addComposerPill({ id: "claude-cache", workspaceId: agent.workspaceId, agentId: agent.id,
-      button: { title, label: `${title} ?`, icon: Icon, behavior: { kind: "popover", Content: CachePopover } } });
+      button: { title, label: "…", icon: Icon, behavior: { kind: "popover", Content: CachePopover } } });
     registrations.set(agent.id, { workspaceId: agent.workspaceId, button });
   }, remove);
   return () => { stop(); for (const id of registrations.keys()) remove(id); };

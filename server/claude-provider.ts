@@ -889,7 +889,7 @@ async function replayHistory(
   context: DispatchContext,
 ): Promise<void> {
   if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
-  const restore = await buildReplayRestore(context);
+  const restore = await buildReplayRestore(context, session.contextKey);
   const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore, session.config.env["CLAUDE_CONFIG_DIR"]);
   for (const item of replay.rootItems) {
     if (session.closed) return;
@@ -965,7 +965,10 @@ async function replayHistory(
  * so opening history only reads the cache. The fallback uses current
  * translation settings; exact originals remain settings-independent.
  */
-async function buildReplayRestore(context: DispatchContext): Promise<ReplayUserTextRestore> {
+async function buildReplayRestore(
+  context: DispatchContext,
+  contextKey: string,
+): Promise<ReplayUserTextRestore> {
   const lookupExact = (fragment: string): string | undefined => {
     try {
       return context.translator.restoreOriginalFragment(fragment);
@@ -997,9 +1000,15 @@ async function buildReplayRestore(context: DispatchContext): Promise<ReplayUserT
     }
   };
   let restoreCachedBackTranslation: ((block: string) => Promise<string | undefined>) | undefined;
+  let rememberRootMessage: ReplayUserTextRestore["rememberRootMessage"];
   try {
     const values = await context.loadValues();
     if (values.translatePrompts) {
+      // Replay knows exactly what Claude received for every shown block, so
+      // the prompt display is registered from the transcript instead of
+      // being re-translated (and possibly translated differently) by the app.
+      rememberRootMessage = (fragments) =>
+        context.translator.rememberPromptDisplay(fragments, { contextKey });
       restoreCachedBackTranslation = async (block: string) => {
         if (block.trim().length === 0 || isSerializedAttachment(block)) return undefined;
         if (block.length > TRANSLATION_TEXT_LIMIT) return undefined;
@@ -1027,6 +1036,7 @@ async function buildReplayRestore(context: DispatchContext): Promise<ReplayUserT
       return (await restoreCachedBackTranslation?.(block)) ?? block;
     },
     restoreChildBlock: (block: string) => exactOriginal(block) ?? block,
+    ...(rememberRootMessage !== undefined ? { rememberRootMessage } : {}),
   };
 }
 

@@ -57,16 +57,46 @@ export const DISPLAY_RETRY_CAP_MS = 2_000;
 /** Fallback for `translationTimeoutMs` when the setting is unavailable. */
 export const DISPLAY_DEFAULT_ENDPOINT_TIMEOUT_MS = 30_000;
 /**
- * How long a live-head (`phase: "streaming"`) item may sit with unchanged
- * text before display translation treats it as settled. The host keeps the
- * current live item at `streaming` until a later timeline mutation (next
- * tool call, next user prompt) or `turn_completed` flushes it to history;
- * the last message of a turn often never gets that flush in time. 800ms is
- * well above the host's 60ms stream-coalesce window, so an active token
- * stream keeps resetting, while a finished last message starts translating
- * without waiting for the next prompt.
+ * Quiet window for a live-head (`phase: "streaming"`) item whose agent is
+ * known to be idle: nothing will be appended anymore, so the short window
+ * only absorbs a status update that raced the last tokens. It sits well
+ * above the host's 60ms stream-coalesce window.
  */
 export const DISPLAY_STREAM_SETTLE_MS = 800;
+/**
+ * Floor of the quiet window while the agent runs (or its status is not
+ * loaded). The host moves a live-head row to history as soon as the next
+ * item (tool call, thinking) or the end of the turn arrives, so a running
+ * agent's live row is usually still being written. Slow gateways and
+ * bursty streams (summarized thinking arrives in chunks seconds apart)
+ * pause mid-message; every start inside such a pause is a billed request
+ * that the next token supersedes. Waiting longer only delays the rare
+ * finished-but-unflushed row, which the end of the turn settles anyway.
+ */
+export const DISPLAY_STREAM_BUSY_SETTLE_MIN_MS = 6_000;
+/** The busy window grows to this multiple of the longest pause seen in the item. */
+export const DISPLAY_STREAM_BUSY_SETTLE_GAP_FACTOR = 4;
+/** Upper bound of the adaptive busy window. */
+export const DISPLAY_STREAM_BUSY_SETTLE_MAX_MS = 30_000;
+
+/**
+ * How long a live-head item's text must stay unchanged before display
+ * translation starts. `agentIsBusy === false` (idle/error/closed) uses the
+ * short window; running or unknown status uses an adaptive window that
+ * stretches with the slowest pause this item has shown, so a stream that
+ * already paused for 3s mid-message must stay quiet for 12s.
+ */
+export function displaySettleQuietMs(input: {
+  agentIsBusy: boolean | null;
+  longestGapMs: number;
+}): number {
+  if (input.agentIsBusy === false) return DISPLAY_STREAM_SETTLE_MS;
+  const gap = Number.isFinite(input.longestGapMs) ? Math.max(0, input.longestGapMs) : 0;
+  return Math.min(
+    DISPLAY_STREAM_BUSY_SETTLE_MAX_MS,
+    Math.max(DISPLAY_STREAM_BUSY_SETTLE_MIN_MS, gap * DISPLAY_STREAM_BUSY_SETTLE_GAP_FACTOR),
+  );
+}
 /** Slack on top of the server's own worst case for RPC and daemon latency. */
 export const DISPLAY_STREAM_IDLE_MARGIN_MS = 15_000;
 /**

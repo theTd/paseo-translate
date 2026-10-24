@@ -15,7 +15,7 @@ import {
 import { hasVisibleTranslation } from "../shared/display-translation-chain";
 import { classifyTranslationError } from "../shared/translation-retry";
 import { useTranslate } from "./i18n";
-import { agentIsBusyForDisplay, useStreamIdle } from "./display-translation-settle";
+import { agentIsBusyForDisplay, useDisplayQuiet } from "./display-translation-settle";
 import {
   useRetryNonce,
   useReconnectAutoRetry,
@@ -25,8 +25,9 @@ import {
 /**
  * Renders one reasoning (thinking) block. Mirrors TranslatedMessage: while
  * the turn streams, the agent's original text is shown untouched in a muted
- * tone. Once the item is settled (`phase === "complete"`, the agent is no
- * longer busy, or the live-head text has stopped growing) and reasoning
+ * tone. Once the item is settled (`phase === "complete"`, or the live-head
+ * text has stayed unchanged for the quiet window, which stretches with the
+ * bursty pauses summarized thinking tends to have) and reasoning
  * translation is enabled, a streaming translation starts and renders
  * progressively; the canonical row always keeps the original, so this
  * stays a display-only projection.
@@ -46,7 +47,7 @@ export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedRea
   const data = props.item.data;
   const provider = useAgent(props.agentId, (agent) => agent.provider);
   const agentStatus = useAgent(props.agentId, (agent) => agent.status);
-  const streamIdle = useStreamIdle(data.text, data.phase);
+  const quiet = useDisplayQuiet(data.text, data.phase, agentIsBusyForDisplay(agentStatus));
   const settings = useSettings(translateSettings);
   const { t } = useTranslate(
     settings.status === "ready" ? settings.values.uiLanguage : "system",
@@ -90,8 +91,7 @@ export function TranslatedReasoning(props: PluginTimelineItemProps<TranslatedRea
     translateResponses,
     ownedByTranslateProvider,
     translateAllTimelines,
-    agentIsBusy: agentIsBusyForDisplay(agentStatus),
-    streamIdle,
+    quiet,
   });
 
   const stream = useStreamingTranslation({

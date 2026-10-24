@@ -16,16 +16,16 @@ import {
 import { hasVisibleTranslation } from "../shared/display-translation-chain";
 import { classifyTranslationError } from "../shared/translation-retry";
 import { useTranslate } from "./i18n";
-import { agentIsBusyForDisplay, useStreamIdle } from "./display-translation-settle";
+import { agentIsBusyForDisplay, useDisplayQuiet } from "./display-translation-settle";
 import { useRetryNonce, useReconnectAutoRetry, useStreamingTranslation } from "./streaming-translation";
 
 /**
  * Renders one assistant message. While the turn streams, the agent's original
  * text is shown untouched. Translation starts once the item is settled:
- * `phase === "complete"` (committed history), the agent snapshot is no
- * longer busy, or the live-head text has been unchanged for
- * `DISPLAY_STREAM_SETTLE_MS`. Those last two close the host gap where the
- * live-head item stays `streaming` until the next tool call or user prompt.
+ * `phase === "complete"` (committed history), or the live-head text has
+ * stayed unchanged for the quiet window (short once the agent is idle,
+ * long and adaptive while it runs, see `displaySettleQuietMs`). A job whose
+ * text is superseded by later tokens is canceled on the server.
  * The job renders progressively once its first non-blank token arrives
  * (until then the original stays visible with a `Translating…` hint); the
  * canonical row always keeps the original, so this stays a display-only
@@ -35,11 +35,10 @@ export function TranslatedMessage(props: PluginTimelineItemProps<TranslatedMessa
   const data = props.item.data;
   const provider = useAgent(props.agentId, (agent) => agent.provider);
   const agentStatus = useAgent(props.agentId, (agent) => agent.status);
-  const streamIdle = useStreamIdle(data.text, data.phase);
+  const quiet = useDisplayQuiet(data.text, data.phase, agentIsBusyForDisplay(agentStatus));
   const settled = isDisplayTranslationSettled({
     phase: data.phase,
-    agentIsBusy: agentIsBusyForDisplay(agentStatus),
-    streamIdle,
+    quiet,
   });
   const settings = useSettings(translateSettings);
   const { t } = useTranslate(

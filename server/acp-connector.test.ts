@@ -228,6 +228,31 @@ describe("translating ACP connector", () => {
     expect(seen).toEqual(["s", "s-9", undefined]);
   });
 
+  it("uses the bridged agent id for every frame when the connection has one", async () => {
+    const seen: Array<string | undefined> = [];
+    const stream = createTranslatingAcpStream({
+      command: [process.execPath, "-e", ECHO_AGENT],
+      scopeKey: "agent-7",
+      translate: async (text, contextKey) => {
+        seen.push(contextKey);
+        return `DE(${text})`;
+      },
+    });
+    streams.push(stream);
+    const writer = stream.writable.getWriter();
+    await writer.write(promptRequest(2, [{ type: "text", text: "Hello" }]));
+    await writer.write({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "session/new",
+      params: { _meta: { _paseo: { systemPrompt: "Be terse" } } },
+    } as AcpStreamMessage);
+    writer.releaseLock();
+    await readCount(stream, 2);
+    // Same scope as the app's display path: one transcript per agent.
+    expect(seen).toEqual(["agent-7", "agent-7"]);
+  });
+
   it("scopes permission display translations to the frame's session", async () => {
     const line = permissionRequestLine({
       sessionId: "s-perm",

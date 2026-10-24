@@ -278,6 +278,48 @@ describe("user text restoration", () => {
     expect(textsOf(result.rootItems)).toContain("Antwort");
   });
 
+  it("hands each replayed root prompt to the display registration as exact pairs", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "text", text: "DE(Hello)" }, { type: "text", text: "Untranslated" }] },
+      }),
+      assistantText("Antwort"),
+    ]);
+    const remembered: unknown[] = [];
+    await replay(fixture, {
+      restoreRootBlock: (block) => (block === "DE(Hello)" ? "Hello" : block),
+      restoreChildBlock: (block) => block,
+      rememberRootMessage: (fragments) => {
+        remembered.push(fragments);
+      },
+    });
+    // Shown text -> what Claude actually received, block by block, so the app
+    // displays the real prompt translation instead of translating again.
+    expect(remembered).toEqual([
+      [
+        { original: "Hello", translated: "DE(Hello)" },
+        { original: "Untranslated", translated: "Untranslated" },
+      ],
+    ]);
+  });
+
+  it("keeps replaying when the display registration throws", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [
+      JSON.stringify({ type: "user", message: { content: [{ type: "text", text: "DE(Hi)" }] } }),
+    ]);
+    const result = await replay(fixture, {
+      restoreRootBlock: () => "Hi",
+      restoreChildBlock: (block) => block,
+      rememberRootMessage: () => {
+        throw new Error("cache unavailable");
+      },
+    });
+    expect(result.rootItems.filter((item) => item.type === "user_message")).toHaveLength(1);
+  });
+
   it("routes sidecar user blocks through the child restorer, never the root one", async () => {
     const fixture = createFixture();
     writeRootSession(fixture, [userText("DE(root)")]);

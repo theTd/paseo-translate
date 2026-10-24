@@ -112,9 +112,14 @@ export function createPersistentTranslationCacheStore(
       return value;
     },
     set(key, value) {
+      // Rewriting an identical value (reverse-index refresh on every prompt
+      // cache hit, replay re-registering prompt displays on every reopen)
+      // only refreshes recency in memory, exactly like get(): appending it
+      // would grow the file by one line per call for no information.
+      const unchanged = entries.get(key) === value;
       refreshRecency(entries, key, value);
       evictOldestIfNeeded(entries, maxEntries);
-      if (!persist) return;
+      if (!persist || unchanged) return;
       try {
         appendFileSync(file, `${JSON.stringify({ k: key, v: value })}\n`, "utf8");
         appends += 1;

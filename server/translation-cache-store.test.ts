@@ -58,6 +58,19 @@ describe("persistent translation cache store", () => {
     expect(second.get("key-b")).toBe("value-b");
   });
 
+  it("does not append a line when a key is rewritten with the same value", () => {
+    const directory = cacheDirectory();
+    const store = createPersistentTranslationCacheStore({ directory });
+    store.set("k", "v");
+    store.set("k", "v");
+    store.set("k", "v");
+    const lines = () => readFileSync(cacheFile(directory), "utf8").split("\n").filter(Boolean);
+    expect(lines()).toHaveLength(1);
+    store.set("k", "w");
+    expect(lines()).toHaveLength(2);
+    expect(createPersistentTranslationCacheStore({ directory }).get("k")).toBe("w");
+  });
+
   it("keeps the last value for a duplicated key and compacts the file", () => {
     const directory = cacheDirectory();
     const store = createPersistentTranslationCacheStore({ directory });

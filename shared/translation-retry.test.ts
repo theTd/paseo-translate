@@ -4,7 +4,10 @@ import {
   DISPLAY_DEFAULT_ENDPOINT_TIMEOUT_MS,
   DISPLAY_RETRY_BASE_MS,
   DISPLAY_STREAM_IDLE_MARGIN_MS,
+  DISPLAY_STREAM_BUSY_SETTLE_MAX_MS,
+  DISPLAY_STREAM_BUSY_SETTLE_MIN_MS,
   DISPLAY_STREAM_SETTLE_MS,
+  displaySettleQuietMs,
   displayStreamIdleTimeoutMs,
   DISPLAY_RETRY_CAP_MS,
   TRANSLATION_BUSY_MESSAGE,
@@ -48,6 +51,26 @@ describe("displayStreamIdleTimeoutMs", () => {
 describe("DISPLAY_STREAM_SETTLE_MS", () => {
   it("is longer than the host's 60ms stream-coalesce window so an active token stream keeps resetting", () => {
     expect(DISPLAY_STREAM_SETTLE_MS).toBeGreaterThan(60);
+  });
+});
+
+describe("displaySettleQuietMs", () => {
+  it("uses the short window once the agent is known idle", () => {
+    expect(displaySettleQuietMs({ agentIsBusy: false, longestGapMs: 5_000 })).toBe(DISPLAY_STREAM_SETTLE_MS);
+  });
+
+  it("waits long enough mid-turn that ordinary stream pauses never start a billed job", () => {
+    for (const agentIsBusy of [true, null]) {
+      expect(displaySettleQuietMs({ agentIsBusy, longestGapMs: 0 })).toBe(DISPLAY_STREAM_BUSY_SETTLE_MIN_MS);
+      // The old 800ms gate fired on any 1s pause of a slow gateway.
+      expect(displaySettleQuietMs({ agentIsBusy, longestGapMs: 1_000 })).toBeGreaterThan(1_000 * 3);
+    }
+  });
+
+  it("stretches with the slowest pause seen in the item, up to a cap", () => {
+    expect(displaySettleQuietMs({ agentIsBusy: true, longestGapMs: 3_000 })).toBe(12_000);
+    expect(displaySettleQuietMs({ agentIsBusy: true, longestGapMs: 60_000 })).toBe(DISPLAY_STREAM_BUSY_SETTLE_MAX_MS);
+    expect(displaySettleQuietMs({ agentIsBusy: true, longestGapMs: Number.NaN })).toBe(DISPLAY_STREAM_BUSY_SETTLE_MIN_MS);
   });
 });
 

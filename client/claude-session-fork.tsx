@@ -120,7 +120,13 @@ export function contributeClaudeSessionFork(client: PluginClientContext): () => 
   const registrations = new Map<string, { workspaceId: string; button: PluginButtonRegistration }>();
   const operations = new Map<string, string>();
   let stopped = false;
-  const title = translate(detectSystemLocale(), "forkSession");
+  const locale = detectSystemLocale();
+  const title = translate(locale, "forkSession");
+  // The composer row is shared with the host's own pills and is narrow on
+  // phones: one word plus the icon. The full title stays the tooltip,
+  // accessibility label and sheet title. (The host requires a non-empty
+  // label, so an icon-only pill is not an option.)
+  const label = translate(locale, "forkPill");
   const removePanel = client.addWorkspacePanel({ id: "claude-fork-result", title,
     icon: "GitFork", context: "agent", Component: ForkResult });
   function remove(id: string) { registrations.get(id)?.button.remove(); registrations.delete(id); }
@@ -146,7 +152,7 @@ export function contributeClaudeSessionFork(client: PluginClientContext): () => 
         client.openPanel("claude-fork-result", { workspaceId: result.agent.workspaceId, agentId: id });
       }} />;
     const button = client.addComposerPill({ id: "fork-claude-session", workspaceId, agentId: sourceAgentId,
-      button: { title, label: title, icon: "GitFork", behavior: { kind: "popover", Content } } });
+      button: { title, label, icon: "GitFork", behavior: { kind: "popover", Content } } });
     registrations.set(sourceAgentId, { workspaceId, button });
   }
   const stopObservation = observeAgentList(client, register, remove);

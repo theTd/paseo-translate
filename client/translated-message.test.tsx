@@ -7,7 +7,8 @@ import { TranslatedMessage } from "./translated-message";
 
 const state = vi.hoisted(() => ({
   status: "idle" as "idle" | "running" | null,
-  streamIdle: false,
+  quiet: false,
+  quietAgentBusy: undefined as boolean | null | undefined,
   translate: vi.fn(),
 }));
 vi.mock("react", async (original) => ({
@@ -26,7 +27,10 @@ vi.mock("@getpaseo/plugin/client", () => ({
 }));
 vi.mock("./display-translation-settle", async (original) => ({
   ...await original<typeof import("./display-translation-settle")>(),
-  useStreamIdle: () => state.streamIdle,
+  useDisplayQuiet: (_text: string, _phase: string, agentIsBusy: boolean | null) => {
+    state.quietAgentBusy = agentIsBusy;
+    return state.quiet;
+  },
 }));
 vi.mock("./markdown", () => ({ MarkdownView: "MarkdownView" }));
 vi.mock("./i18n", () => ({ useTranslate: () => ({ t: (key: string) => key }) }));
@@ -54,27 +58,35 @@ function render(phase: "streaming" | "complete") {
 beforeEach(() => {
   vi.stubGlobal("React", React);
   state.status = "idle";
-  state.streamIdle = false;
+  state.quiet = false;
+  state.quietAgentBusy = undefined;
   state.translate.mockClear();
 });
 
 describe("last assistant reply translation", () => {
   it.each([
-    { phase: "complete" as const, status: "running" as const, streamIdle: false },
-    { phase: "streaming" as const, status: "idle" as const, streamIdle: false },
-    { phase: "streaming" as const, status: "running" as const, streamIdle: true },
-    { phase: "streaming" as const, status: null, streamIdle: true },
-  ])("translates a summary with a file path once settled: %j", ({ phase, status, streamIdle }) => {
+    { phase: "complete" as const, status: "running" as const, quiet: false, busy: true },
+    { phase: "streaming" as const, status: "idle" as const, quiet: true, busy: false },
+    { phase: "streaming" as const, status: "running" as const, quiet: true, busy: true },
+    { phase: "streaming" as const, status: null, quiet: true, busy: null },
+  ])("translates a summary with a file path once settled: %j", ({ phase, status, quiet, busy }) => {
     state.status = status;
-    state.streamIdle = streamIdle;
+    state.quiet = quiet;
     const result = render(phase);
+    // The quiet window is chosen from the agent status (short when idle).
+    expect(state.quietAgentBusy).toBe(busy);
     expect(state.translate).toHaveBeenCalledWith(expect.objectContaining({
       enabled: true, text: TEXT, sessionKey: "agent-1", direction: "agent-to-user",
     }));
     expect(result.props.children[0].props.text).toBe("Behoben in `src/app.ts`.");
   });
 
-  it("waits while the final reply is still growing", () => {
+  it("waits while the final reply is still growing, even with an idle agent", () => {
+    state.status = "idle";
+    state.quiet = false;
+    expect(render("streaming").props.text).toBe(TEXT);
+    expect(state.translate).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
+    state.translate.mockClear();
     state.status = "running";
     const result = render("streaming");
     expect(state.translate).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));

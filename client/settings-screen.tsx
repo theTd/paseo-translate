@@ -12,6 +12,8 @@ import {
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import {
+  BUILT_IN_TRANSLATION_PROMPT_TEMPLATE,
+  resolveTranslationSystemPrompt,
   translateProvidersRpc,
   translateSettings,
   type TranslateSettingsValues,
@@ -34,6 +36,7 @@ interface Draft {
   reasoningEffort: TranslateSettingsValues["translationReasoningEffort"];
   systemPrompt: string;
   domainContext: string;
+  extraRules: string;
   userLanguage: string;
   agentLanguage: string;
   commandText: string;
@@ -63,6 +66,7 @@ function draftFrom(settings: ReadySettings): Draft {
     reasoningEffort: values.translationReasoningEffort,
     systemPrompt: values.translationSystemPrompt,
     domainContext: values.translationDomainContext,
+    extraRules: values.translationExtraRules,
     userLanguage: values.userLanguage,
     agentLanguage: values.agentLanguage,
     commandText: values.innerAgentCommand.join(" "),
@@ -105,12 +109,24 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     }),
     [theme],
   );
+  const promptPreviewStyle = useMemo(
+    () => ({
+      color: theme.colors.foregroundMuted,
+      backgroundColor: theme.colors.surface2,
+      borderRadius: 8,
+      padding: 10,
+      fontSize: 12,
+      lineHeight: 18,
+    }),
+    [theme],
+  );
   const [draft, setDraft] = useState<Draft | null>(null);
   const [draftError, setDraftError] = useState<string | null>(null);
   // Bumped only when the displayed form must reset (discard or save); editing
   // alone must not remount the inputs or the focused field loses focus.
   const [formResetCount, setFormResetCount] = useState(0);
   const [pickedProvider, setPickedProvider] = useState("");
+  const [pickerFillCount, setPickerFillCount] = useState(0);
   const [pickerNote, setPickerNote] = useState<string | null>(null);
 
   const listProviders = useRpc(translateProvidersRpc);
@@ -150,6 +166,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
       if (option === null) return;
       if (option.command !== null) {
         patch({ commandText: option.command.join(" ") });
+        setPickerFillCount((count) => count + 1);
         setPickerNote(
           option.acp === "adapter"
             ? t("pickerAdapterNote", { label: option.label })
@@ -181,6 +198,25 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     (domainContext: string) => patch({ domainContext }),
     [patch],
   );
+  const changeExtraRules = useCallback((extraRules: string) => patch({ extraRules }), [patch]);
+  // The custom-prompt editor stays out of the way until asked for: most
+  // users only need Additional rules, and a full replacement silently stops
+  // following built-in prompt improvements.
+  const [customPromptOpen, setCustomPromptOpen] = useState(false);
+  const [promptPreviewOpen, setPromptPreviewOpen] = useState(false);
+  const togglePromptPreview = useCallback(() => setPromptPreviewOpen((open) => !open), []);
+  const openCustomPrompt = useCallback(() => {
+    setCustomPromptOpen(true);
+    setDraft((current) => {
+      const base = current ?? (readyRef.current === null ? null : draftFrom(readyRef.current));
+      if (base === null || base.systemPrompt.trim().length > 0) return base;
+      return { ...base, systemPrompt: BUILT_IN_TRANSLATION_PROMPT_TEMPLATE };
+    });
+  }, []);
+  const revertToBuiltInPrompt = useCallback(() => {
+    setCustomPromptOpen(false);
+    patch({ systemPrompt: "" });
+  }, [patch]);
   const changeUserLanguage = useCallback(
     (userLanguage: string) => patch({ userLanguage }),
     [patch],
@@ -249,6 +285,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
   const discard = useCallback(() => {
     setDraft(null);
     setDraftError(null);
+    setCustomPromptOpen(false);
     setPickedProvider("");
     setPickerNote(null);
     setFormResetCount((count) => count + 1);
@@ -284,8 +321,15 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         endpointModel: active.endpointModel,
         endpointProtocol: active.endpointProtocol,
         translationReasoningEffort: active.reasoningEffort,
-        translationSystemPrompt: active.systemPrompt,
+        // An unedited copy of the seeded built-in template resolves to the
+        // same prompt, but saved verbatim it would stop following built-in
+        // prompt updates; store it as "use the built-in prompt" instead.
+        translationSystemPrompt:
+          active.systemPrompt.trim() === BUILT_IN_TRANSLATION_PROMPT_TEMPLATE.trim()
+            ? ""
+            : active.systemPrompt,
         translationDomainContext: active.domainContext,
+        translationExtraRules: active.extraRules,
         userLanguage: active.userLanguage,
         agentLanguage: active.agentLanguage,
         innerAgentCommand: command,
@@ -313,6 +357,14 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
 
   const sectionInfo = useMemo<ReactNode>(
     () => <Text style={mutedStyle}>{t("settingsInfo")}</Text>,
+    [mutedStyle, t],
+  );
+  const instructionsInfo = useMemo<ReactNode>(
+    () => <Text style={mutedStyle}>{t("sectionInstructionsInfo")}</Text>,
+    [mutedStyle, t],
+  );
+  const agentsInfo = useMemo<ReactNode>(
+    () => <Text style={mutedStyle}>{t("sectionAgentsInfo")}</Text>,
     [mutedStyle, t],
   );
 
@@ -343,222 +395,307 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
   // changes exclusively when a discard or save resets the displayed values,
   // so typing never remounts the focused input.
   const formKey = String(formResetCount);
+  const customPromptVisible = customPromptOpen || active.systemPrompt.trim().length > 0;
+  // Live preview of exactly what the model receives for replies, from the
+  // draft (unsaved edits included) and the shared resolver the server uses.
+  const effectivePrompt = resolveTranslationSystemPrompt(
+    {
+      translationSystemPrompt: active.systemPrompt,
+      translationDomainContext: active.domainContext,
+      translationExtraRules: active.extraRules,
+    },
+    // agent → you: the direction users read most.
+    { source: active.agentLanguage.trim(), target: active.userLanguage.trim() },
+  );
 
   return (
-    <SettingsSection title={t("settingsTitle")} info={sectionInfo}>
-      <SettingsCard>
-        {providersQuery.isPending ? (
-          <Text style={mutedStyle}>{t("loadingProviders")}</Text>
-        ) : null}
-        {providersQuery.isError ? (
-          <Text style={mutedStyle} accessibilityRole="alert">
-            {t("providersLoadError", {
-              error:
-                providersQuery.error instanceof Error
-                  ? providersQuery.error.message
-                  : t("providersLoadFailed"),
-            })}
-          </Text>
-        ) : null}
-        {providerOptions.length > 0 ? (
+    <>
+      <SettingsSection title={t("sectionLanguages")}>
+        <SettingsCard key={`languages-${formKey}`}>
+          <SettingsInput
+            label={t("userLanguage")}
+            hint={t("userLanguageHint")}
+            initialValue={active.userLanguage}
+            onChangeText={changeUserLanguage}
+            disabled={settings.saving}
+          />
+          <SettingsInput
+            label={t("agentLanguage")}
+            hint={t("agentLanguageHint")}
+            initialValue={active.agentLanguage}
+            onChangeText={changeAgentLanguage}
+            disabled={settings.saving}
+          />
           <SettingsSelect
-            label={t("innerAgentPicker")}
-            hint={t("innerAgentPickerHint")}
-            value={pickedProvider}
-            options={providerOptions}
-            disabled={settings.saving || providersQuery.isPending}
-            onValueChange={pickProvider}
+            label={t("uiLanguage")}
+            hint={t("uiLanguageHint")}
+            value={active.uiLanguage}
+            options={uiLanguageOptions}
+            disabled={settings.saving}
+            onValueChange={changeUiLanguage}
           />
-        ) : null}
-        {pickerNote !== null ? <Text style={mutedStyle}>{pickerNote}</Text> : null}
-        <SettingsAction
-          label={t("refreshProviders")}
-          actionLabel={t("refresh")}
-          disabled={providersQuery.isFetching}
-          onPress={providersQuery.refetch}
-        />
-      </SettingsCard>
-      <SettingsCard key={`endpoint-${formKey}`}>
-        <SettingsInput
-          label={t("endpointUrl")}
-          hint={t("endpointUrlHint")}
-          initialValue={active.endpointBaseUrl}
-          onChangeText={changeBaseUrl}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("apiKey")}
-          hint={t("apiKeyHint")}
-          initialValue={active.endpointApiKey}
-          onChangeText={changeApiKey}
-          disabled={settings.saving}
-          secureTextEntry
-        />
-        <SettingsInput
-          label={t("model")}
-          initialValue={active.endpointModel}
-          onChangeText={changeModel}
-          disabled={settings.saving}
-        />
-        <SettingsSelect
-          label={t("endpointProtocol")}
-          hint={t("endpointProtocolHint")}
-          value={active.endpointProtocol}
-          options={[
-            { label: t("protocolResponses"), value: "responses" as const },
-            { label: t("protocolChatCompletions"), value: "chat-completions" as const },
-          ]}
-          disabled={settings.saving}
-          onValueChange={changeEndpointProtocol}
-        />
-        <SettingsSelect
-          label={t("reasoningEffort")}
-          hint={t("reasoningEffortHint")}
-          value={active.reasoningEffort}
-          options={[
-            { label: t("effortDefault"), value: "default" },
-            { label: t("effortNone"), value: "none" },
-            { label: t("effortMinimal"), value: "minimal" },
-            { label: t("effortLow"), value: "low" },
-            { label: t("effortMedium"), value: "medium" },
-            { label: t("effortHigh"), value: "high" },
-          ]}
-          disabled={settings.saving}
-          onValueChange={changeReasoningEffort}
-        />
-        <SettingsRow label={t("systemPrompt")} hint={t("systemPromptHint")}>
-          <TextInput
-            accessibilityLabel={t("systemPrompt")}
-            value={active.systemPrompt}
-            onChangeText={changeSystemPrompt}
-            editable={!settings.saving}
-            multiline
-            placeholder={t("systemPromptPlaceholder")}
-            placeholderTextColor={theme.colors.foregroundMuted}
-            style={promptInputStyle}
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("sectionEndpoint")}>
+        <SettingsCard key={`endpoint-${formKey}`}>
+          <SettingsInput
+            label={t("endpointUrl")}
+            hint={t("endpointUrlHint")}
+            initialValue={active.endpointBaseUrl}
+            onChangeText={changeBaseUrl}
+            disabled={settings.saving}
           />
-        </SettingsRow>
-        <SettingsRow label={t("domainContext")} hint={t("domainContextHint")}>
-          <TextInput
-            accessibilityLabel={t("domainContext")}
-            value={active.domainContext}
-            onChangeText={changeDomainContext}
-            editable={!settings.saving}
-            multiline
-            placeholder={t("domainContextPlaceholder")}
-            placeholderTextColor={theme.colors.foregroundMuted}
-            style={promptInputStyle}
+          <SettingsInput
+            label={t("apiKey")}
+            hint={t("apiKeyHint")}
+            initialValue={active.endpointApiKey}
+            onChangeText={changeApiKey}
+            disabled={settings.saving}
+            secureTextEntry
           />
-        </SettingsRow>
-      </SettingsCard>
-      <SettingsCard key={`agent-${formKey}`}>
-        <SettingsInput
-          label={t("userLanguage")}
-          hint={t("userLanguageHint")}
-          initialValue={active.userLanguage}
-          onChangeText={changeUserLanguage}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("agentLanguage")}
-          hint={t("agentLanguageHint")}
-          initialValue={active.agentLanguage}
-          onChangeText={changeAgentLanguage}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("innerAgentCommand")}
-          hint={t("innerAgentCommandHint")}
-          initialValue={active.commandText}
-          onChangeText={changeCommand}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("claudeExecutable")}
-          hint={t("claudeExecutableHint")}
-          initialValue={active.claudeExecutablePath}
-          onChangeText={changeClaudePath}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("codexExecutable")}
-          hint={t("codexExecutableHint")}
-          initialValue={active.codexExecutablePath}
-          onChangeText={changeCodexPath}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("translationTimeout")}
-          initialValue={active.timeoutText}
-          onChangeText={changeTimeout}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("contextIdleMinutes")}
-          hint={t("contextIdleHint")}
-          initialValue={active.contextIdleText}
-          onChangeText={changeContextIdle}
-          disabled={settings.saving}
-        />
-        <SettingsInput
-          label={t("contextMaxChars")}
-          hint={t("contextMaxCharsHint")}
-          initialValue={active.contextMaxCharsText}
-          onChangeText={changeContextMaxChars}
-          disabled={settings.saving}
-        />
-      </SettingsCard>
-      <SettingsCard>
-        <SettingsSwitch
-          label={t("translatePrompts")}
-          hint={t("translatePromptsHint")}
-          value={active.translatePrompts}
-          onValueChange={togglePrompts}
-          disabled={settings.saving}
-        />
-        <SettingsSwitch
-          label={t("translateResponses")}
-          hint={t("translateResponsesHint")}
-          value={active.translateResponses}
-          onValueChange={toggleResponses}
-          disabled={settings.saving}
-        />
-        <SettingsSwitch
-          label={t("translateReasoning")}
-          hint={t("translateReasoningHint")}
-          value={active.translateReasoning}
-          onValueChange={toggleReasoning}
-          disabled={settings.saving}
-        />
-        <SettingsSwitch
-          label={t("translateNotifications")}
-          value={active.translateNotifications}
-          onValueChange={toggleNotifications}
-          disabled={settings.saving}
-        />
-        <SettingsSwitch
-          label={t("translateAllTimelines")}
-          hint={t("translateAllTimelinesHint")}
-          value={active.translateAllTimelines}
-          onValueChange={toggleAllTimelines}
-          disabled={settings.saving}
-        />
-        <SettingsSwitch
-          label={t("translationContext")}
-          hint={t("translationContextHint")}
-          value={active.translationContextEnabled}
-          onValueChange={toggleContext}
-          disabled={settings.saving}
-        />
-        <SettingsSelect
-          label={t("uiLanguage")}
-          hint={t("uiLanguageHint")}
-          value={active.uiLanguage}
-          options={uiLanguageOptions}
-          disabled={settings.saving}
-          onValueChange={changeUiLanguage}
-        />
-      </SettingsCard>
+          <SettingsInput
+            label={t("model")}
+            initialValue={active.endpointModel}
+            onChangeText={changeModel}
+            disabled={settings.saving}
+          />
+          <SettingsSelect
+            label={t("endpointProtocol")}
+            hint={t("endpointProtocolHint")}
+            value={active.endpointProtocol}
+            options={[
+              { label: t("protocolResponses"), value: "responses" as const },
+              { label: t("protocolChatCompletions"), value: "chat-completions" as const },
+            ]}
+            disabled={settings.saving}
+            onValueChange={changeEndpointProtocol}
+          />
+          <SettingsSelect
+            label={t("reasoningEffort")}
+            hint={t("reasoningEffortHint")}
+            value={active.reasoningEffort}
+            options={[
+              { label: t("effortDefault"), value: "default" },
+              { label: t("effortNone"), value: "none" },
+              { label: t("effortMinimal"), value: "minimal" },
+              { label: t("effortLow"), value: "low" },
+              { label: t("effortMedium"), value: "medium" },
+              { label: t("effortHigh"), value: "high" },
+            ]}
+            disabled={settings.saving}
+            onValueChange={changeReasoningEffort}
+          />
+          <SettingsInput
+            label={t("translationTimeout")}
+            hint={t("translationTimeoutHint")}
+            initialValue={active.timeoutText}
+            onChangeText={changeTimeout}
+            disabled={settings.saving}
+          />
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("sectionScope")} info={sectionInfo}>
+        <SettingsCard>
+          <SettingsSwitch
+            label={t("translatePrompts")}
+            hint={t("translatePromptsHint")}
+            value={active.translatePrompts}
+            onValueChange={togglePrompts}
+            disabled={settings.saving}
+          />
+          <SettingsSwitch
+            label={t("translateResponses")}
+            hint={t("translateResponsesHint")}
+            value={active.translateResponses}
+            onValueChange={toggleResponses}
+            disabled={settings.saving}
+          />
+          <SettingsSwitch
+            label={t("translateReasoning")}
+            hint={t("translateReasoningHint")}
+            value={active.translateReasoning}
+            onValueChange={toggleReasoning}
+            disabled={settings.saving}
+          />
+          <SettingsSwitch
+            label={t("translateNotifications")}
+            hint={t("translateNotificationsHint")}
+            value={active.translateNotifications}
+            onValueChange={toggleNotifications}
+            disabled={settings.saving}
+          />
+          <SettingsSwitch
+            label={t("translateAllTimelines")}
+            hint={t("translateAllTimelinesHint")}
+            value={active.translateAllTimelines}
+            onValueChange={toggleAllTimelines}
+            disabled={settings.saving}
+          />
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("sectionInstructions")} info={instructionsInfo}>
+        <SettingsCard>
+          <SettingsRow label={t("extraRules")} hint={t("extraRulesHint")}>
+            <TextInput
+              accessibilityLabel={t("extraRules")}
+              value={active.extraRules}
+              onChangeText={changeExtraRules}
+              editable={!settings.saving}
+              multiline
+              placeholder={t("extraRulesPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={promptInputStyle}
+            />
+          </SettingsRow>
+          <SettingsRow label={t("domainContext")} hint={t("domainContextHint")}>
+            <TextInput
+              accessibilityLabel={t("domainContext")}
+              value={active.domainContext}
+              onChangeText={changeDomainContext}
+              editable={!settings.saving}
+              multiline
+              placeholder={t("domainContextPlaceholder")}
+              placeholderTextColor={theme.colors.foregroundMuted}
+              style={promptInputStyle}
+            />
+          </SettingsRow>
+          <SettingsAction
+            label={t("promptPreview")}
+            hint={t("promptPreviewHint")}
+            actionLabel={promptPreviewOpen ? t("hide") : t("show")}
+            onPress={togglePromptPreview}
+          />
+          {promptPreviewOpen ? (
+            <Text selectable style={promptPreviewStyle}>
+              {effectivePrompt}
+            </Text>
+          ) : null}
+          {customPromptVisible ? (
+            <>
+              <SettingsRow label={t("systemPrompt")} hint={t("systemPromptHint")}>
+                <TextInput
+                  accessibilityLabel={t("systemPrompt")}
+                  value={active.systemPrompt}
+                  onChangeText={changeSystemPrompt}
+                  editable={!settings.saving}
+                  multiline
+                  placeholder={t("systemPromptPlaceholder")}
+                  placeholderTextColor={theme.colors.foregroundMuted}
+                  style={promptInputStyle}
+                />
+              </SettingsRow>
+              <SettingsAction
+                label={t("useBuiltInPrompt")}
+                hint={t("useBuiltInPromptHint")}
+                actionLabel={t("revert")}
+                disabled={settings.saving}
+                onPress={revertToBuiltInPrompt}
+              />
+            </>
+          ) : (
+            <SettingsAction
+              label={t("customizePrompt")}
+              hint={t("customizePromptHint")}
+              actionLabel={t("customize")}
+              disabled={settings.saving}
+              onPress={openCustomPrompt}
+            />
+          )}
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("sectionContext")}>
+        <SettingsCard key={`context-${formKey}`}>
+          <SettingsSwitch
+            label={t("translationContext")}
+            hint={t("translationContextHint")}
+            value={active.translationContextEnabled}
+            onValueChange={toggleContext}
+            disabled={settings.saving}
+          />
+          {active.translationContextEnabled ? (
+            <>
+              <SettingsInput
+                label={t("contextIdleMinutes")}
+                hint={t("contextIdleHint")}
+                initialValue={active.contextIdleText}
+                onChangeText={changeContextIdle}
+                disabled={settings.saving}
+              />
+              <SettingsInput
+                label={t("contextMaxChars")}
+                hint={t("contextMaxCharsHint")}
+                initialValue={active.contextMaxCharsText}
+                onChangeText={changeContextMaxChars}
+                disabled={settings.saving}
+              />
+            </>
+          ) : null}
+        </SettingsCard>
+      </SettingsSection>
+
+      <SettingsSection title={t("sectionAgents")} info={agentsInfo}>
+        <SettingsCard key={`agents-${formKey}`}>
+          {providersQuery.isPending ? (
+            <Text style={mutedStyle}>{t("loadingProviders")}</Text>
+          ) : null}
+          {providersQuery.isError ? (
+            <Text style={mutedStyle} accessibilityRole="alert">
+              {t("providersLoadError", {
+                error:
+                  providersQuery.error instanceof Error
+                    ? providersQuery.error.message
+                    : t("providersLoadFailed"),
+              })}
+            </Text>
+          ) : null}
+          {providerOptions.length > 0 ? (
+            <SettingsSelect
+              label={t("innerAgentPicker")}
+              hint={t("innerAgentPickerHint")}
+              value={pickedProvider}
+              options={providerOptions}
+              disabled={settings.saving || providersQuery.isPending}
+              onValueChange={pickProvider}
+            />
+          ) : null}
+          {pickerNote !== null ? <Text style={mutedStyle}>{pickerNote}</Text> : null}
+          <SettingsAction
+            label={t("refreshProviders")}
+            actionLabel={t("refresh")}
+            disabled={providersQuery.isFetching}
+            onPress={providersQuery.refetch}
+          />
+          {/* Uncontrolled input: remount when the picker fills the command,
+              or the field would keep showing (and re-saving) the old text. */}
+          <SettingsInput
+            key={`command-${pickerFillCount}`}
+            label={t("innerAgentCommand")}
+            hint={t("innerAgentCommandHint")}
+            initialValue={active.commandText}
+            onChangeText={changeCommand}
+            disabled={settings.saving}
+          />
+          <SettingsInput
+            label={t("claudeExecutable")}
+            hint={t("claudeExecutableHint")}
+            initialValue={active.claudeExecutablePath}
+            onChangeText={changeClaudePath}
+            disabled={settings.saving}
+          />
+          <SettingsInput
+            label={t("codexExecutable")}
+            hint={t("codexExecutableHint")}
+            initialValue={active.codexExecutablePath}
+            onChangeText={changeCodexPath}
+            disabled={settings.saving}
+          />
+        </SettingsCard>
+      </SettingsSection>
+
       <SettingsCard>
         <SettingsAction
           label={t("saveSettings")}
@@ -576,6 +713,6 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
           />
         ) : null}
       </SettingsCard>
-    </SettingsSection>
+    </>
   );
 }

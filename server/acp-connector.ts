@@ -35,6 +35,15 @@ export interface TranslatingConnectorConfig {
    * billed display translation; a miss falls through to translateDisplay.
    */
   restoreOriginal?: (translatedFragment: string) => string | undefined;
+  /**
+   * Translation-context scope for every frame of this connection: the paseo
+   * agent id when the session open carried it. That is the scope the app's
+   * display path uses, so prompts, replies and questions share one
+   * transcript and the prompt display needs no cross-scope mirror. Absent
+   * (catalog/list connections, hosts without the bridge) falls back to the
+   * inner ACP session id named by each frame.
+   */
+  scopeKey?: string;
 }
 
 const KILL_GRACE_MS = 3_000;
@@ -72,6 +81,8 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
   if (!executable || executable.trim().length === 0) {
     throw new Error("Translate connector requires an inner agent command");
   }
+  const frameScope = (params: unknown): string | undefined =>
+    config.scopeKey ?? readFrameSessionId(params);
   const child = spawn(executable, args, {
     env: { ...process.env, ...config.env },
     stdio: ["pipe", "pipe", "pipe"],
@@ -223,9 +234,7 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
     // Permission questions belong to one session: translate them against
     // that session's transcript like replies do. Session-list titles stay
     // context-free (they span every session).
-    const contextKey = readFrameSessionId(
-      "params" in message ? message.params : undefined,
-    );
+    const contextKey = frameScope("params" in message ? message.params : undefined);
     return maybeTranslatePermission(message, (text) => display(text, contextKey));
   }
   async function maybeTranslatePermission(
@@ -381,7 +390,7 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
     if (blocks === null) {
       return blockRequest(message, "the prompt content array is missing or malformed");
     }
-    const contextKey = readFrameSessionId(message.params);
+    const contextKey = frameScope(message.params);
     try {
       const translated: unknown[] = [];
       for (const block of blocks) {
@@ -434,11 +443,12 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
     }
     if (systemPrompt.trim().length === 0) return message;
     try {
-      // session/load names the resumed session; session/new has no id yet,
-      // so a creation-time system prompt translates standalone.
+      // With the bridged agent id every frame shares the agent scope;
+      // otherwise session/load names the resumed session, while session/new
+      // has no id yet, so a creation-time system prompt translates standalone.
       const translated = await config.translate(
         systemPrompt,
-        readFrameSessionId(message.params),
+        frameScope(message.params),
       );
       const newParams = {
         ...(params as Record<string, unknown>),

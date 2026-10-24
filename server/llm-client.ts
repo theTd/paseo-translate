@@ -23,15 +23,55 @@ export interface LlmEndpointConfig {
   protocol: LlmEndpointProtocol;
 }
 
+/** Per-request options shared by `complete` and `stream`. */
+export interface LlmRequestOptions {
+  /**
+   * Caller cancellation. Aborting tears down the HTTP request (so a
+   * streaming endpoint stops generating) and rejects with
+   * {@link LlmRequestCanceledError}; it never triggers a fallback request.
+   */
+  signal?: AbortSignal;
+}
+
+/** Rejection used when the caller's signal canceled the request. */
+export class LlmRequestCanceledError extends Error {
+  constructor() {
+    super("Translation request canceled");
+    this.name = "LlmRequestCanceledError";
+  }
+}
+
+/**
+ * Cancellation check that also works across the pre-built Claude provider
+ * bundle, which carries its own copy of this class while sharing the
+ * process-wide in-flight registry (so `instanceof` alone can miss).
+ */
+export function isTranslationCanceled(error: unknown): boolean {
+  return (
+    error instanceof LlmRequestCanceledError ||
+    (error instanceof Error && error.name === "LlmRequestCanceledError")
+  );
+}
+
 export interface LlmClient {
-  complete(messages: readonly ChatMessage[]): Promise<string>;
+  /** One non-streaming completion, bounded by `timeoutMs` end to end. */
+  complete(messages: readonly ChatMessage[], options?: LlmRequestOptions): Promise<string>;
   /**
    * Streaming completion against `stream: true` SSE. Deltas arrive through
    * `onDelta` as they decode; the resolved value is the full text. Throws
    * when the endpoint refuses the stream so the caller can fall back to
    * `complete()`.
+   *
+   * `timeoutMs` bounds the wait for the response headers and every gap
+   * between received chunks, never the total duration: a long translation
+   * that keeps streaming is healthy however long it runs, while a stream
+   * that goes silent is cut off after one timeout.
    */
-  stream(messages: readonly ChatMessage[], onDelta: (delta: string) => void): Promise<string>;
+  stream(
+    messages: readonly ChatMessage[],
+    onDelta: (delta: string) => void,
+    options?: LlmRequestOptions,
+  ): Promise<string>;
 }
 
 export function createLlmClient(
@@ -43,16 +83,28 @@ export function createLlmClient(
   async function postCompletions(
     messages: readonly ChatMessage[],
     stream: boolean,
-  ): Promise<{ response: Response; url: string; release: () => void }> {
+    signal: AbortSignal | undefined,
+  ): Promise<{ response: Response; url: string; release: () => void; touch: () => void }> {
+    if (signal?.aborted) throw new LlmRequestCanceledError();
     const path = config.protocol === "responses" ? "/responses" : "/chat/completions";
     const url = `${config.baseUrl.replace(/\/+$/, "")}${path}`;
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (config.apiKey.length > 0) headers.authorization = `Bearer ${config.apiKey}`;
     const controller = new AbortController();
     // The abort signal covers the response body too: a slow endpoint that
-    // sends headers and then stalls must not hang the caller.
-    const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-    const release = () => clearTimeout(timer);
+    // sends headers and then stalls must not hang the caller. `touch`
+    // re-arms it; only the streaming reader calls it, per SSE data event.
+    let timer = setTimeout(() => controller.abort(), config.timeoutMs);
+    const onCallerAbort = () => controller.abort();
+    signal?.addEventListener("abort", onCallerAbort, { once: true });
+    const release = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onCallerAbort);
+    };
+    const touch = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => controller.abort(), config.timeoutMs);
+    };
     try {
       const response = await fetchFn(url, {
         method: "POST",
@@ -67,9 +119,10 @@ export function createLlmClient(
         // fetch-side signal type.
         signal: controller.signal as unknown as RequestInit["signal"],
       });
-      return { response, url, release };
+      return { response, url, release, touch };
     } catch (error) {
       release();
+      if (signal?.aborted) throw new LlmRequestCanceledError();
       throw new Error(
         `Translation endpoint request failed after ${config.timeoutMs}ms (${url}): ${describeError(error)}`,
         { cause: error },
@@ -78,8 +131,9 @@ export function createLlmClient(
   }
 
   return {
-    async complete(messages) {
-      const { response, url, release } = await postCompletions(messages, false);
+    async complete(messages, requestOptions) {
+      const signal = requestOptions?.signal;
+      const { response, url, release } = await postCompletions(messages, false, signal);
       let body: string;
       let status: number;
       let ok: boolean;
@@ -88,6 +142,7 @@ export function createLlmClient(
         ok = response.ok;
         body = await response.text();
       } catch (error) {
+        if (signal?.aborted) throw new LlmRequestCanceledError();
         throw new Error(
           `Translation endpoint request failed after ${config.timeoutMs}ms (${url}): ${describeError(error)}`,
           { cause: error },
@@ -113,8 +168,9 @@ export function createLlmClient(
       return content;
     },
 
-    async stream(messages, onDelta) {
-      const { response, release } = await postCompletions(messages, true);
+    async stream(messages, onDelta, requestOptions) {
+      const signal = requestOptions?.signal;
+      const { response, url, release, touch } = await postCompletions(messages, true, signal);
       try {
         if (!response.ok) {
           const body = await response.text().catch(() => "");
@@ -146,9 +202,28 @@ export function createLlmClient(
           onDelta(content);
           return content;
         }
-        return await readSseDeltas(response.body, onDelta, (parsed) =>
-          readStreamDelta(config.protocol, parsed),
-        );
+        try {
+          return await readSseDeltas(
+            response.body,
+            onDelta,
+            (parsed) => readStreamDelta(config.protocol, parsed),
+            touch,
+          );
+        } catch (error) {
+          if (signal?.aborted) throw new LlmRequestCanceledError();
+          if (error instanceof Error && error.name === "AbortError") {
+            throw new Error(
+              `Translation endpoint stream stalled for ${config.timeoutMs}ms (${url})`,
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+      } catch (error) {
+        if (signal?.aborted && !(error instanceof LlmRequestCanceledError)) {
+          throw new LlmRequestCanceledError();
+        }
+        throw error;
       } finally {
         release();
         try {
@@ -280,6 +355,7 @@ async function readSseDeltas(
   body: NonNullable<Response["body"]>,
   onDelta: (delta: string) => void,
   readDelta: (parsed: unknown) => string | undefined,
+  onChunk: () => void,
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -289,12 +365,12 @@ async function readSseDeltas(
     const { done, value } = await reader.read();
     if (value !== undefined) buffer += decoder.decode(value, { stream: !done });
     if (done) break;
-    buffer = consumeSseEvents(buffer, readDelta, (data) => {
+    buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
       accumulated += data;
       onDelta(data);
     });
   }
-  buffer = consumeSseEvents(buffer, readDelta, (data) => {
+  buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
     accumulated += data;
     onDelta(data);
   });
@@ -304,10 +380,17 @@ async function readSseDeltas(
   return accumulated;
 }
 
-/** Folds complete `data:` events out of the buffer; returns the remainder. */
+/**
+ * Folds complete `data:` events out of the buffer; returns the remainder.
+ * `onEvent` fires for every well-formed data event (content, reasoning or
+ * lifecycle), which re-arms the idle timeout. Comment frames such as
+ * `: keep-alive` do not: a gateway that keeps a stuck request open with
+ * heartbeats must still time out, or every retry would join that request.
+ */
 function consumeSseEvents(
   buffer: string,
   readDelta: (parsed: unknown) => string | undefined,
+  onEvent: () => void,
   onData: (data: string) => void,
 ): string {
   let rest = buffer;
@@ -322,7 +405,9 @@ function consumeSseEvents(
       const payload = trimmed.slice("data:".length).trim();
       if (payload === "[DONE]") continue;
       try {
-        const delta = readDelta(JSON.parse(payload));
+        const parsed: unknown = JSON.parse(payload);
+        onEvent();
+        const delta = readDelta(parsed);
         if (delta !== undefined) onData(delta);
       } catch {
         // A gateway heartbeat or comment frame; not translation content.
@@ -352,10 +437,16 @@ export async function completeStreamFirst(
   client: LlmClient,
   messages: readonly ChatMessage[],
   onDelta: (delta: string) => void = () => undefined,
+  options?: LlmRequestOptions,
 ): Promise<string> {
   try {
-    return await client.stream(messages, onDelta);
-  } catch {
-    return client.complete(messages);
+    return await client.stream(messages, onDelta, options);
+  } catch (error) {
+    // A canceled caller wants no answer at all: falling back would bill a
+    // second request nobody reads.
+    if (isTranslationCanceled(error) || options?.signal?.aborted) {
+      throw isTranslationCanceled(error) ? error : new LlmRequestCanceledError();
+    }
+    return client.complete(messages, options);
   }
 }

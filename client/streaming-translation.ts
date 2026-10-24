@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRpc } from "@getpaseo/plugin/client";
 import {
+  translateStreamCancelRpc,
   translateStreamPollRpc,
   translateStreamStartRpc,
   translateTextRpc,
@@ -60,6 +61,20 @@ export interface StreamingTranslation {
 export function useStreamingTranslation(input: StreamingTranslationInput): StreamingTranslation {
   const startStream = useRpc(translateStreamStartRpc);
   const pollStream = useRpc(translateStreamPollRpc);
+  const cancelStream = useRpc(translateStreamCancelRpc);
+  const cancelStreamRef = useRef(cancelStream);
+  cancelStreamRef.current = cancelStream;
+  // Distinguishes a superseded job (the effect re-runs with new inputs)
+  // from an unmount (virtualized rows scroll away): only the former is
+  // canceled. An unmounted row's job finishes into the cache, so the next
+  // mount is a cache hit instead of a second request.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const translate = useRpc(translateTextRpc);
   const [partial, setPartial] = useState<string | undefined>(undefined);
   const [done, setDone] = useState(false);
@@ -77,6 +92,9 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
       return;
     }
     let cancelled = false;
+    // The server job currently being polled; null between attempts and
+    // once the chain has settled.
+    let activeJobId: string | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let wake: (() => void) | null = null;
     setPartial(undefined);
@@ -107,9 +125,27 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
               direction: input.direction,
               sessionKey: input.sessionKey,
             });
+            if (cancelled) {
+              // Superseded while the start RPC was in flight: the cleanup
+              // had no job id to cancel yet, so cancel it here. An unmount
+              // still lets the job finish into the cache (see cleanup).
+              if (mountedRef.current) void cancelStreamRef.current({ jobId }).catch(() => undefined);
+              return jobId;
+            }
+            activeJobId = jobId;
             return jobId;
           },
-          pollStream: (jobId: string) => pollStream({ jobId }),
+          pollStream: async (jobId: string) => {
+            try {
+              const result = await pollStream({ jobId });
+              if (result.done && activeJobId === jobId) activeJobId = null;
+              return result;
+            } catch (error) {
+              // A failed poll ends this job on the server (error or unknown).
+              if (activeJobId === jobId) activeJobId = null;
+              throw error;
+            }
+          },
           translateUnary: async () => {
             const result = await translate({
               text: input.text,
@@ -133,6 +169,7 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
         },
         { idleTimeoutMs: displayStreamIdleTimeoutMs(translationTimeoutMsRef.current) },
       );
+      activeJobId = null;
       if (cancelled) return;
       if (outcome.status === "translated" && hasVisibleTranslation(outcome.text)) {
         setPartial(outcome.text);
@@ -152,6 +189,16 @@ export function useStreamingTranslation(input: StreamingTranslationInput): Strea
     void run();
     return () => {
       cancelled = true;
+      const abandoned = activeJobId;
+      activeJobId = null;
+      if (abandoned !== null) {
+        // Decided after the commit: on unmount every cleanup (including the
+        // mounted flag above) has run by the time this microtask does.
+        queueMicrotask(() => {
+          if (!mountedRef.current) return;
+          void cancelStreamRef.current({ jobId: abandoned }).catch(() => undefined);
+        });
+      }
       if (timer !== null) {
         clearTimeout(timer);
         timer = null;

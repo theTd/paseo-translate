@@ -2083,9 +2083,9 @@ async function listSessions(
 
 async function replayHistory(session: CodexSession, context: DispatchContext, restoreQuestions = true): Promise<void> {
   if (session.client === null || session.threadId === null) return;
-  let restore: ((block: string) => Promise<string>) | null = null;
+  let restore: ReplayRestore | null = null;
   try {
-    restore = await buildReplayRestore(context);
+    restore = await buildReplayRestore(context, session.contextKey);
   } catch {
     restore = null;
   }
@@ -2117,7 +2117,9 @@ async function replayHistory(session: CodexSession, context: DispatchContext, re
           if (turnId !== null) session.userMessageTurnIds.set(messageId, turnId);
         }
         if (restore !== null) {
-          mapped.text = await restore(mapped.text);
+          const received = mapped.text;
+          mapped.text = await restore.restore(received);
+          await restore.remember?.(mapped.text, received);
         }
       }
       context.emit(replayTimelineEvent(session.id, { ...mapped,
@@ -2162,9 +2164,21 @@ async function replayHistory(session: CodexSession, context: DispatchContext, re
   }
 }
 
+interface ReplayRestore {
+  /** Maps a persisted (agent-language) user text back to what the user wrote. */
+  restore: (block: string) => Promise<string>;
+  /**
+   * Registers (shown text → text Codex received) as the prompt display, so
+   * the app shows exactly what the agent got instead of translating the
+   * shown text again. Absent when prompt translation is off.
+   */
+  remember?: (shown: string, received: string) => Promise<void>;
+}
+
 async function buildReplayRestore(
   context: DispatchContext,
-): Promise<(block: string) => Promise<string>> {
+  contextKey: string,
+): Promise<ReplayRestore> {
   const lookupExact = (fragment: string): string | undefined => {
     try {
       return context.translator.restoreOriginalFragment(fragment);
@@ -2173,9 +2187,17 @@ async function buildReplayRestore(
     }
   };
   let translateBack: ((block: string) => Promise<string | undefined>) | undefined;
+  let remember: ReplayRestore["remember"];
   try {
     const values = await context.loadValues();
     if (values.translatePrompts) {
+      remember = async (shown, received) => {
+        try {
+          await context.translator.rememberPromptDisplay([{ original: shown, translated: received }], { contextKey });
+        } catch {
+          // Display registration is an optimization; replay never fails on it.
+        }
+      };
       translateBack = async (block: string) => {
         if (block.trim().length === 0 || isSerializedAttachment(block)) return undefined;
         if (block.length > TRANSLATION_TEXT_LIMIT) return undefined;
@@ -2193,11 +2215,14 @@ async function buildReplayRestore(
   } catch {
     translateBack = undefined;
   }
-  return async (block: string) => {
-    const restored = restorePromptFragment(block, lookupExact);
-    if (restored !== block) return restored;
-    if (translateBack === undefined) return block;
-    return (await translateBack(block)) ?? block;
+  return {
+    restore: async (block: string) => {
+      const restored = restorePromptFragment(block, lookupExact);
+      if (restored !== block) return restored;
+      if (translateBack === undefined) return block;
+      return (await translateBack(block)) ?? block;
+    },
+    ...(remember !== undefined ? { remember } : {}),
   };
 }
 

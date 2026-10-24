@@ -7,7 +7,9 @@ Display-path and compaction calls are stream-first: a stream refusal falls back
 to one plain completion inside the same call, and a JSON answer to a stream
 request (a gateway that ignores `stream: true`) is accepted as-is. The
 fail-closed prompt path instead uses one bounded completion, so the configured
-timeout stays its hard bound.
+timeout stays its hard bound. Streaming calls bound idle time instead of total
+time: the timeout restarts on every received chunk, so a long translation that
+keeps streaming is never cut off, while a stalled stream still fails.
 
 The agent's context stays purely in the agent language — it never sees the user
 language, and the canonical timeline keeps what each side actually said. The
@@ -19,7 +21,7 @@ user-language rendering of replies exists only in the app's plugin view.
 | --- | --- | --- |
 | Prompt (you → agent) | The plugin's `translate-acp` provider proxies the inner ACP agent and translates `session/prompt` text blocks and the per-agent system prompt on the wire | Fail closed: a failed translation blocks that request with an error instead of leaking your language to the agent |
 | Prompt display (you → you) | A client timeline transformer + renderer (`translated-user-message`) shows the original and agent-language translation together in a plugin-owned right-aligned bubble. Translation starts automatically. Prompt submission caches joined display text and individual fragments, so cache-hot prompts need no extra endpoint call. Slash-command prefixes and serialized attachments stay verbatim | Display only; requires **Translate prompts**, a Translate provider, and a root agent. Failures leave the original. Matching languages and identical results show only one text. Runs on unmodified Paseo using the published plugin API. Replaced rows lack the native copy/rewind menu; original and translated text remain selectable |
-| Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message is settled — `phase` is `complete`, the agent is no longer running, or the live-head text has been unchanged for 800ms — and renders each poll as Markdown | Display only: stream-first against the endpoint's SSE with bounded retries from a fresh job (exponential backoff, longer for `busy`; fatal errors such as oversized text or an unconfigured endpoint fail fast), then a retried `translate.text` fallback. No total time limit: a stream attempt is dropped only when its text stops growing for 2 × `translationTimeoutMs` + 15s of awake time (device sleep does not count). On failure the original text stays, with an error hint and a manual Retry translation button; non-fatal failures also retry by themselves when a host comes back online or the app returns to the foreground |
+| Reply (agent → you) | A client timeline transformer + renderer opens a streaming translation job (`translate.stream.start/poll`) once the message is settled — `phase` is `complete`, or the live-head text has stayed unchanged for a quiet window: 800ms while the agent is idle, otherwise at least 6s and up to 4× the longest pause the item has shown (capped at 30s), so a slow or bursty stream is not translated mid-sentence — and renders each poll as Markdown. When the text changes after a job started, the client cancels the superseded job (`translate.stream.cancel`) and the daemon aborts its endpoint request unless another caller still waits for it | Display only: stream-first against the endpoint's SSE with bounded retries from a fresh job (exponential backoff, longer for `busy`; fatal errors such as oversized text or an unconfigured endpoint fail fast), then a retried `translate.text` fallback. No total time limit: a stream attempt is dropped only when its text stops growing for 2 × `translationTimeoutMs` + 15s of awake time (device sleep does not count). On failure the original text stays, with an error hint and a manual Retry translation button; non-fatal failures also retry by themselves when a host comes back online or the app returns to the foreground |
 | Reasoning (agent thinking → you) | A separate client timeline transformer + renderer (`translated-reasoning`) with the same streaming job machinery, rendering muted so thoughts never look like replies | Opt-in via the **Translate thinking** setting (default off — thinking blocks are often long, so translating them doubles endpoint spend on auxiliary text) and additionally requires **Translate replies** (the server display path shares that gate). Same display-only failure policy as replies, plus a Show original / Show translation toggle |
 | Session titles (agent → you) | History-list titles render in your language: the direct providers translate Claude transcript titles and Codex thread names/previews, and the ACP proxy translates `session/list` result titles inbound. Exact prompt-time originals always restore from cache first (no endpoint call, even with display translation off or matching languages); anything else goes through display translation, sequentially, with over-long titles and ACP entries past 100 per frame left verbatim | Display only; per-title fail soft (a failed title keeps its original text, the listing never fails for this) |
 
@@ -35,6 +37,13 @@ a later unary hit does not retranslate. Identical source texts are translated
 once per batch and shared, so a repeated line or a re-rendered item never
 bills the endpoint twice.
 
+Requests for the same text, direction and session are also shared while they
+run: the fail-closed prompt path, display jobs from several devices, and
+notification previews join one running endpoint request instead of starting
+another. A prompt and its user-row display therefore show exactly the
+translation the agent received, billed once. A canceled display job leaves a
+shared request running for the remaining callers.
+
 ## Notification previews
 
 Enable **Translate notification previews** in the plugin settings (off by default)
@@ -43,11 +52,20 @@ providers. This runs on the daemon, including when the app is closed, and does n
 require platform changes. It is independent of **Translate replies**.
 
 Permission summaries are translated before the request is emitted; the underlying
-input and actions are preserved. Completion waits for one bounded translation of
-at most 2000 source characters before emitting a hidden preview and ending the
-turn. Original replies and native agent transcripts stay intact. The separator
-and synthetic assistant preview are hidden in the app, but appear in timeline API
-results; APIs that read the last assistant message will receive the preview.
+input and actions are preserved. With **Translate replies** on, completion
+translates the turn's final reply rows verbatim, under the same session scope and
+cache key the app's reply renderer uses, so opening the conversation afterwards
+reuses that translation (or joins the still-running request) instead of
+translating again. The hidden preview is emitted, and the turn ended, as soon as
+about 220 characters of translation exist, or after one **Translation timeout**
+(a partial result is clipped with `...`). The row in progress keeps translating
+into the cache; later rows are left to the app. Rows the app does not render
+through the translated view (host-rendered content, or longer than the display
+limit), and every row while **Translate replies** is off, use a plain-text
+translation of at most 2000 source characters instead. Original replies and
+native agent transcripts stay intact. The separator and synthetic assistant
+preview are hidden in the app, but appear in timeline API results; APIs that read
+the last assistant message will receive the preview.
 Native transcript replay does not regenerate notification previews.
 
 Failed or empty translations use a generic message in the configured user language
@@ -74,9 +92,16 @@ directions. Requests are conditioned on that context, so a recurring concept
 translates the same way throughout one conversation. The direct Claude Code
 and Codex providers scope the transcript by the paseo agent id (bridged into
 the session env at open), so the prompt path and the in-app reply path share
-one transcript that survives resumes and daemon restarts. The ACP proxy
-scopes by the inner ACP session id instead — restart-stable via
-`session/load`, but separate from the display path's transcript. Exact-match
+one transcript that survives resumes and daemon restarts. The ACP proxy uses
+the same agent id whenever the session carries that bridge, and falls back to
+the inner ACP session id otherwise (restart-stable via `session/load`, but
+separate from the display path's transcript). Each request also sees the
+newest pairs of the opposite direction (reversed into the requested direction,
+up to 8k chars), so a term you introduced in a prompt reads the same in the
+replies and the other way round. History replay records each restored user
+message together with the text the agent actually received, so after a resume
+the user row shows that exact translation instead of requesting a new, possibly
+different one. Exact-match
 cache hits still short-circuit without touching the endpoint. Cached entries
 are namespaced by the session scope (plus every output-affecting setting),
 never by the memory digest: the compacted memory is rewritten as a session
@@ -118,7 +143,17 @@ Then open the plugin's **Translate** settings screen in the app and configure:
 - **Reasoning effort** — thinking depth sent with each translation request (Default/minimal/low/medium/high; Default omits the parameter). Low or minimal keeps prompt translation fast since it sits on the fail-closed path of every turn
 - **Your language** and **Agent language** — e.g. `en` and `de`
 - **Inner agent command** — the ACP-speaking command to wrap for **Translate (ACP)**. The settings screen lists the daemon's providers and fills the command automatically where an ACP mode is verified: custom `extends: "acp"` providers use the command configured on the daemon, and CLIs shipping an ACP subcommand (`copilot --acp`, `cursor-agent acp`, `omp acp`, `opencode acp`) use their configured override or the built-in default. Claude Code and Codex still appear as ACP adapter presets (`cmd /c npx …` on Windows) for the ACP wrapper; prefer the direct **Translate (Claude Code)** / **Translate (Codex)** providers when you want native protocol support. Providers marked unknown may still ship an ACP mode the picker cannot detect — if the CLI has one, enter it manually (arguments are split on spaces; on Windows avoid `.cmd` shims or prefix them with `cmd /c`).
-- **Translation timeout** — per-request bound, prompts fail closed past it
+- **Translation timeout** — per-request bound, prompts fail closed past it;
+  streaming calls treat it as an idle bound that restarts on every chunk
+- **Translation instructions** — **Additional rules** (glossary entries, terms
+  to keep untranslated, tone) are appended after the built-in prompt and
+  survive plugin updates that improve it; **Domain context** describes the
+  project; **Effective prompt** shows exactly what the endpoint receives for
+  your language pair. **Replace the built-in prompt → Customize** opens a
+  custom template seeded with the built-in text (`{source}`, `{target}` and
+  `{context}` placeholders; without `{context}` the domain context is appended).
+  A custom template stops following built-in prompt updates, so prefer
+  Additional rules; **Revert** returns to the built-in prompt
 - **Session translation context / Compaction idle time / History compaction
   threshold** — per-session translation transcripts for consistent
   terminology, with automatic idle compaction (see below)
@@ -132,7 +167,9 @@ translating proxy; the direct providers talk to Claude Code or Codex natively.
 ## Claude cache countdown and AFK compaction
 
 Claude sessions have a **Claude cache** composer pill showing the estimated
-remaining prompt-cache lifetime. Open it to configure that session's AFK
+remaining prompt-cache lifetime. To fit narrow composers the pill shows only
+the countdown or a one-word state (Expired, Compacting, …); its tooltip and
+accessibility label carry the full text. Open it to configure that session's AFK
 auto-compaction switch, minimum context tokens, and seconds before expiry.
 **Claude AFK defaults** in plugin settings controls newly created Claude
 sessions only. Defaults are off, **200,000 tokens**, and **300 seconds**;
@@ -194,7 +231,8 @@ the app after each turn.
   CLI's suggestions are passed through; the host determines which actions it offers.
   Tool permission cards include structured details and the originating tool identity.
   Configured `providerOptions.extraArgs` pass through to the CLI, including valueless flags.
-- **Fork session** is an agent-scoped composer button with a second confirmation.
+- **Fork session** is an agent-scoped composer button (labelled **Fork**, full
+  name in the tooltip) with a second confirmation.
   It copies the complete persisted Claude session, companion subagent/workflow
   storage, saved tool results, file-history backups, and session environment,
   assigning new session/message/tool/subagent identifiers. The copy gets a
@@ -411,6 +449,7 @@ approval before running it while sessions are in use.
 - Prompt turns pay one extra translation round trip before the agent starts.
 - Session translation context resends recent translation history with each
   endpoint call (bounded by the compaction threshold and the twice-size
-  trim); turn it off to minimize endpoint spend.
+  trim) plus up to 8k chars of opposite-direction pairs; turn it off to
+  minimize endpoint spend.
 - The inner agent command is split on spaces; quoted arguments are not
   supported in the settings UI.
