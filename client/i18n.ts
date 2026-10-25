@@ -163,6 +163,9 @@ const en = {
   claudeExecutable: "Claude Code executable",
   claudeExecutableHint:
     "Optional full path for the direct Translate (Claude Code) provider; leave empty to resolve from PATH",
+  claudeConfigDir: "Claude Code config directory",
+  claudeConfigDirHint:
+    "Optional CLAUDE_CONFIG_DIR for the direct provider; needed when a wrapper keeps transcripts outside ~/.claude. Empty = inherit the daemon environment or ~/.claude",
   codexExecutable: "Codex executable",
   codexExecutableHint:
     "Optional full path for the direct Translate (Codex) provider; leave empty to resolve from PATH",
@@ -295,6 +298,9 @@ const zhCN: PluginDictionary = {
   innerAgentCommandHint: "Translate (ACP) 提供方使用的 ACP 命令；通过上方选择器自动填入",
   claudeExecutable: "Claude Code 可执行文件",
   claudeExecutableHint: "直连 Translate (Claude Code) 提供方可填完整路径；留空则从 PATH 解析",
+  claudeConfigDir: "Claude Code 配置目录",
+  claudeConfigDirHint:
+    "直连提供方可填 CLAUDE_CONFIG_DIR；当包装器（如 reclaude）把会话放在 ~/.claude 之外时必须设置。留空则沿用守护进程环境或 ~/.claude",
   codexExecutable: "Codex 可执行文件",
   codexExecutableHint: "直连 Translate (Codex) 提供方可填完整路径；留空则从 PATH 解析",
   translationTimeout: "翻译超时（毫秒）",
@@ -420,6 +426,9 @@ const ja: PluginDictionary = {
   innerAgentCommandHint: "Translate (ACP) プロバイダー用の ACP コマンド。上の選択から自動入力されます",
   claudeExecutable: "Claude Code 実行ファイル",
   claudeExecutableHint: "Translate (Claude Code) 用の任意のフルパス。空欄で PATH から解決します",
+  claudeConfigDir: "Claude Code 設定ディレクトリ",
+  claudeConfigDirHint:
+    "Translate (Claude Code) 用の任意の CLAUDE_CONFIG_DIR。ラッパーが会話を ~/.claude 以外に置く場合に必要です。空欄ならデーモンの環境変数か ~/.claude を使用します",
   codexExecutable: "Codex 実行ファイル",
   codexExecutableHint: "Translate (Codex) 用の任意のフルパス。空欄で PATH から解決します",
   translationTimeout: "翻訳タイムアウト (ms)",
@@ -546,6 +555,9 @@ const ko: PluginDictionary = {
   innerAgentCommandHint: "Translate (ACP) 프로바이더용 ACP 명령. 위 선택기에서 자동 입력됩니다",
   claudeExecutable: "Claude Code 실행 파일",
   claudeExecutableHint: "Translate (Claude Code)용 전체 경로(선택). 비워 두면 PATH에서 찾습니다",
+  claudeConfigDir: "Claude Code 설정 디렉터리",
+  claudeConfigDirHint:
+    "Translate (Claude Code)용 CLAUDE_CONFIG_DIR(선택). 래퍼가 대화를 ~/.claude 밖에 두면 필요합니다. 비워 두면 데몬 환경 변수나 ~/.claude를 사용합니다",
   codexExecutable: "Codex 실행 파일",
   codexExecutableHint: "Translate (Codex)용 전체 경로(선택). 비워 두면 PATH에서 찾습니다",
   translationTimeout: "번역 제한 시간(ms)",
@@ -677,6 +689,9 @@ const fr: PluginDictionary = {
   claudeExecutable: "Exécutable Claude Code",
   claudeExecutableHint:
     "Chemin complet facultatif pour Translate (Claude Code) ; vide = résolution via PATH",
+  claudeConfigDir: "Répertoire de configuration Claude Code",
+  claudeConfigDirHint:
+    "CLAUDE_CONFIG_DIR facultatif pour Translate (Claude Code) ; requis si un wrapper conserve les transcriptions hors de ~/.claude. Vide = environnement du démon ou ~/.claude",
   codexExecutable: "Exécutable Codex",
   codexExecutableHint:
     "Chemin complet facultatif pour Translate (Codex) ; vide = résolution via PATH",
@@ -809,6 +824,9 @@ const es: PluginDictionary = {
   claudeExecutable: "Ejecutable de Claude Code",
   claudeExecutableHint:
     "Ruta completa opcional para Translate (Claude Code); vacío = resolver desde PATH",
+  claudeConfigDir: "Directorio de configuración de Claude Code",
+  claudeConfigDirHint:
+    "CLAUDE_CONFIG_DIR opcional para Translate (Claude Code); necesario si un wrapper guarda las transcripciones fuera de ~/.claude. Vacío = entorno del daemon o ~/.claude",
   codexExecutable: "Ejecutable de Codex",
   codexExecutableHint:
     "Ruta completa opcional para Translate (Codex); vacío = resolver desde PATH",
@@ -939,6 +957,9 @@ const ru: PluginDictionary = {
   innerAgentCommandHint: "ACP-команда для провайдера Translate (ACP); подставляется выбором выше",
   claudeExecutable: "Исполняемый файл Claude Code",
   claudeExecutableHint: "Необязательный полный путь для Translate (Claude Code); пусто — поиск в PATH",
+  claudeConfigDir: "Каталог конфигурации Claude Code",
+  claudeConfigDirHint:
+    "Необязательный CLAUDE_CONFIG_DIR для Translate (Claude Code); нужен, если обёртка хранит транскрипты вне ~/.claude. Пусто — окружение демона или ~/.claude",
   codexExecutable: "Исполняемый файл Codex",
   codexExecutableHint: "Необязательный полный путь для Translate (Codex); пусто — поиск в PATH",
   translationTimeout: "Таймаут перевода (мс)",
@@ -1068,6 +1089,9 @@ const ptBR: PluginDictionary = {
   claudeExecutable: "Executável do Claude Code",
   claudeExecutableHint:
     "Caminho completo opcional para o Translate (Claude Code); vazio = resolver via PATH",
+  claudeConfigDir: "Diretório de configuração do Claude Code",
+  claudeConfigDirHint:
+    "CLAUDE_CONFIG_DIR opcional para o Translate (Claude Code); necessário quando um wrapper guarda as transcrições fora de ~/.claude. Vazio = ambiente do daemon ou ~/.claude",
   codexExecutable: "Executável do Codex",
   codexExecutableHint:
     "Caminho completo opcional para o Translate (Codex); vazio = resolver via PATH",
@@ -1196,6 +1220,9 @@ const ar: PluginDictionary = {
   innerAgentCommandHint: "أمر ACP لموفر Translate (ACP)؛ يُملأ تلقائيًا من المنتقي أعلاه",
   claudeExecutable: "ملف Claude Code التنفيذي",
   claudeExecutableHint: "مسار كامل اختياري لموفر Translate (Claude Code)؛ الفراغ يعني الحل عبر PATH",
+  claudeConfigDir: "دليل إعدادات Claude Code",
+  claudeConfigDirHint:
+    "CLAUDE_CONFIG_DIR اختياري لموفر Translate (Claude Code)؛ مطلوب عندما يحفظ الغلاف المحادثات خارج ~/.claude. الفراغ يعني بيئة الخادم أو ~/.claude",
   codexExecutable: "ملف Codex التنفيذي",
   codexExecutableHint: "مسار كامل اختياري لموفر Translate (Codex)؛ الفراغ يعني الحل عبر PATH",
   translationTimeout: "مهلة الترجمة (ms)",

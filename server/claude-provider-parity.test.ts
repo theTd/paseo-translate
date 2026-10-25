@@ -194,7 +194,13 @@ describe("Claude native-provider parity regressions", () => {
     const waiting = deferred<void>();
     const release = deferred<void>();
     const values = translateSettings.schema.parse({ translatePrompts: false });
-    const h = await harness({}, { loadConfig: async () => { waiting.resolve(); await release.promise; return values; } });
+    let reads = 0;
+    const h = await harness({}, { loadConfig: async () => {
+      // Session open reads the config directory once; block the prompt-path
+      // read so cancellation is exercised during command preparation.
+      if (++reads === 2) { waiting.resolve(); await release.promise; }
+      return values;
+    } });
     const sending = h.send({ type: "session.prompt", sessionId: "s", prompt: { clientMessageId: "command", delivery: "auto",
       input: { type: "command", name: "review", arguments: "pending" } } });
     await waiting.promise;

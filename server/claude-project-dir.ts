@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 /**
  * Verbatim-shaped port of Claude Code's project-directory encoding so
@@ -14,6 +14,19 @@ export function resolveClaudeConfigDir(): string {
   const override = process.env["CLAUDE_CONFIG_DIR"];
   if (typeof override === "string" && override.length > 0) return override;
   return join(homedir(), ".claude");
+}
+
+/**
+ * Resolves the explicit config-directory setting. An empty setting keeps the
+ * previous contract (CLAUDE_CONFIG_DIR from the environment, else ~/.claude);
+ * `~` is expanded because this value is typed by hand in settings UI.
+ */
+export function resolveConfiguredClaudeConfigDir(configured: string | undefined): string {
+  const value = typeof configured === "string" ? configured.trim() : "";
+  if (value.length === 0) return resolveClaudeConfigDir();
+  const expanded =
+    value === "~" ? homedir() : value.startsWith("~/") || value.startsWith("~\\") ? join(homedir(), value.slice(2)) : value;
+  return resolve(expanded);
 }
 
 export function canonicalizeProjectCwd(input: string): string {

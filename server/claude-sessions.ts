@@ -66,8 +66,9 @@ async function readTranscriptPreview(path: string): Promise<TranscriptPreview | 
 export async function listClaudeTranscriptSummaries(
   cwd: string,
   limit: number,
+  configDir?: string,
 ): Promise<ProviderSessionSummary[]> {
-  const directory = claudeProjectDir(cwd);
+  const directory = claudeProjectDir(cwd, configDir);
   let names: string[];
   try {
     names = await readdir(directory);

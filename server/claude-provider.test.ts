@@ -1,4 +1,8 @@
 import { completeClaudeCatalog } from "./claude-model-catalog";
+import * as fsp from "node:fs/promises";
+import * as osP from "node:os";
+import * as pathP from "node:path";
+import { claudeProjectDir as claudeProjectDirOf } from "./claude-project-dir";
 import { describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import type { Options, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
@@ -34,6 +38,7 @@ const values: TranslateSettingsValues = {
   innerAgentCommand: [],
   innerAgentEnv: {},
   claudeExecutablePath: "",
+  claudeConfigDir: "",
   codexExecutablePath: "",
   translatePrompts: true,
   translateResponses: true,
@@ -2475,6 +2480,96 @@ describe("translate claude provider extended protocol", () => {
       if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
       else process.env.CLAUDE_CONFIG_DIR = previous;
       fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("replays history from the configured config dir and persists it", async () => {
+    const configDir = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-config-"));
+    const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    delete process.env["CLAUDE_CONFIG_DIR"];
+    try {
+      const projectDir = claudeProjectDirOf(cwd, configDir);
+      await fsp.mkdir(projectDir, { recursive: true });
+      await fsp.writeFile(
+        pathP.join(projectDir, "cs-configured.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Configured dir history" }] },
+          parent_tool_use_id: null,
+          timestamp: "2025-01-01T00:00:00Z",
+        })}\n`,
+      );
+      // No CLAUDE_CONFIG_DIR in the process env: the setting alone must resolve
+      // replay, the SDK environment and the persisted handle.
+      const { fake, events, send } = await createHarness({ claudeConfigDir: configDir });
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-configured" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      const replayed = events.find(
+        (event) => event.type === "timeline.item" && event.item.type === "user_message",
+      );
+      expect(replayed).toMatchObject({ item: { text: "Configured dir history" } });
+      const opened = events.find((event) => event.type === "session.opened");
+      if (!opened || opened.type !== "session.opened") throw new Error("session.opened missing");
+      expect(opened.persistence).toMatchObject({
+        version: 1,
+        data: { claudeSessionId: "cs-configured", configDir: pathP.resolve(configDir) },
+      });
+      fake.use(async function* () {
+        yield resultSuccess("cs-configured", "ok");
+      });
+      await send(promptInput("Hello", "m-config"));
+      await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+      expect(fake.state.allOptions.at(-1)?.env).toMatchObject({
+        CLAUDE_CONFIG_DIR: pathP.resolve(configDir),
+      });
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fsp.rm(configDir, { recursive: true, force: true });
+      await fsp.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("lists sessions from the configured config dir without the env var", async () => {
+    const configDir = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-list-"));
+    const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    delete process.env["CLAUDE_CONFIG_DIR"];
+    try {
+      const projectDir = claudeProjectDirOf(cwd, configDir);
+      await fsp.mkdir(projectDir, { recursive: true });
+      await fsp.writeFile(
+        pathP.join(projectDir, "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          message: { role: "user", content: [{ type: "text", text: "Fix the bug" }] },
+          timestamp: "2025-01-01T00:00:00Z",
+        })}\n`,
+      );
+      const { events, send } = await createHarness({ claudeConfigDir: configDir });
+      await send(openInput);
+      await send({ type: "sessions", requestId: "r-list-configured", cwd, limit: 10 });
+      await waitFor(events, (event) => event.type === "sessions");
+      expect(events.find((event) => event.type === "sessions")).toMatchObject({
+        sessions: [
+          {
+            persistence: { version: 1, data: { claudeSessionId: "3f3f3f3f-3f3f-4f3f-8f3f-3f3f3f3f3f3f" } },
+            cwd,
+            title: "DE(Fix the bug)",
+          },
+        ],
+      });
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fsp.rm(configDir, { recursive: true, force: true });
+      await fsp.rm(cwd, { recursive: true, force: true });
     }
   });
 

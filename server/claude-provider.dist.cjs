@@ -32802,7 +32802,7 @@ function createTranslationInflightRegistry() {
   function wait(key, entry, options) {
     const signal = options?.signal;
     const onProgress = options?.onProgress;
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       if (signal?.aborted) {
         reject(new LlmRequestCanceledError());
         return;
@@ -32834,7 +32834,7 @@ function createTranslationInflightRegistry() {
         (text) => {
           if (settled) return;
           leave();
-          resolve5(text);
+          resolve6(text);
         },
         (error62) => {
           if (settled) return;
@@ -37915,7 +37915,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve5) {
+function isRecursive(inst, stack, resolve6) {
   const cached2 = recursive.get(inst);
   if (cached2 !== void 0)
     return cached2 ? PROVEN : NONE;
@@ -37925,7 +37925,7 @@ function isRecursive(inst, stack, resolve5) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve5);
+      const answer = isRecursive(child, stack, resolve6);
       if (answer > result)
         result = answer;
     }
@@ -37936,7 +37936,7 @@ function isRecursive(inst, stack, resolve5) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve5) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve6) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -38000,7 +38000,7 @@ function isRecursive(inst, stack, resolve5) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve5 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve6 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -52646,6 +52646,14 @@ var translateSettings = (0, import_plugin.defineSettings)({
     innerAgentEnv: external_exports.record(external_exports.string(), external_exports.string()).default({}),
     /** Optional Claude Code executable path for the direct provider (Windows .cmd escape hatch). */
     claudeExecutablePath: external_exports.string().trim().default(""),
+    /**
+     * Optional Claude Code config directory (CLAUDE_CONFIG_DIR) for the direct
+     * provider. Required when the CLI is a wrapper that keeps its transcripts
+     * outside ~/.claude (for example reclaude): transcript replay, session
+     * listing and the spawned CLI all need to agree on this directory. Empty
+     * inherits CLAUDE_CONFIG_DIR from the daemon or falls back to ~/.claude.
+     */
+    claudeConfigDir: external_exports.string().trim().default(""),
     /** Optional Codex CLI executable path for the direct provider (Windows .cmd escape hatch). */
     codexExecutablePath: external_exports.string().trim().default(""),
     translatePrompts: external_exports.boolean().default(true),
@@ -53566,6 +53574,12 @@ function resolveClaudeConfigDir() {
   if (typeof override === "string" && override.length > 0) return override;
   return (0, import_node_path2.join)((0, import_node_os2.homedir)(), ".claude");
 }
+function resolveConfiguredClaudeConfigDir(configured) {
+  const value = typeof configured === "string" ? configured.trim() : "";
+  if (value.length === 0) return resolveClaudeConfigDir();
+  const expanded = value === "~" ? (0, import_node_os2.homedir)() : value.startsWith("~/") || value.startsWith("~\\") ? (0, import_node_path2.join)((0, import_node_os2.homedir)(), value.slice(2)) : value;
+  return (0, import_node_path2.resolve)(expanded);
+}
 function canonicalizeProjectCwd(input2) {
   const trimmed = input2.replace(/[\\/]+$/, "") || input2;
   try {
@@ -53783,8 +53797,8 @@ async function readTranscriptPreview(path3) {
   }
   return { claudeSessionId, title: title.length > 200 ? `${title.slice(0, 200)}\u2026` : title, updatedAt };
 }
-async function listClaudeTranscriptSummaries(cwd, limit) {
-  const directory = claudeProjectDir(cwd);
+async function listClaudeTranscriptSummaries(cwd, limit, configDir) {
+  const directory = claudeProjectDir(cwd, configDir);
   let names;
   try {
     names = await (0, import_promises13.readdir)(directory);
@@ -55148,8 +55162,8 @@ var ClaudeMessageInput = class {
           while (!this.closed) {
             const message = this.queue.shift();
             if (message) return { value: message, done: false };
-            await new Promise((resolve5) => {
-              this.wake = resolve5;
+            await new Promise((resolve6) => {
+              this.wake = resolve6;
             });
             this.wake = void 0;
           }
@@ -55819,7 +55833,8 @@ function createTranslateClaudeProvider(deps) {
     async getCatalogCacheKey(options) {
       const values = await deps.loadConfig();
       const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude() ?? "bundled";
-      return options.scope === "workspace" ? JSON.stringify({ executable, cwd: options.cwd }) : JSON.stringify({ executable });
+      const configDir = resolveConfiguredClaudeConfigDir(values.claudeConfigDir);
+      return options.scope === "workspace" ? JSON.stringify({ executable, configDir, cwd: options.cwd }) : JSON.stringify({ executable, configDir });
     },
     async connect(request) {
       if (!request.versions.includes(1)) {
@@ -55935,9 +55950,11 @@ async function dispatch(input2, context, capabilities) {
   }
 }
 async function listSessions(input2, context) {
+  const values = await context.loadValues();
   const sessions = await listClaudeTranscriptSummaries(
     input2.cwd ?? process.cwd(),
-    Math.max(1, Math.min(input2.limit ?? 20, 100))
+    Math.max(1, Math.min(input2.limit ?? 20, 100)),
+    resolveConfiguredClaudeConfigDir(values.claudeConfigDir)
   );
   context.emit({
     type: "sessions",
@@ -56083,10 +56100,20 @@ async function openSession(input2, context, capabilities) {
       }
     } };
   }
+  const values = await context.loadValues();
+  if ((input2.config.env["CLAUDE_CONFIG_DIR"] ?? "").trim().length === 0) {
+    input2 = { ...input2, config: {
+      ...input2.config,
+      env: {
+        ...input2.config.env,
+        CLAUDE_CONFIG_DIR: resolveConfiguredClaudeConfigDir(values.claudeConfigDir)
+      }
+    } };
+  }
   const contextKey = resolveTranslationContextKey(input2.config.env, input2.sessionId);
   let translatedSystemPrompt = null;
   if (typeof input2.config.systemPrompt === "string" && input2.config.systemPrompt.trim().length > 0) {
-    if ((await context.loadValues()).translatePrompts) {
+    if (values.translatePrompts) {
       try {
         translatedSystemPrompt = await context.translator.translate(
           input2.config.systemPrompt,
@@ -57105,12 +57132,13 @@ async function probeModels(context) {
   const executable = values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const abort = new AbortController();
   const version2 = context.resolveVersion(executable).catch(() => void 0);
+  const configDir = resolveConfiguredClaudeConfigDir(values.claudeConfigDir);
   const sink = new ClaudeMessageInput();
   let models = [];
   try {
     const query = context.queryFactory({ prompt: sink.iterable, options: {
       cwd: process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(),
-      env: { ...process.env },
+      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
       abortController: abort,
       persistSession: false,
       tools: [],
@@ -57129,7 +57157,7 @@ async function probeModels(context) {
     sink.close();
     abort.abort();
   }
-  const catalog = await completeClaudeCatalog(models, resolveClaudeConfigDir(), await version2);
+  const catalog = await completeClaudeCatalog(models, configDir, await version2);
   catalogModelsCache = catalog;
   return catalog;
 }
@@ -57190,7 +57218,7 @@ function waitForPermissionResponse(session, permissionId, request, toolOptions, 
   if (session.sink.clearsPermissions) {
     return Promise.resolve({ behavior: "deny", message: "Superseded by a follow-up prompt" });
   }
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     const abort = () => {
       const pending = session.pendingPermissions.get(permissionId);
       if (!pending) return;
@@ -57200,7 +57228,7 @@ function waitForPermissionResponse(session, permissionId, request, toolOptions, 
       emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
     };
     session.pendingPermissions.set(permissionId, {
-      resolve: resolve5,
+      resolve: resolve6,
       cleanup: () => toolOptions.signal.removeEventListener("abort", abort),
       ...question !== void 0 ? { question } : {},
       ...plan ? { plan: true } : {}
@@ -57326,8 +57354,8 @@ async function respondToPermission(session, permissionId, response, context) {
     result = { behavior: "deny", message: response.message ?? "Denied", interrupt: response.interrupt };
   } else if (pending.question) {
     const question = pending.question;
-    result = await new Promise((resolve5) => {
-      void resolveQuestionAllow(question, response, resolve5, context, session.contextKey);
+    result = await new Promise((resolve6) => {
+      void resolveQuestionAllow(question, response, resolve6, context, session.contextKey);
     });
   } else {
     result = { behavior: "allow", updatedInput: response.updatedInput, updatedPermissions: response.updatedPermissions };
@@ -57348,7 +57376,7 @@ async function respondToPermission(session, permissionId, response, context) {
   pending.resolve(result);
   emit({ type: "session.permission_resolved", sessionId: session.id, permissionId });
 }
-async function resolveQuestionAllow(question, response, resolve5, context, contextKey) {
+async function resolveQuestionAllow(question, response, resolve6, context, contextKey) {
   try {
     const values = await context.loadValues();
     const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent", { contextKey }) : async (text) => text;
@@ -57358,13 +57386,13 @@ async function resolveQuestionAllow(question, response, resolve5, context, conte
       response.updatedInput,
       translate
     );
-    resolve5({
+    resolve6({
       behavior: "allow",
       updatedInput: { ...stripQuestionUiMetadata(question.requestInput), answers },
       updatedPermissions: response.updatedPermissions
     });
   } catch (error62) {
-    resolve5({
+    resolve6({
       behavior: "deny",
       message: `Translating the answers failed, so the question was declined: ${describe3(error62)}`
     });

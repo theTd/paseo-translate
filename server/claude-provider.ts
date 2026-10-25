@@ -55,7 +55,7 @@ import { materializeImageOutput, renderImageOutputMarkdown } from "./image-outpu
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
 import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration, claudeForkEnvironment } from "./claude-fork-coordinator";
-import { resolveClaudeConfigDir } from "./claude-project-dir";
+import { resolveClaudeConfigDir, resolveConfiguredClaudeConfigDir } from "./claude-project-dir";
 import { replayTimelineEvent } from "./provider-replay-timestamps";
 import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
@@ -345,9 +345,11 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
         values.claudeExecutablePath.length > 0
           ? values.claudeExecutablePath
           : (resolvePathClaude() ?? "bundled");
+      // The curated catalog also reflects settings.json under this directory.
+      const configDir = resolveConfiguredClaudeConfigDir(values.claudeConfigDir);
       return options.scope === "workspace"
-        ? JSON.stringify({ executable, cwd: options.cwd })
-        : JSON.stringify({ executable });
+        ? JSON.stringify({ executable, configDir, cwd: options.cwd })
+        : JSON.stringify({ executable, configDir });
     },
     async connect(request) {
       if (!request.versions.includes(1)) {
@@ -494,9 +496,11 @@ async function listSessions(
   input: Extract<ProviderInput, { type: "sessions" }>,
   context: DispatchContext,
 ): Promise<void> {
+  const values = await context.loadValues();
   const sessions = await listClaudeTranscriptSummaries(
     input.cwd ?? process.cwd(),
     Math.max(1, Math.min(input.limit ?? 20, 100)),
+    resolveConfiguredClaudeConfigDir(values.claudeConfigDir),
   );
   context.emit({
     type: "sessions",
@@ -682,10 +686,20 @@ async function openSession(
         ...(storedConfigDir ? { CLAUDE_CONFIG_DIR: storedConfigDir } : {}) },
     } };
   }
+  // Replay, listing, persistence and the spawned CLI must all agree on the
+  // config directory. A stored dir (fork/import) wins; otherwise an explicit
+  // setting, then CLAUDE_CONFIG_DIR, then ~/.claude. Persisting the resolved
+  // value makes the session self-describing across daemon restarts.
+  const values = await context.loadValues();
+  if ((input.config.env["CLAUDE_CONFIG_DIR"] ?? "").trim().length === 0) {
+    input = { ...input, config: { ...input.config,
+      env: { ...input.config.env,
+        CLAUDE_CONFIG_DIR: resolveConfiguredClaudeConfigDir(values.claudeConfigDir) } } };
+  }
   const contextKey = resolveTranslationContextKey(input.config.env, input.sessionId);
   let translatedSystemPrompt: string | null = null;
   if (typeof input.config.systemPrompt === "string" && input.config.systemPrompt.trim().length > 0) {
-    if ((await context.loadValues()).translatePrompts) {
+    if (values.translatePrompts) {
       try {
         translatedSystemPrompt = await context.translator.translate(
           input.config.systemPrompt,
@@ -1882,12 +1896,13 @@ async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
     values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
   const abort = new AbortController();
   const version = context.resolveVersion(executable).catch(() => undefined);
+  const configDir = resolveConfiguredClaudeConfigDir(values.claudeConfigDir);
   const sink = new ClaudeMessageInput();
   let models: ProviderModel[] = [];
   try {
     const query = context.queryFactory({ prompt: sink.iterable, options: {
       cwd: process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(),
-      env: { ...process.env }, abortController: abort,
+      env: { ...process.env, CLAUDE_CONFIG_DIR: configDir }, abortController: abort,
       persistSession: false, tools: [], mcpServers: {}, strictMcpConfig: true,
       settingSources: ["user"], settings: { disableAllHooks: true },
       ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
@@ -1902,7 +1917,7 @@ async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
     sink.close();
     abort.abort();
   }
-  const catalog = await completeClaudeCatalog(models, resolveClaudeConfigDir(), await version);
+  const catalog = await completeClaudeCatalog(models, configDir, await version);
   catalogModelsCache = catalog;
   return catalog;
 }

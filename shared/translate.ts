@@ -152,6 +152,14 @@ export const translateSettings = defineSettings({
     innerAgentEnv: z.record(z.string(), z.string()).default({}),
     /** Optional Claude Code executable path for the direct provider (Windows .cmd escape hatch). */
     claudeExecutablePath: z.string().trim().default(""),
+    /**
+     * Optional Claude Code config directory (CLAUDE_CONFIG_DIR) for the direct
+     * provider. Required when the CLI is a wrapper that keeps its transcripts
+     * outside ~/.claude (for example reclaude): transcript replay, session
+     * listing and the spawned CLI all need to agree on this directory. Empty
+     * inherits CLAUDE_CONFIG_DIR from the daemon or falls back to ~/.claude.
+     */
+    claudeConfigDir: z.string().trim().default(""),
     /** Optional Codex CLI executable path for the direct provider (Windows .cmd escape hatch). */
     codexExecutablePath: z.string().trim().default(""),
     translatePrompts: z.boolean().default(true),

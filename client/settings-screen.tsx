@@ -41,6 +41,7 @@ interface Draft {
   agentLanguage: string;
   commandText: string;
   claudeExecutablePath: string;
+  claudeConfigDir: string;
   codexExecutablePath: string;
   timeoutText: string;
   contextIdleText: string;
@@ -71,6 +72,7 @@ function draftFrom(settings: ReadySettings): Draft {
     agentLanguage: values.agentLanguage,
     commandText: values.innerAgentCommand.join(" "),
     claudeExecutablePath: values.claudeExecutablePath,
+    claudeConfigDir: values.claudeConfigDir,
     codexExecutablePath: values.codexExecutablePath,
     timeoutText: String(values.translationTimeoutMs),
     contextIdleText: String(values.translationContextIdleMinutes),
@@ -230,6 +232,10 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
     (claudeExecutablePath: string) => patch({ claudeExecutablePath }),
     [patch],
   );
+  const changeClaudeConfigDir = useCallback(
+    (claudeConfigDir: string) => patch({ claudeConfigDir }),
+    [patch],
+  );
   const changeCodexPath = useCallback(
     (codexExecutablePath: string) => patch({ codexExecutablePath }),
     [patch],
@@ -335,6 +341,7 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
         innerAgentCommand: command,
         innerAgentEnv: active.innerAgentEnv,
         claudeExecutablePath: active.claudeExecutablePath,
+        claudeConfigDir: active.claudeConfigDir,
         codexExecutablePath: active.codexExecutablePath,
         translatePrompts: active.translatePrompts,
         translateResponses: active.translateResponses,
@@ -684,6 +691,13 @@ export function TranslateSettingsScreen({ theme }: PluginSurfaceProps) {
             hint={t("claudeExecutableHint")}
             initialValue={active.claudeExecutablePath}
             onChangeText={changeClaudePath}
+            disabled={settings.saving}
+          />
+          <SettingsInput
+            label={t("claudeConfigDir")}
+            hint={t("claudeConfigDirHint")}
+            initialValue={active.claudeConfigDir}
+            onChangeText={changeClaudeConfigDir}
             disabled={settings.saving}
           />
           <SettingsInput
