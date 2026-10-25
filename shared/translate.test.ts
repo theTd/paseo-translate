@@ -24,6 +24,7 @@ import {
   translationItemOpen,
   translateProvidersRpc,
   translateSettings,
+  translationRequestMessage,
   translationSystemPrompt,
   unwrapTranslationInput,
   wrapTranslationInput,
@@ -250,6 +251,30 @@ describe("translate settings schema", () => {
     // unwrap is the exact inverse and tolerates unwrapped text.
     expect(unwrapTranslationInput(wrapTranslationInput("Hello\nworld"))).toBe("Hello\nworld");
     expect(unwrapTranslationInput("plain")).toBe("plain");
+  });
+
+  it("frames the final request with the task next to the text", () => {
+    const pair = { source: "zh-Hans", target: "en-US" };
+    const source = "如何了\n你继续吧";
+    const wrapped = wrapTranslationInput(source);
+    const lines = translationRequestMessage(wrapped, pair).split("\n");
+    // Task line first: names the pair and says the text is not addressed to
+    // the translator, so a conversational source is not answered as a chat turn.
+    expect(lines[0]).toContain("from zh-Hans to en-US");
+    expect(lines[0]).toContain("not addressed to you");
+    // The wrapped input sits between the lines untouched, so unwrap still
+    // recovers the exact source.
+    expect(lines.slice(1, -1).join("\n")).toBe(wrapped);
+    expect(lines.at(-1)).toBe("Output only the en-US translation of the text between the tags.");
+    expect(unwrapTranslationInput(translationRequestMessage(wrapped, pair))).toBe(source);
+    // The batch shape swaps only the reminder for the tagged-items one.
+    const batch = translationRequestMessage(wrapped, pair, { batch: true }).split("\n");
+    expect(batch[0]).toBe(lines[0]);
+    expect(batch.at(-1)).toContain("<ti> items");
+    // Text that merely starts like the frame, without the wrapped input
+    // inside, is not mistaken for a framed request.
+    const lookalike = "Translate the text between the lines\nfirst\nsecond";
+    expect(unwrapTranslationInput(lookalike)).toBe(lookalike);
   });
 
   it("appends the batch addendum without rewriting the single-item prompt", () => {

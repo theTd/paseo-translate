@@ -20,12 +20,21 @@ import {
   TRANSLATION_BATCH_ADDENDUM,
   translationItemClose,
   translationItemOpen,
+  translationRequestMessage,
   translationSystemPrompt,
   unwrapTranslationInput,
   wrapTranslationInput,
   type TranslateSettingsValues,
 } from "../shared/translate";
 import { parseTranslationBatch } from "./translate-batch";
+
+/** The framed final user message for one source text under the test language pair. */
+function requestFor(text: string, direction: "user-to-agent" | "agent-to-user"): string {
+  const pair = direction === "user-to-agent"
+    ? { source: "en", target: "de" }
+    : { source: "de", target: "en" };
+  return translationRequestMessage(wrapTranslationInput(text), pair);
+}
 
 const tempRoots: string[] = [];
 
@@ -96,10 +105,11 @@ describe("translate service", () => {
       role: "system",
       content: translationSystemPrompt({ source: "en", target: "de" }),
     });
-    // The source text travels wrapped in the input-delimiter tags.
+    // The source text travels wrapped in the input-delimiter tags, framed by
+    // the task line and the closing reminder.
     expect(calls[0].body?.messages[1]).toEqual({
       role: "user",
-      content: wrapTranslationInput("Hello"),
+      content: requestFor("Hello", "user-to-agent"),
     });
   });
 
@@ -701,7 +711,8 @@ describe("session translation context", () => {
     ).resolves.toBe("T:World");
     expect(calls).toHaveLength(2);
     // The second request carries the committed first exchange, wrapped source
-    // and all, between the system prompt and the new input.
+    // and all, between the system prompt and the new input. Only the new input
+    // carries the request frame; the replayed turn keeps the bare wrapper.
     expect(calls[1].body?.messages.map((message) => message.role)).toEqual([
       "system",
       "user",
@@ -710,7 +721,7 @@ describe("session translation context", () => {
     ]);
     expect(calls[1].body?.messages[1]?.content).toBe(wrapTranslationInput("Hello"));
     expect(calls[1].body?.messages[2]?.content).toBe("T:Hello");
-    expect(calls[1].body?.messages[3]?.content).toBe(wrapTranslationInput("World"));
+    expect(calls[1].body?.messages[3]?.content).toBe(requestFor("World", "user-to-agent"));
     // Another session stays standalone.
     await translator.translate("Hola", "user-to-agent", { contextKey: "other" });
     expect(calls[2].body?.messages).toHaveLength(2);
@@ -1098,7 +1109,7 @@ describe("display translation batching", () => {
       translator.translateMany(["Hello", "World"], "agent-to-user"),
     ).resolves.toEqual(["DE:Hello", "DE:World"]);
     expect(calls).toHaveLength(before + 1);
-    expect(calls[before]?.user).toBe(wrapTranslationInput("World"));
+    expect(calls[before]?.user).toBe(requestFor("World", "agent-to-user"));
   });
 
   it("falls back to per-item streaming when the batch cannot be parsed", async () => {
@@ -1112,8 +1123,13 @@ describe("display translation batching", () => {
     ).resolves.toEqual(["DE:Hello", "DE:World"]);
     expect(calls).toHaveLength(3);
     expect(calls[0]?.user).toContain("<ti n=");
-    expect(calls[1]?.user).toBe(wrapTranslationInput("Hello"));
-    expect(calls[2]?.user).toBe(wrapTranslationInput("World"));
+    // The batch request carries the frame too, with the tagged-items reminder.
+    expect(calls[0]?.user.startsWith("Translate the text between the ")).toBe(true);
+    expect(calls[0]?.user.split("\n").at(-1)).toBe(
+      "Output only the <ti> items with their contents translated to en, keeping the item tags unchanged.",
+    );
+    expect(calls[1]?.user).toBe(requestFor("Hello", "agent-to-user"));
+    expect(calls[2]?.user).toBe(requestFor("World", "agent-to-user"));
   });
 
   it("records each batched pair into the session transcript", async () => {
@@ -1136,6 +1152,6 @@ describe("display translation batching", () => {
     expect(snap.turns.map((turn) => turn.assistant)).toEqual(["T:Hello", "T:World"]);
     await translator.translate("Next", "agent-to-user", { contextKey: "s" });
     expect(calls).toHaveLength(2);
-    expect(calls[1]?.user).toBe(wrapTranslationInput("Next"));
+    expect(calls[1]?.user).toBe(requestFor("Next", "agent-to-user"));
   });
 });

@@ -28,6 +28,7 @@ import {
   translateStreamPollRpc,
   translateStreamStartRpc,
   translateTextRpc,
+  translationRequestMessage,
   wrapTranslationInput,
   type LanguagePair,
   type TranslateDirection,
@@ -199,7 +200,10 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     client: LlmClient;
     prefixMessages: ChatMessage[];
     systemPrompt: string;
+    /** Bare wrapped source, recorded as the context turn's user side. */
     userContent: string;
+    /** Framed final user message actually sent (see translationRequestMessage). */
+    requestContent: string;
     /** Endpoint timeout; also bounds the fail-closed path's wait on a shared translation. */
     timeoutMs: number;
     recordContext?: { scopeKey: string };
@@ -208,6 +212,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
   type CacheLookup = { trivial: string } | {
     key: string;
     values: TranslateSettingsValues;
+    pair: LanguagePair;
     systemPrompt: string;
     scopeKey: string | undefined;
   };
@@ -253,7 +258,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       reasoningEffort: values.translationReasoningEffort,
       ...(useContext ? { scopeKey: contextKey } : {}),
     });
-    return { key, values, systemPrompt, scopeKey: useContext ? contextKey : undefined };
+    return { key, values, pair, systemPrompt, scopeKey: useContext ? contextKey : undefined };
   }
 
   async function setup(
@@ -263,7 +268,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
   ): Promise<SetupResult> {
     const lookup = await prepareCacheLookup(text, direction, contextKey);
     if ("trivial" in lookup) return lookup;
-    const { key, values, systemPrompt, scopeKey } = lookup;
+    const { key, values, pair, systemPrompt, scopeKey } = lookup;
     // The hard cap bounds active sessions that outpace the idle compaction
     // policy: past twice the configured size the oldest pairs drop out.
     const snapshot = scopeKey !== undefined
@@ -310,6 +315,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       prefixMessages: messages,
       systemPrompt,
       userContent,
+      requestContent: translationRequestMessage(userContent, pair),
       timeoutMs: values.translationTimeoutMs,
       ...(scopeKey !== undefined ? { recordContext: { scopeKey } } : {}),
     } as const;
@@ -318,9 +324,9 @@ export function createTranslator(deps: TranslatorDeps): Translator {
 
   function requestMessages(prepared: {
     prefixMessages: ChatMessage[];
-    userContent: string;
+    requestContent: string;
   }): ChatMessage[] {
-    return [...prepared.prefixMessages, { role: "user", content: prepared.userContent }];
+    return [...prepared.prefixMessages, { role: "user", content: prepared.requestContent }];
   }
 
   function commitTranslation(
@@ -454,10 +460,8 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     if (first === undefined) throw new Error("Invariant: empty translation pack");
     const nonce = pickBatchNonce(packTexts);
     const values = await deps.loadConfig();
-    const batchPrompt = resolveTranslationBatchSystemPrompt(
-      values,
-      resolveLanguagePair(values, direction),
-    );
+    const pair = resolveLanguagePair(values, direction);
+    const batchPrompt = resolveTranslationBatchSystemPrompt(values, pair);
     const prefix = first.prefixMessages;
     const system = prefix[0];
     const withBatchSystem: ChatMessage[] =
@@ -474,7 +478,12 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         : [{ role: "system", content: batchPrompt }, ...prefix];
     const messages: ChatMessage[] = [
       ...withBatchSystem,
-      { role: "user", content: wrapTranslationBatch(packTexts, nonce) },
+      {
+        role: "user",
+        content: translationRequestMessage(wrapTranslationBatch(packTexts, nonce), pair, {
+          batch: true,
+        }),
+      },
     ];
     const output = await completeStreamFirst(first.client, messages, () => undefined, { signal });
     const parsed = parseTranslationBatch(output, packTexts.length, nonce);
