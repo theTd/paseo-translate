@@ -49,7 +49,16 @@ export interface TranslationInflightRegistry {
     produce: (context: InflightProducerContext) => Promise<string>,
     options?: InflightWaitOptions,
   ): Promise<string>;
+  /** Live jobs and the text they currently hold, read by the memory probe. */
+  stats(): TranslationInflightStats;
 }
+
+/** Type alias so it stays assignable to the memory probe's gauge value. */
+export type TranslationInflightStats = {
+  entries: number;
+  /** Characters buffered by in-progress translations (streamed partials). */
+  partialChars: number;
+};
 
 interface InflightEntry {
   partial: string;
@@ -151,6 +160,11 @@ export function createTranslationInflightRegistry(): TranslationInflightRegistry
       // rejection after all waiters left from surfacing as unhandled.
       entry.done.catch(() => undefined);
       return wait(key, entry, options);
+    },
+    stats() {
+      let partialChars = 0;
+      for (const entry of entries.values()) partialChars += entry.partial.length;
+      return { entries: entries.size, partialChars };
     },
   };
 }

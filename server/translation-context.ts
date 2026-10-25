@@ -302,6 +302,18 @@ export function createTranslationContextManager(deps: TranslationContextManagerD
       scopeState(scopeKey).lastActivityAt = now();
     },
 
+    /**
+     * Retained scope count and characters, read by the memory probe. This map
+     * is the store that outlives every request: scopes leave it only on the
+     * idle sweep or when compaction shrinks them, so its size is worth seeing
+     * next to the process heap.
+     */
+    stats(): { scopes: number; chars: number } {
+      let chars = 0;
+      for (const state of scopes.values()) chars += state.chars + state.memory.length;
+      return { scopes: scopes.size, chars };
+    },
+
     /** One compaction pass over all idle, oversized scopes. Exposed for tests. */
     sweep,
 

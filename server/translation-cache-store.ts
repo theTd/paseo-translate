@@ -12,7 +12,20 @@ import { TRANSLATION_CACHE_CAPACITY } from "../shared/translate";
 export interface TranslationCacheStore {
   get(key: string): string | undefined;
   set(key: string, value: string): void;
+  /** Retained size of the in-memory mirror, read by the memory probe. */
+  stats(): TranslationCacheStats;
 }
+
+/**
+ * A type alias rather than an interface on purpose: object-literal types carry
+ * an implicit index signature, so this stays assignable to the memory probe's
+ * `Record<string, number>` gauge value without a cast at the call site.
+ */
+export type TranslationCacheStats = {
+  entries: number;
+  /** Retained UTF-16 characters across every kept value. */
+  chars: number;
+};
 
 export interface TranslationCacheStoreOptions {
   /** Upper bound on kept entries; defaults to TRANSLATION_CACHE_CAPACITY. */
@@ -41,6 +54,9 @@ export function createMemoryTranslationCacheStore(
     set(key, value) {
       refreshRecency(entries, key, value);
       evictOldestIfNeeded(entries, maxEntries);
+    },
+    stats() {
+      return countRetained(entries);
     },
   };
 }
@@ -132,6 +148,9 @@ export function createPersistentTranslationCacheStore(
         warnDisabled(error);
       }
     },
+    stats() {
+      return countRetained(entries);
+    },
   };
 }
 
@@ -173,6 +192,17 @@ function parseRecord(line: string): CacheRecord | null {
 function refreshRecency(entries: Map<string, string>, key: string, value: string): void {
   entries.delete(key);
   entries.set(key, value);
+}
+
+/**
+ * Counts what the in-memory mirror actually retains. The entry cap alone hides
+ * the memory ceiling: 10k entries of up to 100k characters each is a very
+ * different footprint from 10k short lines, so the probe needs characters too.
+ */
+function countRetained(entries: ReadonlyMap<string, string>): TranslationCacheStats {
+  let chars = 0;
+  for (const value of entries.values()) chars += value.length;
+  return { entries: entries.size, chars };
 }
 
 function evictOldestIfNeeded(entries: Map<string, string>, maxEntries: number): void {

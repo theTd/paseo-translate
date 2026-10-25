@@ -26,6 +26,7 @@ import {
   defaultTranslationCacheDirectory,
 } from "./server/translation-cache-store";
 import { createTranslationContextManager } from "./server/translation-context";
+import { createMemoryProbe, memoryProbeOptionsFromEnv } from "./server/memory-probe";
 import { withNotificationTranslation } from "./server/notification-provider";
 import {
   assertConfigured,
@@ -78,6 +79,17 @@ export default function contribute(server: PluginServerContext) {
   // display jobs of every client and the notification previews join one
   // running request per text instead of each billing their own.
   const inflight = createTranslationInflightRegistry();
+  // Diagnostics for the one failure this host cannot report itself: when the
+  // plugin process dies of V8 heap exhaustion the daemon records only "Plugin
+  // process exited", so the growth has to be visible before the fatal GC. The
+  // gauges are the stores every provider writes through — cache, in-flight
+  // registry, context scopes — so a climbing heap either shows up in one of
+  // them or is held inside a provider's own per-session state.
+  const memoryProbe = createMemoryProbe(memoryProbeOptionsFromEnv());
+  memoryProbe.track({ name: "cache", read: () => cacheStore.stats() });
+  memoryProbe.track({ name: "inflight", read: () => inflight.stats() });
+  memoryProbe.track({ name: "context", read: () => context.stats() });
+  memoryProbe.start();
   const deps = { loadConfig, cacheStore, context, inflight };
   const forkCoordinator = new ClaudeForkCoordinator();
   const cacheDefaults = server.registerSettings(claudeCacheSettings);
@@ -115,6 +127,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(translateStreamCancelRpc, createTranslateStreamCancelHandler(streamManager));
   server.handle(translateProvidersRpc, createProvidersHandler());
   return () => {
+    memoryProbe.dispose();
     offSessionOpen();
     offCacheCreate();
     offCacheArchive();
