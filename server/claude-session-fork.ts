@@ -9,14 +9,16 @@ import { defaultTranslationCacheDirectory } from "./translation-cache-store";
 import { claudeProjectDir } from "./claude-project-dir";
 import { cloneClaudeSession, claudeSessionCloneSchema, type ClaudeSessionClone } from "./claude-session-clone";
 import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration } from "./claude-fork-coordinator";
-import { createPaseoCli, isPaseoCliRequestTimeout } from "./paseo-cli";
+import { createPaseoCli, createPaseoImport, isPaseoCliRequestTimeout, type PaseoImportRequest } from "./paseo-cli";
 
 const OPERATION_LABEL = "translate.claude-fork-operation";
 const sourceSchema = z.object({ Id: z.string(), Provider: z.string(), Cwd: z.string() });
-const importedSchema = z.object({ agentId: z.string(), provider: z.string(), cwd: z.string() });
+const importedSchema = z.object({ agentId: z.string(), provider: z.string(), cwd: z.string(), workspaceId: z.string().optional() });
 const operationSchema = z.object({
   sourceAgentId: z.string(), sourceSessionId: z.uuid(), newSessionId: z.uuid(),
   cwd: z.string(), configDir: z.string(), title: z.string(), copiedFiles: z.number().int().positive().optional(),
+  // Import destination; an operation saved before workspace binding lacks it.
+  workspaceId: z.string().optional(),
   config: claudeForkConfigurationSchema,
   agentId: z.string().optional(),
   importStartedAt: z.number().int().nonnegative().optional(),
@@ -37,10 +39,12 @@ export interface ClaudeForkDeps {
   directory?: string;
   /** Structured argv invocation through the host's process wrapper. */
   cli?: (args: string[]) => Promise<string>;
+  /** Daemon-client import; the CLI has no way to name the destination workspace. */
+  importAgent?: (request: PaseoImportRequest) => Promise<string>;
   clone?: typeof cloneClaudeSession;
   /** The daemon rejects plugin RPCs after 30s; at this age the call reports in_progress. */
   inProgressAfterMs?: number;
-  /** Poll the operation label after a CLI timeout without resubmitting the import. */
+  /** Poll the operation label after an import timeout without resubmitting it. */
   importPollIntervalMs?: number;
   /** Budget from import submission; expiry preserves the pending import for retry. */
   importRecoveryTimeoutMs?: number;
@@ -55,6 +59,7 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
   const directory = deps.directory ?? path.join(defaultTranslationCacheDirectory(), "claude-forks");
   const home = path.resolve(directory, "../../..");
   const cli = deps.cli ?? createPaseoCli(home);
+  const importAgent = deps.importAgent ?? createPaseoImport(home);
   const clone = deps.clone ?? cloneClaudeSession;
   const inProgressAfter = deps.inProgressAfterMs ?? IN_PROGRESS_AFTER_MS;
   const importPollInterval = deps.importPollIntervalMs ?? IMPORT_POLL_INTERVAL_MS;
@@ -120,7 +125,7 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
       if (!operation) {
         const newSessionId = randomUUID();
         operation = operationSchema.parse({ sourceAgentId: input.agentId, sourceSessionId: prepared.claudeSessionId,
-          newSessionId, cwd: prepared.config.cwd, configDir: prepared.configDir,
+          newSessionId, cwd: prepared.config.cwd, workspaceId: source.agent.workspaceId, configDir: prepared.configDir,
           title: `${(source.agent.title?.trim() || "Claude session").slice(0, 170)} (fork ${newSessionId.slice(0, 8)})`,
           config: claudeForkConfiguration(prepared.config) });
         await save(file, operation);
@@ -164,6 +169,15 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
     });
     if (restartRequired) return { kind: "restart_required", message: "The source session changed after the previous attempt. Confirm a new fork of the current session." };
     if (!operation || operation.copiedFiles === undefined) throw new Error("Fork copy did not complete");
+    // A journal saved before workspace binding must still import into the
+    // source workspace; the daemon otherwise picks the oldest one for the cwd.
+    // An import already submitted without one keeps its daemon-chosen placement:
+    // binding it now would fail verification on every retry.
+    if (operation.workspaceId === undefined && source.agent.workspaceId !== undefined &&
+      operation.agentId === undefined && operation.importStartedAt === undefined) {
+      operation.workspaceId = source.agent.workspaceId;
+      await save(file, operation);
+    }
     const handle = `plugin:${JSON.stringify({ version: 1, data: { claudeSessionId: operation.newSessionId,
       configDir: operation.configDir, forkConfig: operation.config } })}`;
     operation.agentId ??= await findImported(context, input.operationId, operation);
@@ -175,9 +189,8 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
         await save(file, operation);
         let output: string | undefined;
         try {
-          output = await cli(["import", handle,
-            "--provider", TRANSLATE_CLAUDE_PROVIDER_ID, "--cwd", operation.cwd,
-            "--label", `${OPERATION_LABEL}=${input.operationId}`]);
+          output = await importAgent({ handle, provider: TRANSLATE_CLAUDE_PROVIDER_ID, cwd: operation.cwd,
+            workspaceId: operation.workspaceId, labels: { [OPERATION_LABEL]: input.operationId } });
         } catch (error) {
           if (!isPaseoCliRequestTimeout(error)) {
             delete operation.importStartedAt;
@@ -189,6 +202,9 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
           const imported = importedSchema.parse(JSON.parse(output));
           if (imported.provider !== TRANSLATE_CLAUDE_PROVIDER_ID || path.resolve(imported.cwd) !== path.resolve(operation.cwd)) {
             throw new Error("Paseo imported an unexpected provider or working directory");
+          }
+          if (operation.workspaceId !== undefined && imported.workspaceId !== operation.workspaceId) {
+            throw new Error(`Paseo imported the fork into workspace ${imported.workspaceId ?? "unknown"} instead of the source workspace ${operation.workspaceId}`);
           }
           operation.agentId = imported.agentId;
         }
@@ -203,6 +219,9 @@ export function createClaudeSessionForkHandler(deps: ClaudeForkDeps) {
     if (!target) throw new Error("Fork import verification failed: imported agent is missing; retry this operation to finish it");
     if (target.agent.provider !== TRANSLATE_CLAUDE_PROVIDER_ID || !isForkHandle(target.agent.persistence?.sessionId, operation)) {
       throw new Error("Fork import verification failed: provider or session identity mismatch; retry this operation to finish it");
+    }
+    if (operation.workspaceId !== undefined && target.agent.workspaceId !== operation.workspaceId) {
+      throw new Error(`Fork import verification failed: the fork is in workspace ${target.agent.workspaceId ?? "unknown"} instead of the source workspace ${operation.workspaceId}`);
     }
     if (target.agent.title !== operation.title) {
       throw new Error("Fork title verification failed: the saved title differs from the requested title; retry this operation to finish it");
