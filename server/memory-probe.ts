@@ -33,15 +33,32 @@ export interface MemoryProbeOptions {
   intervalMs?: number;
   /** heapUsed thresholds in bytes; each crossing is logged once, in order. */
   alarmBytes?: readonly number[];
+  /**
+   * Snapshots to write as the heap nears its limit (0 disables). Node's
+   * `setHeapSnapshotNearHeapLimit` runs from the allocation path, so it still
+   * fires while the main thread is stuck in whatever is eating the heap —
+   * which is the only reason a usable artifact exists at all here.
+   */
+  heapSnapshotNearLimit?: number;
   log?: (line: string) => void;
   memoryUsage?: () => NodeJS.MemoryUsage;
   now?: () => number;
   heapStatistics?: () => v8.HeapInfo;
   heapSpaces?: () => readonly v8.HeapSpaceInfo[];
+  /** Injectable for tests; defaults to the real v8 API when it exists. */
+  armHeapSnapshot?: (limit: number) => void;
 }
 
 const MEGABYTE = 1024 * 1024;
-const DEFAULT_INTERVAL_MS = 60_000;
+/**
+ * 10s, not 60s: the fatal events this probe exists for are shorter than a
+ * minute — the observed crash went from a flat ~78MB heap to the 4GB ceiling
+ * in under 120s, and a 60s tick lost the whole last interval because the main
+ * thread was already stuck. One line per 10s is cheap next to that blind spot.
+ */
+const DEFAULT_INTERVAL_MS = 10_000;
+/** One snapshot when the heap nears its limit: the crash we cannot reproduce. */
+const DEFAULT_SNAPSHOT_NEAR_LIMIT = 1;
 /** Default alarms sit under the ~4 GB default old-space ceiling this host hit. */
 const DEFAULT_ALARM_STEPS_MB = [1_024, 2_048, 3_072, 3_584] as const;
 const LINE_PREFIX = "[translate] mem";
@@ -66,7 +83,27 @@ export function memoryProbeOptionsFromEnv(
     .map((part) => Number.parseInt(part.trim(), 10))
     .filter((megabytes) => Number.isFinite(megabytes) && megabytes > 0);
   if (alarms.length > 0) options.alarmBytes = alarms.map((megabytes) => megabytes * MEGABYTE);
+  const snapshots = Number.parseInt(env.TRANSLATE_HEAP_SNAPSHOT_NEAR_LIMIT ?? "", 10);
+  if (Number.isFinite(snapshots) && snapshots >= 0) options.heapSnapshotNearLimit = snapshots;
   return options;
+}
+
+/**
+ * Arms Node's near-heap-limit snapshot writer. Returns the state the header
+ * prints, so a missing artifact is never a mystery: either it was armed, or
+ * the reason it was not is on the same line.
+ */
+function armHeapSnapshotWriter(limit: number): string {
+  if (limit <= 0) return "off";
+  const api = (v8 as { setHeapSnapshotNearHeapLimit?: (count: number) => void })
+    .setHeapSnapshotNearHeapLimit;
+  if (typeof api !== "function") return "unavailable";
+  try {
+    api(limit);
+    return `armed:${limit}`;
+  } catch (error) {
+    return `failed:${error instanceof Error ? error.message : String(error)}`;
+  }
 }
 
 export function createMemoryProbe(options: MemoryProbeOptions = {}) {
@@ -78,6 +115,7 @@ export function createMemoryProbe(options: MemoryProbeOptions = {}) {
   const heapSpaces = options.heapSpaces ?? (() => v8.getHeapSpaceStatistics());
   const alarms = [...(options.alarmBytes ?? DEFAULT_ALARM_STEPS_MB.map((mb) => mb * MEGABYTE))]
     .sort((left, right) => left - right);
+  const heapSnapshotNearLimit = options.heapSnapshotNearLimit ?? DEFAULT_SNAPSHOT_NEAR_LIMIT;
 
   const gauges: MemoryGauge[] = [];
   const startedAt = now();
@@ -186,11 +224,24 @@ export function createMemoryProbe(options: MemoryProbeOptions = {}) {
       const alarmText = alarms.length === 0
         ? "none"
         : `${alarms.map((bytes) => Math.round(bytes / MEGABYTE)).join(",")}MB`;
+      // Arm before logging so the header states what will actually land on disk.
+      const snapshotState = options.armHeapSnapshot !== undefined
+        ? (() => {
+            try {
+              options.armHeapSnapshot(heapSnapshotNearLimit);
+              return `armed:${heapSnapshotNearLimit}`;
+            } catch (error) {
+              return `failed:${error instanceof Error ? error.message : String(error)}`;
+            }
+          })()
+        : armHeapSnapshotWriter(heapSnapshotNearLimit);
       log(
         `${LINE_PREFIX} probe start pid=${process.pid} node=${process.version}`
         + ` interval=${intervalMs}ms`
         + ` heapLimit=${megabytes(heapStatistics().heap_size_limit)}MB`
         + ` alarms=${alarmText}`
+        + ` snapshot=${snapshotState}`
+        + ` cwd=${process.cwd()}`
         + ` gauges=${gauges.map((gauge) => gauge.name).join(",") || "none"}`,
       );
       if (intervalMs <= 0) return;
@@ -216,3 +267,43 @@ export function createMemoryProbe(options: MemoryProbeOptions = {}) {
 }
 
 export type MemoryProbe = ReturnType<typeof createMemoryProbe>;
+
+export interface SizeWatchOptions {
+  /** Marker label, e.g. "llm.sse"; it lands in the log line verbatim. */
+  label: string;
+  /** First reported magnitude; each crossing doubles the next threshold. */
+  stepChars?: number;
+  log?: (line: string) => void;
+}
+
+/**
+ * Reports one buffer's size at doubling magnitudes (64k, 128k, 256k, …).
+ *
+ * The heap gauge alone cannot say *which* buffer exploded: the last crash
+ * reached 4GB while every sampled store stayed flat, so the growth lived and
+ * died inside a single request. A watch per call site costs one comparison per
+ * delta and still leaves a trail of exactly where a runaway buffer was, even
+ * if the process dies before the next tick.
+ */
+export function createSizeWatch(options: SizeWatchOptions) {
+  const log = options.log ?? ((line: string) => { console.log(line); });
+  const step = options.stepChars ?? 65_536;
+  let next = step;
+  let peak = 0;
+  return {
+    /** Notes the current size; logs only when it crosses the next magnitude. */
+    report(chars: number, detail?: string): void {
+      if (chars > peak) peak = chars;
+      if (chars < next) return;
+      while (next <= chars) next *= 2;
+      const suffix = detail === undefined || detail.length === 0 ? "" : ` ${detail}`;
+      log(`${LINE_PREFIX} big ${options.label} chars=${Math.round(chars)}${suffix}`);
+    },
+    /** Largest size seen so far, for a caller that wants to log a summary. */
+    get peakChars(): number {
+      return peak;
+    },
+  };
+}
+
+export type SizeWatch = ReturnType<typeof createSizeWatch>;

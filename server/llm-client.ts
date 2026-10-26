@@ -5,6 +5,8 @@
  * route. One attempt per call; the caller owns the failure policy.
  */
 
+import { createSizeWatch } from "./memory-probe";
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -106,14 +108,19 @@ export function createLlmClient(
       timer = setTimeout(() => controller.abort(), config.timeoutMs);
     };
     try {
+      const payload = JSON.stringify(
+        config.protocol === "responses"
+          ? buildResponsesBody(config, messages, stream)
+          : buildChatBody(config, messages, stream),
+      );
+      // Request-size marker: a runaway *input* (an agent pasting a huge tool
+      // result into a prompt) is visible here before the endpoint answers, and
+      // a normal translation prompt stays far below the first magnitude.
+      createSizeWatch({ label: "llm.req" }).report(payload.length, `stream=${stream}`);
       const response = await fetchFn(url, {
         method: "POST",
         headers,
-        body: JSON.stringify(
-          config.protocol === "responses"
-            ? buildResponsesBody(config, messages, stream)
-            : buildChatBody(config, messages, stream),
-        ),
+        body: payload,
         // The SDK dependency bundles DOM-style globals that clash with the
         // Node declarations; bridge them at this boundary through the
         // fetch-side signal type.
@@ -141,6 +148,9 @@ export function createLlmClient(
         status = response.status;
         ok = response.ok;
         body = await response.text();
+        // The raw body, the parsed tree and the extracted text all coexist
+        // from here on, so one oversized response is three oversized objects.
+        createSizeWatch({ label: "llm.resp" }).report(body.length);
       } catch (error) {
         if (signal?.aborted) throw new LlmRequestCanceledError();
         throw new Error(
@@ -187,6 +197,7 @@ export function createLlmClient(
         const contentType = response.headers.get("content-type") ?? "";
         if (!contentType.includes("text/event-stream")) {
           const body = await response.text();
+          createSizeWatch({ label: "llm.resp" }).report(body.length, "non-sse");
           let content: unknown;
           try {
             content = readResponseText(config.protocol, JSON.parse(body));
@@ -359,19 +370,31 @@ async function readSseDeltas(
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  // Unbounded on purpose — the caller needs the whole translation — so this
+  // marker is the only way to see a stream that never stops growing.
+  const size = createSizeWatch({ label: "llm.sse" });
+  // The raw byte buffer is a separate hole: an endpoint that streams bytes
+  // without ever completing an SSE event grows this while `accumulated` stays
+  // empty, so a missing `llm.sse` line is not proof the stream was small.
+  const raw = createSizeWatch({ label: "llm.raw" });
   let buffer = "";
   let accumulated = "";
   for (;;) {
     const { done, value } = await reader.read();
-    if (value !== undefined) buffer += decoder.decode(value, { stream: !done });
+    if (value !== undefined) {
+      buffer += decoder.decode(value, { stream: !done });
+      raw.report(buffer.length);
+    }
     if (done) break;
     buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
       accumulated += data;
+      size.report(accumulated.length);
       onDelta(data);
     });
   }
   buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
     accumulated += data;
+    size.report(accumulated.length);
     onDelta(data);
   });
   if (accumulated.length === 0) {

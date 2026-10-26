@@ -1,4 +1,5 @@
 import { isClaudeTranscriptNoise } from "./claude-transcript-content";
+import { createSizeWatch } from "./memory-probe";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 
@@ -13,6 +14,12 @@ interface MessageText {
 export class ClaudeMessageStream {
   private readonly messages = new Map<string, MessageText>();
   private activeId: string | undefined;
+  /**
+   * Marker for the rebuilt text: `snapshots` re-joins every block on each
+   * delta while the message is still growing, so the size logged here is both
+   * the retained copy and the per-delta allocation churn.
+   */
+  private readonly sizes = createSizeWatch({ label: "claude.msg" });
 
   clear(): void { this.messages.clear(); this.activeId = undefined; }
 
@@ -70,6 +77,7 @@ export class ClaudeMessageStream {
     const blocks = [...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
     const text = blocks.filter((block) => block.kind === "text").map((block) => block.text).join("");
     const thinking = blocks.filter((block) => block.kind === "thinking").map((block) => block.text).join("");
+    this.sizes.report(text.length + thinking.length, `id=${state.id}`);
     if (text && text !== state.text && !isClaudeTranscriptNoise(text)) {
       items.push({ type: "assistant_message", id: state.id, messageId: state.id, text });
       state.text = text;

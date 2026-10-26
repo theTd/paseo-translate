@@ -1,6 +1,6 @@
 import type { HeapInfo } from "node:v8";
 import { describe, expect, it, vi } from "vitest";
-import { createMemoryProbe, memoryProbeOptionsFromEnv } from "./memory-probe";
+import { createMemoryProbe, createSizeWatch, memoryProbeOptionsFromEnv } from "./memory-probe";
 
 const MEGABYTE = 1024 * 1024;
 
@@ -134,5 +134,85 @@ describe("memory probe", () => {
       TRANSLATE_MEMORY_PROBE_MS: "soon",
       TRANSLATE_MEMORY_PROBE_ALARM_MB: "0,-4,x",
     })).toEqual({});
+  });
+
+  it("reads the snapshot count from the environment", () => {
+    expect(memoryProbeOptionsFromEnv({ TRANSLATE_HEAP_SNAPSHOT_NEAR_LIMIT: "0" }))
+      .toEqual({ heapSnapshotNearLimit: 0 });
+    expect(memoryProbeOptionsFromEnv({ TRANSLATE_HEAP_SNAPSHOT_NEAR_LIMIT: "2" }))
+      .toEqual({ heapSnapshotNearLimit: 2 });
+    expect(memoryProbeOptionsFromEnv({ TRANSLATE_HEAP_SNAPSHOT_NEAR_LIMIT: "x" })).toEqual({});
+  });
+
+  it("states in the header whether the snapshot writer was armed", () => {
+    const armed: string[] = [];
+    const lines: string[] = [];
+    const probe = createMemoryProbe({
+      intervalMs: 0,
+      log: (line) => lines.push(line),
+      armHeapSnapshot: (limit) => { armed.push(String(limit)); },
+    });
+    probe.start();
+
+    expect(armed).toEqual(["1"]);
+    expect(lines[0]).toContain("snapshot=armed:1");
+    expect(lines[0]).toContain("cwd=");
+  });
+
+  it("reports a snapshot arming failure instead of throwing", () => {
+    const lines: string[] = [];
+    const probe = createMemoryProbe({
+      intervalMs: 0,
+      log: (line) => lines.push(line),
+      armHeapSnapshot: () => { throw new Error("nope"); },
+      heapSnapshotNearLimit: 1,
+    });
+    probe.start();
+    expect(lines[0]).toContain("snapshot=failed:nope");
+  });
+});
+
+describe("size watch", () => {
+  function watch() {
+    const lines: string[] = [];
+    const size = createSizeWatch({
+      label: "llm.sse",
+      stepChars: 64,
+      log: (line) => lines.push(line),
+    });
+    return { size, lines };
+  }
+
+  it("logs once per doubling magnitude, not per report", () => {
+    const h = watch();
+    h.size.report(63);
+    expect(h.lines).toHaveLength(0);
+
+    h.size.report(64);
+    h.size.report(100);
+    h.size.report(127);
+    expect(h.lines).toEqual(["[translate] mem big llm.sse chars=64"]);
+
+    h.size.report(128);
+    expect(h.lines[1]).toBe("[translate] mem big llm.sse chars=128");
+
+    h.size.report(1_000);
+    expect(h.lines[2]).toBe("[translate] mem big llm.sse chars=1000");
+    expect(h.lines).toHaveLength(3);
+  });
+
+  it("tracks the peak even below the first magnitude", () => {
+    const h = watch();
+    h.size.report(10);
+    h.size.report(42);
+    h.size.report(7);
+    expect(h.size.peakChars).toBe(42);
+    expect(h.lines).toHaveLength(0);
+  });
+
+  it("keeps the detail suffix for attribution", () => {
+    const h = watch();
+    h.size.report(200, "id=msg_1");
+    expect(h.lines[0]).toBe("[translate] mem big llm.sse chars=200 id=msg_1");
   });
 });
