@@ -36,6 +36,7 @@ __export(claude_provider_exports, {
 module.exports = __toCommonJS(claude_provider_exports);
 var import_node_crypto6 = require("node:crypto");
 var import_node_fs4 = require("node:fs");
+var import_node_os4 = require("node:os");
 var import_node_path7 = __toESM(require("node:path"));
 var import_server = require("@getpaseo/plugin/server");
 
@@ -32525,6 +32526,32 @@ var import_provider = require("@getpaseo/plugin/server/provider");
 // server/translate.ts
 var import_node_crypto3 = require("node:crypto");
 
+// server/memory-probe.ts
+var MEGABYTE = 1024 * 1024;
+var LINE_PREFIX = "[translate] mem";
+function createSizeWatch(options) {
+  const log = options.log ?? ((line) => {
+    console.log(line);
+  });
+  const step = options.stepChars ?? 65536;
+  let next = step;
+  let peak = 0;
+  return {
+    /** Notes the current size; logs only when it crosses the next magnitude. */
+    report(chars, detail) {
+      if (chars > peak) peak = chars;
+      if (chars < next) return;
+      while (next <= chars) next *= 2;
+      const suffix = detail === void 0 || detail.length === 0 ? "" : ` ${detail}`;
+      log(`${LINE_PREFIX} big ${options.label} chars=${Math.round(chars)}${suffix}`);
+    },
+    /** Largest size seen so far, for a caller that wants to log a summary. */
+    get peakChars() {
+      return peak;
+    }
+  };
+}
+
 // server/llm-client.ts
 var LlmRequestCanceledError = class extends Error {
   constructor() {
@@ -32556,12 +32583,14 @@ function createLlmClient(config2, options = {}) {
       timer = setTimeout(() => controller.abort(), config2.timeoutMs);
     };
     try {
+      const payload = JSON.stringify(
+        config2.protocol === "responses" ? buildResponsesBody(config2, messages, stream) : buildChatBody(config2, messages, stream)
+      );
+      createSizeWatch({ label: "llm.req" }).report(payload.length, `stream=${stream}`);
       const response = await fetchFn(url2, {
         method: "POST",
         headers,
-        body: JSON.stringify(
-          config2.protocol === "responses" ? buildResponsesBody(config2, messages, stream) : buildChatBody(config2, messages, stream)
-        ),
+        body: payload,
         // The SDK dependency bundles DOM-style globals that clash with the
         // Node declarations; bridge them at this boundary through the
         // fetch-side signal type.
@@ -32588,6 +32617,7 @@ function createLlmClient(config2, options = {}) {
         status = response.status;
         ok2 = response.ok;
         body = await response.text();
+        createSizeWatch({ label: "llm.resp" }).report(body.length);
       } catch (error62) {
         if (signal?.aborted) throw new LlmRequestCanceledError();
         throw new Error(
@@ -32630,6 +32660,7 @@ function createLlmClient(config2, options = {}) {
         const contentType = response.headers.get("content-type") ?? "";
         if (!contentType.includes("text/event-stream")) {
           const body = await response.text();
+          createSizeWatch({ label: "llm.resp" }).report(body.length, "non-sse");
           let content;
           try {
             content = readResponseText(config2.protocol, JSON.parse(body));
@@ -32736,19 +32767,26 @@ function readStreamDelta(protocol, parsed) {
 async function readSseDeltas(body, onDelta, readDelta, onChunk) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
+  const size = createSizeWatch({ label: "llm.sse" });
+  const raw = createSizeWatch({ label: "llm.raw" });
   let buffer = "";
   let accumulated = "";
   for (; ; ) {
     const { done, value } = await reader.read();
-    if (value !== void 0) buffer += decoder.decode(value, { stream: !done });
+    if (value !== void 0) {
+      buffer += decoder.decode(value, { stream: !done });
+      raw.report(buffer.length);
+    }
     if (done) break;
     buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
       accumulated += data;
+      size.report(accumulated.length);
       onDelta(data);
     });
   }
   buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
     accumulated += data;
+    size.report(accumulated.length);
     onDelta(data);
   });
   if (accumulated.length === 0) {
@@ -53409,7 +53447,7 @@ function promptDisplayKey(values, text, scopeKey) {
 }
 
 // server/claude-model-catalog.ts
-var import_promises12 = require("node:fs/promises");
+var import_promises13 = require("node:fs/promises");
 var import_node_path3 = require("node:path");
 
 // server/claude-model-manifest.ts
@@ -53591,6 +53629,7 @@ function claudeModelSupportsFastMode(modelId) {
 
 // server/claude-project-dir.ts
 var import_node_fs = require("node:fs");
+var import_promises12 = require("node:fs/promises");
 var import_node_os2 = require("node:os");
 var import_node_path2 = require("node:path");
 var PROJECT_DIR_LENGTH_CAP = 200;
@@ -53624,6 +53663,20 @@ function encodeProjectDir(input2) {
 }
 function claudeProjectDir(cwd, configDir = resolveClaudeConfigDir()) {
   return (0, import_node_path2.join)(configDir, "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
+}
+async function findClaudeTranscriptConfigDir(cwd, sessionId, candidates) {
+  const seen = /* @__PURE__ */ new Set();
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.trim().length === 0) continue;
+    const directory = (0, import_node_path2.resolve)(candidate);
+    if (seen.has(directory)) continue;
+    seen.add(directory);
+    try {
+      if ((await (0, import_promises12.stat)((0, import_node_path2.join)(claudeProjectDir(cwd, directory), `${sessionId}.jsonl`))).isFile()) return directory;
+    } catch {
+    }
+  }
+  return void 0;
 }
 function normalizeProjectPath(input2) {
   return process.platform === "darwin" ? input2.normalize("NFC") : input2;
@@ -53677,7 +53730,7 @@ async function completeClaudeCatalog(discovered, configDir = resolveClaudeConfig
   }
   let settings;
   try {
-    settings = JSON.parse(await (0, import_promises12.readFile)((0, import_node_path3.join)(configDir, "settings.json"), "utf8"));
+    settings = JSON.parse(await (0, import_promises13.readFile)((0, import_node_path3.join)(configDir, "settings.json"), "utf8"));
   } catch {
   }
   const configured = [settings?.model, ...MODEL_ENV_KEYS.map((key) => settings?.env?.[key])];
@@ -53747,7 +53800,7 @@ async function restoreAndMaybeTranslate(session, translator, display) {
 }
 
 // server/claude-sessions.ts
-var import_promises13 = require("node:fs/promises");
+var import_promises14 = require("node:fs/promises");
 var import_node_path4 = require("node:path");
 
 // server/claude-transcript-content.ts
@@ -53772,7 +53825,7 @@ function claudeUserText(content) {
 async function markManagedClaudeFork(cwd, configDir, sessionId) {
   const marker = (0, import_node_path4.join)(claudeProjectDir(cwd, configDir), `${sessionId}.paseo-fork`);
   try {
-    await (0, import_promises13.writeFile)(marker, "Managed by Translate session fork\n", { flag: "wx", mode: 384 });
+    await (0, import_promises14.writeFile)(marker, "Managed by Translate session fork\n", { flag: "wx", mode: 384 });
   } catch (error62) {
     if (error62.code !== "EEXIST") throw error62;
   }
@@ -53783,7 +53836,7 @@ async function readTranscriptPreview(path3) {
   if (claudeSessionId === void 0) return null;
   let raw;
   try {
-    raw = await (0, import_promises13.readFile)(path3, "utf8");
+    raw = await (0, import_promises14.readFile)(path3, "utf8");
   } catch {
     return null;
   }
@@ -53817,7 +53870,7 @@ async function readTranscriptPreview(path3) {
   const title = customTitle ?? aiTitle ?? promptTitle;
   if (title === void 0) return null;
   try {
-    updatedAt = (await (0, import_promises13.stat)(path3)).mtime;
+    updatedAt = (await (0, import_promises14.stat)(path3)).mtime;
   } catch {
   }
   return { claudeSessionId, title: title.length > 200 ? `${title.slice(0, 200)}\u2026` : title, updatedAt };
@@ -53826,7 +53879,7 @@ async function listClaudeTranscriptSummaries(cwd, limit, configDir) {
   const directory = claudeProjectDir(cwd, configDir);
   let names;
   try {
-    names = await (0, import_promises13.readdir)(directory);
+    names = await (0, import_promises14.readdir)(directory);
   } catch {
     return [];
   }
@@ -54182,6 +54235,12 @@ ${output2}`.trim() };
 var ClaudeMessageStream = class {
   constructor() {
     this.messages = /* @__PURE__ */ new Map();
+    /**
+     * Marker for the rebuilt text: `snapshots` re-joins every block on each
+     * delta while the message is still growing, so the size logged here is both
+     * the retained copy and the per-delta allocation churn.
+     */
+    this.sizes = createSizeWatch({ label: "claude.msg" });
   }
   clear() {
     this.messages.clear();
@@ -54239,6 +54298,7 @@ var ClaudeMessageStream = class {
     const blocks = [...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
     const text = blocks.filter((block) => block.kind === "text").map((block) => block.text).join("");
     const thinking = blocks.filter((block) => block.kind === "thinking").map((block) => block.text).join("");
+    this.sizes.report(text.length + thinking.length, `id=${state.id}`);
     if (text && text !== state.text && !isClaudeTranscriptNoise(text)) {
       items.push({ type: "assistant_message", id: state.id, messageId: state.id, text });
       state.text = text;
@@ -55368,7 +55428,7 @@ function renderImageOutputMarkdown(uri, altText = "Image") {
 }
 
 // server/claude-transcript.ts
-var import_promises14 = require("node:fs/promises");
+var import_promises15 = require("node:fs/promises");
 var import_node_path6 = require("node:path");
 
 // server/provider-replay-timestamps.ts
@@ -55392,7 +55452,7 @@ function readString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
 }
 async function readJsonLines(path3) {
-  const raw = await (0, import_promises14.readFile)(path3, "utf8");
+  const raw = await (0, import_promises15.readFile)(path3, "utf8");
   const entries = [];
   for (const line of raw.split(/\r?\n/)) {
     if (line.trim().length === 0) continue;
@@ -55679,7 +55739,7 @@ async function readReplayInner(cwd, claudeSessionId, restore, configDir) {
 async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
   let files;
   try {
-    files = await (0, import_promises14.readdir)((0, import_node_path6.join)(projectDir, claudeSessionId, "subagents"));
+    files = await (0, import_promises15.readdir)((0, import_node_path6.join)(projectDir, claudeSessionId, "subagents"));
   } catch {
     return [];
   }
@@ -55688,7 +55748,7 @@ async function readReplayChildren(projectDir, claudeSessionId, root, restore) {
     sidecars.map(async (file2) => {
       let mtimeMs = 0;
       try {
-        const fileStat = await (0, import_promises14.stat)((0, import_node_path6.join)(projectDir, claudeSessionId, "subagents", file2));
+        const fileStat = await (0, import_promises15.stat)((0, import_node_path6.join)(projectDir, claudeSessionId, "subagents", file2));
         if (Number.isFinite(fileStat.mtimeMs)) mtimeMs = fileStat.mtimeMs;
       } catch {
         mtimeMs = 0;
@@ -55735,7 +55795,7 @@ async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUse
   const base = (0, import_node_path6.join)(projectDir, claudeSessionId, "subagents", `agent-${agentId}`);
   let meta3 = null;
   try {
-    const raw = await (0, import_promises14.readFile)(`${base}.meta.json`, "utf8");
+    const raw = await (0, import_promises15.readFile)(`${base}.meta.json`, "utf8");
     const parsed = JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null) {
       meta3 = parsed;
@@ -56126,13 +56186,23 @@ async function openSession(input2, context, capabilities) {
     } };
   }
   const values = await context.loadValues();
-  if ((input2.config.env["CLAUDE_CONFIG_DIR"] ?? "").trim().length === 0) {
+  const configuredConfigDir = resolveConfiguredClaudeConfigDir(values.claudeConfigDir);
+  const declaredConfigDir = (input2.config.env["CLAUDE_CONFIG_DIR"] ?? "").trim();
+  const storedSessionId = readStoredSessionId(input2.persistence);
+  let effectiveConfigDir = declaredConfigDir.length > 0 ? declaredConfigDir : configuredConfigDir;
+  if (storedSessionId !== null) {
+    effectiveConfigDir = await findClaudeTranscriptConfigDir(input2.config.cwd, storedSessionId, [
+      effectiveConfigDir,
+      configuredConfigDir,
+      resolveClaudeConfigDir(),
+      import_node_path7.default.join((0, import_node_os4.homedir)(), ".claude")
+    ]) ?? effectiveConfigDir;
+  }
+  const configDirChanged = effectiveConfigDir !== declaredConfigDir;
+  if (configDirChanged) {
     input2 = { ...input2, config: {
       ...input2.config,
-      env: {
-        ...input2.config.env,
-        CLAUDE_CONFIG_DIR: resolveConfiguredClaudeConfigDir(values.claudeConfigDir)
-      }
+      env: { ...input2.config.env, CLAUDE_CONFIG_DIR: effectiveConfigDir }
     } };
   }
   const contextKey = resolveTranslationContextKey(input2.config.env, input2.sessionId);
@@ -56177,7 +56247,7 @@ async function openSession(input2, context, capabilities) {
     query: null,
     abort: new AbortController(),
     pump: null,
-    claudeSessionId: readStoredSessionId(input2.persistence),
+    claudeSessionId: storedSessionId,
     active: null,
     mainTurnInFlight: false,
     mainTurnOrdinal: 0,
@@ -56264,9 +56334,15 @@ async function openSession(input2, context, capabilities) {
       }
       if (!session.claudeSessionId) throw new Error("Send a message first so Claude has a persisted session to fork");
       if (session.query) await resetQuery(session, context.emit);
+      const declared = import_node_path7.default.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir());
+      const configDir = await findClaudeTranscriptConfigDir(
+        session.config.cwd,
+        session.claudeSessionId,
+        [declared, configuredConfigDir, resolveClaudeConfigDir(), import_node_path7.default.join((0, import_node_os4.homedir)(), ".claude")]
+      ) ?? declared;
       return {
         claudeSessionId: session.claudeSessionId,
-        configDir: import_node_path7.default.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
+        configDir,
         config: {
           ...session.config,
           ...context.cacheCoordinator ? { providerOptions: {
@@ -56291,6 +56367,9 @@ async function openSession(input2, context, capabilities) {
     title: input2.config.title,
     cwd: input2.config.cwd
   });
+  if (configDirChanged && session.claudeSessionId !== null) {
+    context.emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
+  }
   context.emit({ type: "session.commands", sessionId: session.id, commands: [{
     name: "rewind",
     description: "Rewind tracked files to a previous user message",

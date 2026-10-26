@@ -226,7 +226,10 @@ the app after each turn.
   thinking changes apply at the next query. Auto is the default on the Anthropic API
   transport; Bedrock and Vertex omit Auto and default to Always Ask.
 - Session persistence uses Claude's own session id (resume survives daemon
-  restarts). Permissions pass through to you with Allow/Deny; interrupt maps
+  restarts). When a wrapper (for example reclaude) moves Claude storage into an
+  account directory, opening the session follows the directory that actually
+  holds the transcript and records it for later resumes. Permissions pass
+  through to you with Allow/Deny; interrupt maps
   to Claude's interrupt. "Always allow" style permission upgrades from the
   CLI's suggestions are passed through; the host determines which actions it offers.
   Tool permission cards include structured details and the originating tool identity.

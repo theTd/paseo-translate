@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -53,6 +54,36 @@ export function encodeProjectDir(input: string): string {
 /** `<configDir>/projects/<encoded-canonical-cwd>` — the transcript folder. */
 export function claudeProjectDir(cwd: string, configDir = resolveClaudeConfigDir()): string {
   return join(configDir, "projects", encodeProjectDir(canonicalizeProjectCwd(cwd)));
+}
+
+/**
+ * Returns the candidate config directory that actually holds the stored
+ * session's transcript, or undefined when none does.
+ *
+ * The recorded directory is a declaration, not proof: wrappers such as
+ * reclaude redirect Claude storage to an account directory (and migrate
+ * existing files into it), so a session persisted against the old directory
+ * would otherwise replay empty after a daemon restart and resume a session
+ * that directory does not contain.
+ */
+export async function findClaudeTranscriptConfigDir(
+  cwd: string,
+  sessionId: string,
+  candidates: readonly (string | undefined)[],
+): Promise<string | undefined> {
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || candidate.trim().length === 0) continue;
+    const directory = resolve(candidate);
+    if (seen.has(directory)) continue;
+    seen.add(directory);
+    try {
+      if ((await stat(join(claudeProjectDir(cwd, directory), `${sessionId}.jsonl`))).isFile()) return directory;
+    } catch {
+      // Missing or unreadable: try the next candidate.
+    }
+  }
+  return undefined;
 }
 
 function normalizeProjectPath(input: string): string {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { execCommand } from "@getpaseo/plugin/server";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
@@ -55,7 +56,7 @@ import { materializeImageOutput, renderImageOutputMarkdown } from "./image-outpu
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
 import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
 import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration, claudeForkEnvironment } from "./claude-fork-coordinator";
-import { resolveClaudeConfigDir, resolveConfiguredClaudeConfigDir } from "./claude-project-dir";
+import { findClaudeTranscriptConfigDir, resolveClaudeConfigDir, resolveConfiguredClaudeConfigDir } from "./claude-project-dir";
 import { replayTimelineEvent } from "./provider-replay-timestamps";
 import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
@@ -691,10 +692,23 @@ async function openSession(
   // setting, then CLAUDE_CONFIG_DIR, then ~/.claude. Persisting the resolved
   // value makes the session self-describing across daemon restarts.
   const values = await context.loadValues();
-  if ((input.config.env["CLAUDE_CONFIG_DIR"] ?? "").trim().length === 0) {
+  const configuredConfigDir = resolveConfiguredClaudeConfigDir(values.claudeConfigDir);
+  const declaredConfigDir = (input.config.env["CLAUDE_CONFIG_DIR"] ?? "").trim();
+  const storedSessionId = readStoredSessionId(input.persistence);
+  let effectiveConfigDir = declaredConfigDir.length > 0 ? declaredConfigDir : configuredConfigDir;
+  if (storedSessionId !== null) {
+    // The recorded directory is a declaration, not proof: wrappers such as
+    // reclaude sync transcripts into their account config, so a session
+    // persisted before that move would replay empty and resume from a
+    // directory the CLI never reads. Follow the file that exists.
+    effectiveConfigDir = await findClaudeTranscriptConfigDir(input.config.cwd, storedSessionId, [
+      effectiveConfigDir, configuredConfigDir, resolveClaudeConfigDir(), path.join(homedir(), ".claude"),
+    ]) ?? effectiveConfigDir;
+  }
+  const configDirChanged = effectiveConfigDir !== declaredConfigDir;
+  if (configDirChanged) {
     input = { ...input, config: { ...input.config,
-      env: { ...input.config.env,
-        CLAUDE_CONFIG_DIR: resolveConfiguredClaudeConfigDir(values.claudeConfigDir) } } };
+      env: { ...input.config.env, CLAUDE_CONFIG_DIR: effectiveConfigDir } } };
   }
   const contextKey = resolveTranslationContextKey(input.config.env, input.sessionId);
   let translatedSystemPrompt: string | null = null;
@@ -738,7 +752,7 @@ async function openSession(
     query: null,
     abort: new AbortController(),
     pump: null,
-    claudeSessionId: readStoredSessionId(input.persistence),
+    claudeSessionId: storedSessionId,
     active: null,
     mainTurnInFlight: false,
     mainTurnOrdinal: 0,
@@ -820,8 +834,13 @@ async function openSession(
       }
       if (!session.claudeSessionId) throw new Error("Send a message first so Claude has a persisted session to fork");
       if (session.query) await resetQuery(session, context.emit);
+      const declared = path.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir());
+      // The live transcript may have moved with the wrapper's account config
+      // since this session opened; clone from the directory that holds it.
+      const configDir = await findClaudeTranscriptConfigDir(session.config.cwd, session.claudeSessionId,
+        [declared, configuredConfigDir, resolveClaudeConfigDir(), path.join(homedir(), ".claude")]) ?? declared;
       return { claudeSessionId: session.claudeSessionId,
-        configDir: path.resolve(session.config.env["CLAUDE_CONFIG_DIR"] ?? resolveClaudeConfigDir()),
+        configDir,
         config: { ...session.config,
           ...(context.cacheCoordinator ? { providerOptions: { ...session.config.providerOptions,
             translateClaudeCache: context.cacheCoordinator.status(contextKey).preferences } } : {}),
@@ -843,6 +862,12 @@ async function openSession(
     title: input.config.title,
     cwd: input.config.cwd,
   });
+  // A resume normally keeps the stored handle as-is; report the corrected
+  // directory explicitly so later opens do not depend on the old setting or
+  // on the directory a wrapper has already migrated away from.
+  if (configDirChanged && session.claudeSessionId !== null) {
+    context.emit({ type: "session.persistence", sessionId: session.id, persistence: claudePersistence(session) });
+  }
   context.emit({ type: "session.commands", sessionId: session.id, commands: [{ name: "rewind",
     description: "Rewind tracked files to a previous user message", argumentHint: "[user_message_uuid]" }] });
   await replayHistory(session, input.history, context);

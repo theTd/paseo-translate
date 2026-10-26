@@ -2536,6 +2536,62 @@ describe("translate claude provider extended protocol", () => {
     }
   });
 
+  it("replays a stored session from the dir that actually holds its transcript", async () => {
+    // A wrapper such as reclaude moves Claude storage into its account config
+    // after the session id was persisted against the old directory.
+    const recorded = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-recorded-"));
+    const actual = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-actual-"));
+    const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));
+    try {
+      const projectDir = claudeProjectDirOf(cwd, actual);
+      await fsp.mkdir(projectDir, { recursive: true });
+      await fsp.writeFile(
+        pathP.join(projectDir, "cs-moved.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Moved dir history" }] },
+          parent_tool_use_id: null,
+          timestamp: "2025-01-01T00:00:00Z",
+        })}\n`,
+      );
+      const { fake, events, send } = await createHarness({ claudeConfigDir: actual });
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd, env: { CLAUDE_CONFIG_DIR: recorded } },
+        persistence: { version: 1, data: { claudeSessionId: "cs-moved", configDir: recorded } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      expect(events.find(
+        (event) => event.type === "timeline.item" && event.item.type === "user_message",
+      )).toMatchObject({ item: { text: "Moved dir history" } });
+      const opened = events.find((event) => event.type === "session.opened");
+      if (!opened || opened.type !== "session.opened") throw new Error("session.opened missing");
+      // The corrected directory is persisted so later opens skip the search.
+      expect(opened.persistence).toMatchObject({
+        version: 1,
+        data: { claudeSessionId: "cs-moved", configDir: pathP.resolve(actual) },
+      });
+      // The resumed handle is only replaced when the provider reports it.
+      expect(events.find((event) => event.type === "session.persistence")).toMatchObject({
+        sessionId: "s",
+        persistence: { version: 1, data: { claudeSessionId: "cs-moved", configDir: pathP.resolve(actual) } },
+      });
+      fake.use(async function* () {
+        yield resultSuccess("cs-moved", "ok");
+      });
+      await send(promptInput("Hello", "m-moved"));
+      await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+      expect(fake.state.allOptions.at(-1)?.env).toMatchObject({
+        CLAUDE_CONFIG_DIR: pathP.resolve(actual),
+      });
+    } finally {
+      await fsp.rm(recorded, { recursive: true, force: true });
+      await fsp.rm(actual, { recursive: true, force: true });
+      await fsp.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("lists sessions from the configured config dir without the env var", async () => {
     const configDir = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-list-"));
     const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));
