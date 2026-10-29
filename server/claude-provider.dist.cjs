@@ -32529,12 +32529,15 @@ var import_node_crypto3 = require("node:crypto");
 // server/memory-probe.ts
 var MEGABYTE = 1024 * 1024;
 var LINE_PREFIX = "[translate] mem";
+var extraSink;
+function defaultLog(line) {
+  console.log(line);
+  extraSink?.(line);
+}
 function createSizeWatch(options) {
-  const log = options.log ?? ((line) => {
-    console.log(line);
-  });
-  const step = options.stepChars ?? 65536;
-  let next = step;
+  const log = options.log ?? defaultLog;
+  const step3 = options.stepChars ?? 65536;
+  let next = step3;
   let peak = 0;
   return {
     /** Notes the current size; logs only when it crosses the next magnitude. */
@@ -32551,8 +32554,33 @@ function createSizeWatch(options) {
     }
   };
 }
+function createStepTracer(options = {}) {
+  const log = options.log ?? defaultLog;
+  const slowMs = options.slowMs ?? 1e3;
+  const now = options.now ?? (() => Date.now());
+  let nextId = 0;
+  return {
+    /** Logs `step enter`; the returned function logs a slow `step exit`. */
+    start(name, detail) {
+      const id2 = nextId++;
+      const suffix = detail === void 0 || detail.length === 0 ? "" : ` ${detail}`;
+      log(`${LINE_PREFIX} step enter #${id2} ${name}${suffix}`);
+      const startedAt = now();
+      let finished = false;
+      return () => {
+        if (finished) return;
+        finished = true;
+        const elapsed = now() - startedAt;
+        if (elapsed < slowMs) return;
+        log(`${LINE_PREFIX} step exit #${id2} ${name}${suffix} ms=${elapsed}`);
+      };
+    }
+  };
+}
 
 // server/llm-client.ts
+var step = createStepTracer();
+var ENDPOINT_MAX_BYTES = 8 * 1024 * 1024;
 var LlmRequestCanceledError = class extends Error {
   constructor() {
     super("Translation request canceled");
@@ -32587,6 +32615,7 @@ function createLlmClient(config2, options = {}) {
         config2.protocol === "responses" ? buildResponsesBody(config2, messages, stream) : buildChatBody(config2, messages, stream)
       );
       createSizeWatch({ label: "llm.req" }).report(payload.length, `stream=${stream}`);
+      const donePost = step.start("http.post", `chars=${payload.length} stream=${stream}`);
       const response = await fetchFn(url2, {
         method: "POST",
         headers,
@@ -32595,8 +32624,8 @@ function createLlmClient(config2, options = {}) {
         // Node declarations; bridge them at this boundary through the
         // fetch-side signal type.
         signal: controller.signal
-      });
-      return { response, url: url2, release, touch };
+      }).finally(donePost);
+      return { response, url: url2, release, touch, abort: () => controller.abort() };
     } catch (error62) {
       release();
       if (signal?.aborted) throw new LlmRequestCanceledError();
@@ -32609,16 +32638,18 @@ function createLlmClient(config2, options = {}) {
   return {
     async complete(messages, requestOptions) {
       const signal = requestOptions?.signal;
-      const { response, url: url2, release } = await postCompletions(messages, false, signal);
+      const { response, url: url2, release, abort } = await postCompletions(messages, false, signal);
       let body;
       let status;
       let ok2;
       try {
         status = response.status;
         ok2 = response.ok;
-        body = await response.text();
+        const doneBody = step.start("http.body");
+        body = await readBoundedResponseText(response).finally(doneBody);
         createSizeWatch({ label: "llm.resp" }).report(body.length);
       } catch (error62) {
+        abort();
         if (signal?.aborted) throw new LlmRequestCanceledError();
         throw new Error(
           `Translation endpoint request failed after ${config2.timeoutMs}ms (${url2}): ${describeError(error62)}`,
@@ -32626,6 +32657,10 @@ function createLlmClient(config2, options = {}) {
         );
       } finally {
         release();
+        try {
+          await response.body?.cancel();
+        } catch {
+        }
       }
       if (!ok2) {
         throw new Error(`Translation endpoint returned HTTP ${status}: ${excerpt(body)}`);
@@ -32646,10 +32681,10 @@ function createLlmClient(config2, options = {}) {
     },
     async stream(messages, onDelta, requestOptions) {
       const signal = requestOptions?.signal;
-      const { response, url: url2, release, touch } = await postCompletions(messages, true, signal);
+      const { response, url: url2, release, touch, abort } = await postCompletions(messages, true, signal);
       try {
         if (!response.ok) {
-          const body = await response.text().catch(() => "");
+          const body = await readBoundedResponseText(response).catch(() => "");
           throw new Error(
             `Translation endpoint refused the stream (HTTP ${response.status}): ${excerpt(body)}`
           );
@@ -32659,7 +32694,8 @@ function createLlmClient(config2, options = {}) {
         }
         const contentType = response.headers.get("content-type") ?? "";
         if (!contentType.includes("text/event-stream")) {
-          const body = await response.text();
+          const doneBody = step.start("http.body", "non-sse");
+          const body = await readBoundedResponseText(response).finally(doneBody);
           createSizeWatch({ label: "llm.resp" }).report(body.length, "non-sse");
           let content;
           try {
@@ -32694,6 +32730,7 @@ function createLlmClient(config2, options = {}) {
           throw error62;
         }
       } catch (error62) {
+        abort();
         if (signal?.aborted && !(error62 instanceof LlmRequestCanceledError)) {
           throw new LlmRequestCanceledError();
         }
@@ -32764,57 +32801,134 @@ function readStreamDelta(protocol, parsed) {
   const event = parsed;
   return event.type === "response.output_text.delta" && typeof event.delta === "string" && event.delta.length > 0 ? event.delta : void 0;
 }
+var SSE_EVENT_SLICE = 2048;
+var SSE_MAX_EVENTS = 2e5;
+var SSE_MAX_CHARS = 4e5;
+var SSE_MAX_DURATION_MS = 10 * 6e4;
 async function readSseDeltas(body, onDelta, readDelta, onChunk) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const size = createSizeWatch({ label: "llm.sse" });
+  const wire = createSizeWatch({ label: "llm.wire" });
   const raw = createSizeWatch({ label: "llm.raw" });
+  const events = createSizeWatch({ label: "llm.events", stepChars: 1e4 });
+  const doneLoop = step.start("sse.loop");
   let buffer = "";
   let accumulated = "";
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (value !== void 0) {
-      buffer += decoder.decode(value, { stream: !done });
-      raw.report(buffer.length);
+  let eventCount = 0;
+  let receivedBytes = 0;
+  const startedAt = Date.now();
+  const collect = (data) => {
+    if (accumulated.length + data.length > SSE_MAX_CHARS) {
+      throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_CHARS} characters`);
     }
-    if (done) break;
-    buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
-      accumulated += data;
-      size.report(accumulated.length);
-      onDelta(data);
-    });
-  }
-  buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
     accumulated += data;
     size.report(accumulated.length);
     onDelta(data);
-  });
-  if (accumulated.length === 0) {
-    throw new Error("Translation endpoint streamed no message text");
+  };
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (value !== void 0) {
+        receivedBytes += value.byteLength;
+        wire.report(receivedBytes);
+        if (receivedBytes > ENDPOINT_MAX_BYTES) {
+          throw new Error(`Translation endpoint stream exceeded ${ENDPOINT_MAX_BYTES} bytes`);
+        }
+        raw.report(value.byteLength, "chunk");
+        buffer += decoder.decode(value, { stream: !done });
+        raw.report(buffer.length);
+      }
+      if (done) buffer += decoder.decode();
+      let folded = 0;
+      let yielded = false;
+      do {
+        const slice = consumeSseEvents(buffer, readDelta, onChunk, collect, SSE_EVENT_SLICE);
+        buffer = slice.rest;
+        folded = slice.processed;
+        eventCount += folded;
+        events.report(eventCount);
+        if (eventCount > SSE_MAX_EVENTS) {
+          throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_EVENTS} events`);
+        }
+        if (Date.now() - startedAt > SSE_MAX_DURATION_MS) {
+          throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_DURATION_MS}ms`);
+        }
+        if (folded >= SSE_EVENT_SLICE) {
+          await yieldToEventLoop();
+          yielded = true;
+        }
+      } while (folded >= SSE_EVENT_SLICE);
+      if (done) break;
+      if (!yielded) await yieldToEventLoop();
+    }
+    if (accumulated.length === 0) {
+      throw new Error("Translation endpoint streamed no message text");
+    }
+    return accumulated;
+  } finally {
+    doneLoop();
+    reader.releaseLock();
   }
-  return accumulated;
 }
-function consumeSseEvents(buffer, readDelta, onEvent, onData) {
+function yieldToEventLoop() {
+  return new Promise((resolve6) => {
+    setImmediate(resolve6);
+  });
+}
+async function readBoundedResponseText(response) {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let receivedBytes = 0;
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === void 0) {
+        await yieldToEventLoop();
+        continue;
+      }
+      receivedBytes += value.byteLength;
+      if (receivedBytes > ENDPOINT_MAX_BYTES) {
+        throw new Error(`Translation endpoint response exceeded ${ENDPOINT_MAX_BYTES} bytes`);
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+      await yieldToEventLoop();
+    }
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } finally {
+    reader.releaseLock();
+  }
+}
+function consumeSseEvents(buffer, readDelta, onEvent, onData, budget = Number.POSITIVE_INFINITY) {
   let rest = buffer;
-  for (; ; ) {
+  let processed = 0;
+  while (processed < budget) {
     const boundary = rest.indexOf("\n\n");
-    if (boundary === -1) return rest;
+    if (boundary === -1) break;
     const event = rest.slice(0, boundary);
     rest = rest.slice(boundary + 2);
+    processed += 1;
     for (const line of event.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.slice("data:".length).trim();
       if (payload === "[DONE]") continue;
+      let parsed;
       try {
-        const parsed = JSON.parse(payload);
-        onEvent();
-        const delta = readDelta(parsed);
-        if (delta !== void 0) onData(delta);
+        parsed = JSON.parse(payload);
       } catch {
+        continue;
       }
+      onEvent();
+      const delta = readDelta(parsed);
+      if (delta !== void 0) onData(delta);
     }
   }
+  return { rest, processed };
 }
 function excerpt(body) {
   const flattened = body.replace(/\s+/g, " ").trim();
@@ -33645,8 +33759,8 @@ function cleanRegex(source) {
   const end = source.endsWith("$") ? source.length - 1 : source.length;
   return source.slice(start, end);
 }
-function floatSafeRemainder(val, step) {
-  const ratio = val / step;
+function floatSafeRemainder(val, step3) {
+  const ratio = val / step3;
   const roundedRatio = Math.round(ratio);
   const tolerance = 4 * Number.EPSILON * Math.max(Math.abs(ratio), 1);
   if (Math.abs(ratio - roundedRatio) < tolerance)
@@ -53006,6 +53120,7 @@ function packTranslationBatches(texts, options) {
 }
 
 // server/translate.ts
+var step2 = createStepTracer();
 var ORIGINAL_FRAGMENT_KEY_PREFIX = "user-original:v1:";
 function originalFragmentKey(translatedFragment) {
   const normalized = translatedFragment.trim();
@@ -53028,11 +53143,13 @@ function createTranslator(deps) {
         `Refusing to translate ${text.length} characters (limit ${TRANSLATION_TEXT_LIMIT})`
       );
     }
-    const values = await deps.loadConfig();
+    const doneConfig = step2.start("lookup.config");
+    const values = await deps.loadConfig().finally(doneConfig);
     const pair = resolveLanguagePair(values, direction);
     const systemPrompt = resolveTranslationSystemPrompt(values, pair);
     const context = deps.context;
     const useContext = context !== void 0 && contextKey !== void 0 && values.translationContextEnabled;
+    const doneKey = step2.start("lookup.key", `chars=${text.length}`);
     const key = cacheKey({
       text,
       direction,
@@ -53044,16 +53161,21 @@ function createTranslator(deps) {
       reasoningEffort: values.translationReasoningEffort,
       ...useContext ? { scopeKey: contextKey } : {}
     });
+    doneKey();
     return { key, values, pair, systemPrompt, scopeKey: useContext ? contextKey : void 0 };
   }
   async function setup(text, direction, contextKey) {
     const lookup = await prepareCacheLookup(text, direction, contextKey);
     if ("trivial" in lookup) return lookup;
     const { key, values, pair, systemPrompt, scopeKey } = lookup;
+    const doneSnapshot = step2.start("context.snapshot", `scope=${scopeKey ?? "none"}`);
     const snapshot = scopeKey !== void 0 ? deps.context?.snapshot(scopeKey, direction, {
       hardCapChars: values.translationContextMaxChars * 2
     }) : void 0;
+    doneSnapshot();
+    const doneCache = step2.start("cache.get");
     const cached2 = cache.get(key);
+    doneCache();
     if (cached2 !== void 0) {
       if (scopeKey !== void 0) deps.context?.touch(scopeKey);
       return { cached: cached2 };
@@ -53098,6 +53220,7 @@ ${snapshot.memory}` : systemPrompt;
     return [...prepared.prefixMessages, { role: "user", content: prepared.requestContent }];
   }
   function commitTranslation(prepared, source, translated, direction) {
+    const done = step2.start("commit", `chars=${translated.length}`);
     cache.set(prepared.key, translated);
     if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, source);
     if (prepared.recordContext !== void 0) {
@@ -53108,10 +53231,12 @@ ${snapshot.memory}` : systemPrompt;
         translated
       );
     }
+    done();
   }
   function streamProducer(prepared, source, direction) {
     return async ({ signal, progress }) => {
       let accumulated = "";
+      const done = step2.start("endpoint.stream", `chars=${prepared.requestContent.length}`);
       const translated = await completeStreamFirst(
         prepared.client,
         requestMessages(prepared),
@@ -53120,14 +53245,15 @@ ${snapshot.memory}` : systemPrompt;
           progress(accumulated);
         },
         { signal }
-      );
+      ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
   }
   function completeProducer(prepared, source, direction) {
     return async ({ signal }) => {
-      const translated = await prepared.client.complete(requestMessages(prepared), { signal });
+      const done = step2.start("endpoint.complete", `chars=${prepared.requestContent.length}`);
+      const translated = await prepared.client.complete(requestMessages(prepared), { signal }).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
@@ -53202,12 +53328,12 @@ ${snapshot.memory}` : systemPrompt;
     return parsed;
   }
   function deltaForwarder(onDelta) {
-    let sent = "";
+    let sentChars = 0;
     return (text) => {
-      if (!text.startsWith(sent)) return;
-      const delta = text.slice(sent.length);
-      sent = text;
-      if (delta.length > 0) onDelta(delta);
+      if (text.length <= sentChars) return;
+      const delta = text.slice(sentChars);
+      sentChars = text.length;
+      onDelta(delta);
     };
   }
   function promptDisplayScope(values, contextKey) {
@@ -56191,12 +56317,13 @@ async function openSession(input2, context, capabilities) {
   const storedSessionId = readStoredSessionId(input2.persistence);
   let effectiveConfigDir = declaredConfigDir.length > 0 ? declaredConfigDir : configuredConfigDir;
   if (storedSessionId !== null) {
-    effectiveConfigDir = await findClaudeTranscriptConfigDir(input2.config.cwd, storedSessionId, [
+    const located = await findClaudeTranscriptConfigDir(input2.config.cwd, storedSessionId, [
       effectiveConfigDir,
       configuredConfigDir,
       resolveClaudeConfigDir(),
       import_node_path7.default.join((0, import_node_os4.homedir)(), ".claude")
-    ]) ?? effectiveConfigDir;
+    ]);
+    if (located !== void 0 && located !== import_node_path7.default.resolve(effectiveConfigDir)) effectiveConfigDir = located;
   }
   const configDirChanged = effectiveConfigDir !== declaredConfigDir;
   if (configDirChanged) {

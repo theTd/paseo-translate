@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { completeStreamFirst, createLlmClient, isTranslationCanceled } from "./llm-client";
 
+const ENDPOINT_MAX_BYTES = 8 * 1024 * 1024;
+
 interface CapturedCall {
   url: string;
   init: RequestInit;
@@ -38,6 +40,18 @@ function sseResponse(chunks: string[], status = 200): Response {
   return new Response(stream as unknown as ConstructorParameters<typeof Response>[0], {
     status,
     headers: { "content-type": "text/event-stream" },
+  });
+}
+
+function binaryResponse(chunks: readonly Uint8Array[], contentType: string): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(chunk);
+      controller.close();
+    },
+  });
+  return new Response(stream as unknown as ConstructorParameters<typeof Response>[0], {
+    headers: { "content-type": contentType },
   });
 }
 
@@ -232,6 +246,119 @@ describe("translation endpoint streaming", () => {
     await expect(client.stream([{ role: "user", content: "x" }], () => {})).rejects.toThrow(
       /unexpected response.*Bad Gateway/,
     );
+  });
+});
+
+describe("endpoint resource bounds", () => {
+  const config = {
+    baseUrl: "https://llm.example/v1",
+    apiKey: "k",
+    model: "mt",
+    timeoutMs: 5_000,
+    protocol: "chat-completions" as const,
+  };
+  const messages = [{ role: "user" as const, content: "x" }];
+
+  it.each(["complete", "stream"] as const)("bounds %s JSON bodies before decoding", async (method) => {
+    const client = createLlmClient(config, {
+      fetchFn: (async () => binaryResponse(
+        [new Uint8Array(ENDPOINT_MAX_BYTES + 1)],
+        "application/json",
+      )) as typeof fetch,
+    });
+    const pending = method === "complete"
+      ? client.complete(messages)
+      : client.stream(messages, () => undefined);
+    await expect(pending).rejects.toThrow(`exceeded ${ENDPOINT_MAX_BYTES} bytes`);
+  });
+
+  it("bounds raw SSE bytes before decoding an unterminated event", async () => {
+    const client = createLlmClient(config, {
+      fetchFn: (async () => binaryResponse(
+        [new Uint8Array(ENDPOINT_MAX_BYTES + 1)],
+        "text/event-stream",
+      )) as typeof fetch,
+    });
+    await expect(client.stream(messages, () => undefined)).rejects.toThrow(
+      `stream exceeded ${ENDPOINT_MAX_BYTES} bytes`,
+    );
+  });
+
+  it("yields on small chunks and cancels a capped stream before fallback", async () => {
+    const encoder = new TextEncoder();
+    const frame = "data: {}\n\n".repeat(1_000);
+    let calls = 0;
+    let pulls = 0;
+    let cancels = 0;
+    let checkPhaseTurns = 0;
+    const fetchFn = (async () => {
+      calls += 1;
+      if (calls > 1) return jsonResponse({ choices: [{ message: { content: "fallback" } }] });
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          pulls += 1;
+          if (pulls <= 201) {
+            controller.enqueue(encoder.encode(frame));
+          } else {
+            controller.enqueue(encoder.encode(`${sseData("ok")}data: [DONE]\n\n`));
+            controller.close();
+          }
+        },
+        cancel() {
+          cancels += 1;
+        },
+      });
+      return new Response(body as unknown as ConstructorParameters<typeof Response>[0], {
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as typeof fetch;
+    const client = createLlmClient(config, { fetchFn });
+    const pending = completeStreamFirst(client, messages);
+    setImmediate(() => { checkPhaseTurns += 1; });
+    await expect(pending).resolves.toBe("fallback");
+    expect(calls).toBe(2);
+    expect(cancels).toBe(1);
+    expect(checkPhaseTurns).toBeGreaterThan(0);
+  });
+
+  it("bounds and yields during a final read that carries a value", async () => {
+    const encoder = new TextEncoder();
+    let releases = 0;
+    let checkPhaseTurns = 0;
+    const reader = {
+      read: async () => ({
+        done: true,
+        value: encoder.encode(`${sseData("ok")}${"data: {}\n\n".repeat(2_048)}`),
+      }),
+      releaseLock() {
+        releases += 1;
+      },
+    };
+    const body = {
+      getReader: () => reader,
+      cancel: async () => undefined,
+    } as unknown as NonNullable<Response["body"]>;
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/event-stream" }),
+      body,
+    } as unknown as Response;
+    const client = createLlmClient(config, { fetchFn: (async () => response) as typeof fetch });
+    const pending = client.stream(messages, () => undefined);
+    setImmediate(() => { checkPhaseTurns += 1; });
+    await expect(pending).resolves.toBe("ok");
+    expect(checkPhaseTurns).toBeGreaterThan(0);
+    expect(releases).toBe(1);
+  });
+
+  it("propagates consumer failures instead of hiding them as bad JSON", async () => {
+    const client = createLlmClient(config, {
+      fetchFn: capturingFetch([], () => sseResponse([sseData("a")])),
+    });
+    await expect(client.stream(messages, () => {
+      throw new Error("consumer failed");
+    })).rejects.toThrow("consumer failed");
   });
 });
 

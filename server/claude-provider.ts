@@ -701,9 +701,13 @@ async function openSession(
     // reclaude sync transcripts into their account config, so a session
     // persisted before that move would replay empty and resume from a
     // directory the CLI never reads. Follow the file that exists.
-    effectiveConfigDir = await findClaudeTranscriptConfigDir(input.config.cwd, storedSessionId, [
+    const located = await findClaudeTranscriptConfigDir(input.config.cwd, storedSessionId, [
       effectiveConfigDir, configuredConfigDir, resolveClaudeConfigDir(), path.join(homedir(), ".claude"),
-    ]) ?? effectiveConfigDir;
+    ]);
+    // Adopt only a genuinely different directory. A match that resolves to
+    // the declared path keeps it verbatim (a relative CLAUDE_CONFIG_DIR is
+    // legal), so an already-correct install sees no change at all.
+    if (located !== undefined && located !== path.resolve(effectiveConfigDir)) effectiveConfigDir = located;
   }
   const configDirChanged = effectiveConfigDir !== declaredConfigDir;
   if (configDirChanged) {

@@ -26,7 +26,7 @@ import {
   defaultTranslationCacheDirectory,
 } from "./server/translation-cache-store";
 import { createTranslationContextManager } from "./server/translation-context";
-import { createMemoryProbe, memoryProbeOptionsFromEnv } from "./server/memory-probe";
+import { createFileDiagnosticSink, createMemoryProbe, createStepTracer, memoryProbeOptionsFromEnv, setDiagnosticSink } from "./server/memory-probe";
 import { withNotificationTranslation } from "./server/notification-provider";
 import {
   assertConfigured,
@@ -85,6 +85,11 @@ export default function contribute(server: PluginServerContext) {
   // gauges are the stores every provider writes through — cache, in-flight
   // registry, context scopes — so a climbing heap either shows up in one of
   // them or is held inside a provider's own per-session state.
+  // Diagnostics go to a file this plugin owns, not only to the host's log:
+  // a rotated daemon log has already swallowed a full crash trace once.
+  setDiagnosticSink(createFileDiagnosticSink({
+    file: path.join(defaultTranslationCacheDirectory(), "trace.log"),
+  }));
   const memoryProbe = createMemoryProbe(memoryProbeOptionsFromEnv());
   memoryProbe.track({ name: "cache", read: () => cacheStore.stats() });
   memoryProbe.track({ name: "inflight", read: () => inflight.stats() });
@@ -120,7 +125,15 @@ export default function contribute(server: PluginServerContext) {
   server.registerProvider(withNotificationTranslation(createTranslateClaudeProvider({ ...deps, forkCoordinator, cacheCoordinator }), deps));
   server.handle(forkClaudeSessionRpc, createClaudeSessionForkHandler({ coordinator: forkCoordinator }));
   server.registerProvider(withNotificationTranslation(createTranslateCodexProvider(deps), deps));
-  server.handle(translateTextRpc, createTranslateHandler(deps));
+  const step = createStepTracer();
+  const translateHandler = createTranslateHandler(deps);
+  // The daemon's `Plugin RPC timed out: translate.invoke` is the only signal a
+  // stalled translation leaves today; pairing it with a step marker says
+  // whether the handler itself is stuck or the plugin never got to it.
+  server.handle(translateTextRpc, (input) => {
+    const done = step.start("rpc.translate.invoke", `chars=${input.text.length}`);
+    return translateHandler(input).finally(done);
+  });
   const streamManager = createTranslateStreamManager(deps);
   server.handle(translateStreamStartRpc, createTranslateStreamStartHandler(streamManager));
   server.handle(translateStreamPollRpc, createTranslateStreamPollHandler(streamManager));

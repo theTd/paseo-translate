@@ -1,4 +1,11 @@
 import { completeStreamFirst, createLlmClient, type ChatMessage } from "./llm-client";
+import { createStepTracer } from "./memory-probe";
+
+/**
+ * Compaction runs from a timer, so its step markers are the only trace of a
+ * background path that can stall the host on its own.
+ */
+const step = createStepTracer();
 import type { TranslationCacheStore } from "./translation-cache-store";
 import {
   resolveLanguagePair,
@@ -235,7 +242,8 @@ export function createTranslationContextManager(deps: TranslationContextManagerD
       if (state.chars < values.translationContextMaxChars) continue;
       if (state.lastActivityAt === 0 || timestamp - state.lastActivityAt < idleMs) continue;
       try {
-        await compact(scopeKey, state, values);
+        const done = step.start("context.compact", `scope=${scopeKey} chars=${state.chars}`);
+        await compact(scopeKey, state, values).finally(done);
       } catch {
         // Fail soft: compaction never blocks translation; retry next sweep.
       }
@@ -246,7 +254,8 @@ export function createTranslationContextManager(deps: TranslationContextManagerD
   const timer =
     intervalMs > 0
       ? setInterval(() => {
-          void sweep().catch(() => undefined);
+          const done = step.start("sweep", `scopes=${scopes.size}`);
+          void sweep().catch(() => undefined).finally(done);
         }, intervalMs)
       : null;
   // The sweep timer must never keep a daemon/plugin process (or a test run)

@@ -2592,6 +2592,96 @@ describe("translate claude provider extended protocol", () => {
     }
   });
 
+  it("keeps an already-correct config dir untouched for a standard Claude install", async () => {
+    // No reclaude, no setting: the stored handle and the file already agree.
+    const configDir = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-native-"));
+    const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    delete process.env["CLAUDE_CONFIG_DIR"];
+    try {
+      const projectDir = claudeProjectDirOf(cwd, configDir);
+      await fsp.mkdir(projectDir, { recursive: true });
+      await fsp.writeFile(
+        pathP.join(projectDir, "cs-native.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Native dir history" }] },
+          parent_tool_use_id: null,
+          timestamp: "2025-01-01T00:00:00Z",
+        })}\n`,
+      );
+      const stored = pathP.resolve(configDir);
+      const { fake, events, send } = await createHarness();
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd, env: { CLAUDE_CONFIG_DIR: stored } },
+        persistence: { version: 1, data: { claudeSessionId: "cs-native", configDir: stored } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      expect(events.find(
+        (event) => event.type === "timeline.item" && event.item.type === "user_message",
+      )).toMatchObject({ item: { text: "Native dir history" } });
+      // Nothing moved: no handle rewrite, and the SDK keeps the same directory.
+      expect(events.some((event) => event.type === "session.persistence")).toBe(false);
+      fake.use(async function* () {
+        yield resultSuccess("cs-native", "ok");
+      });
+      await send(promptInput("Hello", "m-native"));
+      await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+      expect(fake.state.allOptions.at(-1)?.env).toMatchObject({ CLAUDE_CONFIG_DIR: stored });
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fsp.rm(configDir, { recursive: true, force: true });
+      await fsp.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a relative declared config dir verbatim when the file is there", async () => {
+    const configDir = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-relative-"));
+    const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));
+    const relative = pathP.relative(process.cwd(), configDir);
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    delete process.env["CLAUDE_CONFIG_DIR"];
+    try {
+      const projectDir = claudeProjectDirOf(cwd, configDir);
+      await fsp.mkdir(projectDir, { recursive: true });
+      await fsp.writeFile(
+        pathP.join(projectDir, "cs-relative.jsonl"),
+        `${JSON.stringify({
+          type: "user",
+          message: { content: [{ type: "text", text: "Relative dir history" }] },
+          parent_tool_use_id: null,
+          timestamp: "2025-01-01T00:00:00Z",
+        })}\n`,
+      );
+      const { fake, events, send } = await createHarness();
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd, env: { CLAUDE_CONFIG_DIR: relative } },
+        persistence: { version: 1, data: { claudeSessionId: "cs-relative", configDir: relative } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      expect(events.find(
+        (event) => event.type === "timeline.item" && event.item.type === "user_message",
+      )).toMatchObject({ item: { text: "Relative dir history" } });
+      expect(events.some((event) => event.type === "session.persistence")).toBe(false);
+      fake.use(async function* () {
+        yield resultSuccess("cs-relative", "ok");
+      });
+      await send(promptInput("Hello", "m-relative"));
+      await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+      expect(fake.state.allOptions.at(-1)?.env).toMatchObject({ CLAUDE_CONFIG_DIR: relative });
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fsp.rm(configDir, { recursive: true, force: true });
+      await fsp.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("lists sessions from the configured config dir without the env var", async () => {
     const configDir = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-list-"));
     const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));

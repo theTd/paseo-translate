@@ -11,6 +11,13 @@ timeout stays its hard bound. Streaming calls bound idle time instead of total
 time: the timeout restarts on every received chunk, so a long translation that
 keeps streaming is never cut off, while a stalled stream still fails.
 
+Every unary, JSON-to-stream, and SSE response has an **8 MiB wire-byte ceiling**.
+SSE additionally stops after **200,000 events**, **400,000 translated characters**,
+or **10 minutes**. The reader yields to the event loop after every network chunk
+and every 2,048 events, including the final chunk, so continuous traffic cannot
+starve timers and diagnostics. A parser, size, or downstream callback failure
+aborts and cancels the original request before stream-first fallback starts.
+
 The agent's context stays purely in the agent language — it never sees the user
 language, and the canonical timeline keeps what each side actually said. The
 user-language rendering of replies exists only in the app's plugin view.
