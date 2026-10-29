@@ -32528,17 +32528,26 @@ var import_node_crypto3 = require("node:crypto");
 
 // server/memory-probe.ts
 var MEGABYTE = 1024 * 1024;
+var DIAGNOSTIC_PROBES_ENV = "TRANSLATE_DIAGNOSTIC_PROBES";
+function diagnosticProbesEnabled(env = process.env) {
+  return env[DIAGNOSTIC_PROBES_ENV] === "1";
+}
 var LINE_PREFIX = "[translate] mem";
+var extraSink;
+function defaultLog(line) {
+  console.log(line);
+  extraSink?.(line);
+}
 function createSizeWatch(options) {
-  const log = options.log ?? ((line) => {
-    console.log(line);
-  });
-  const step = options.stepChars ?? 65536;
-  let next = step;
+  const log = options.log ?? defaultLog;
+  const enabled = () => options.log !== void 0 || diagnosticProbesEnabled();
+  const step7 = options.stepChars ?? 65536;
+  let next = step7;
   let peak = 0;
   return {
     /** Notes the current size; logs only when it crosses the next magnitude. */
     report(chars, detail) {
+      if (!enabled()) return;
       if (chars > peak) peak = chars;
       if (chars < next) return;
       while (next <= chars) next *= 2;
@@ -32551,8 +32560,35 @@ function createSizeWatch(options) {
     }
   };
 }
+function createStepTracer(options = {}) {
+  const log = options.log ?? defaultLog;
+  const enabled = () => options.log !== void 0 || diagnosticProbesEnabled();
+  const slowMs = options.slowMs ?? 1e3;
+  const now = options.now ?? (() => Date.now());
+  let nextId = 0;
+  return {
+    /** Logs `step enter`; the returned function logs a slow `step exit`. */
+    start(name, detail) {
+      if (!enabled()) return () => void 0;
+      const id2 = nextId++;
+      const suffix = detail === void 0 || detail.length === 0 ? "" : ` ${detail}`;
+      log(`${LINE_PREFIX} step enter #${id2} ${name}${suffix}`);
+      const startedAt = now();
+      let finished = false;
+      return () => {
+        if (finished) return;
+        finished = true;
+        const elapsed = now() - startedAt;
+        if (elapsed < slowMs) return;
+        log(`${LINE_PREFIX} step exit #${id2} ${name}${suffix} ms=${elapsed}`);
+      };
+    }
+  };
+}
 
 // server/llm-client.ts
+var step = createStepTracer();
+var ENDPOINT_MAX_BYTES = 8 * 1024 * 1024;
 var LlmRequestCanceledError = class extends Error {
   constructor() {
     super("Translation request canceled");
@@ -32587,6 +32623,7 @@ function createLlmClient(config2, options = {}) {
         config2.protocol === "responses" ? buildResponsesBody(config2, messages, stream) : buildChatBody(config2, messages, stream)
       );
       createSizeWatch({ label: "llm.req" }).report(payload.length, `stream=${stream}`);
+      const donePost = step.start("http.post", `chars=${payload.length} stream=${stream}`);
       const response = await fetchFn(url2, {
         method: "POST",
         headers,
@@ -32595,8 +32632,8 @@ function createLlmClient(config2, options = {}) {
         // Node declarations; bridge them at this boundary through the
         // fetch-side signal type.
         signal: controller.signal
-      });
-      return { response, url: url2, release, touch };
+      }).finally(donePost);
+      return { response, url: url2, release, touch, abort: () => controller.abort() };
     } catch (error62) {
       release();
       if (signal?.aborted) throw new LlmRequestCanceledError();
@@ -32609,16 +32646,18 @@ function createLlmClient(config2, options = {}) {
   return {
     async complete(messages, requestOptions) {
       const signal = requestOptions?.signal;
-      const { response, url: url2, release } = await postCompletions(messages, false, signal);
+      const { response, url: url2, release, abort } = await postCompletions(messages, false, signal);
       let body;
       let status;
       let ok2;
       try {
         status = response.status;
         ok2 = response.ok;
-        body = await response.text();
+        const doneBody = step.start("http.body");
+        body = await readBoundedResponseText(response).finally(doneBody);
         createSizeWatch({ label: "llm.resp" }).report(body.length);
       } catch (error62) {
+        abort();
         if (signal?.aborted) throw new LlmRequestCanceledError();
         throw new Error(
           `Translation endpoint request failed after ${config2.timeoutMs}ms (${url2}): ${describeError(error62)}`,
@@ -32626,6 +32665,10 @@ function createLlmClient(config2, options = {}) {
         );
       } finally {
         release();
+        try {
+          await response.body?.cancel();
+        } catch {
+        }
       }
       if (!ok2) {
         throw new Error(`Translation endpoint returned HTTP ${status}: ${excerpt(body)}`);
@@ -32646,10 +32689,10 @@ function createLlmClient(config2, options = {}) {
     },
     async stream(messages, onDelta, requestOptions) {
       const signal = requestOptions?.signal;
-      const { response, url: url2, release, touch } = await postCompletions(messages, true, signal);
+      const { response, url: url2, release, touch, abort } = await postCompletions(messages, true, signal);
       try {
         if (!response.ok) {
-          const body = await response.text().catch(() => "");
+          const body = await readBoundedResponseText(response).catch(() => "");
           throw new Error(
             `Translation endpoint refused the stream (HTTP ${response.status}): ${excerpt(body)}`
           );
@@ -32659,7 +32702,8 @@ function createLlmClient(config2, options = {}) {
         }
         const contentType = response.headers.get("content-type") ?? "";
         if (!contentType.includes("text/event-stream")) {
-          const body = await response.text();
+          const doneBody = step.start("http.body", "non-sse");
+          const body = await readBoundedResponseText(response).finally(doneBody);
           createSizeWatch({ label: "llm.resp" }).report(body.length, "non-sse");
           let content;
           try {
@@ -32694,6 +32738,7 @@ function createLlmClient(config2, options = {}) {
           throw error62;
         }
       } catch (error62) {
+        abort();
         if (signal?.aborted && !(error62 instanceof LlmRequestCanceledError)) {
           throw new LlmRequestCanceledError();
         }
@@ -32764,57 +32809,152 @@ function readStreamDelta(protocol, parsed) {
   const event = parsed;
   return event.type === "response.output_text.delta" && typeof event.delta === "string" && event.delta.length > 0 ? event.delta : void 0;
 }
+var SSE_EVENT_SLICE = 2048;
+var SSE_MAX_EVENTS = 2e5;
+var SSE_MAX_CHARS = 4e5;
+var SSE_MAX_DURATION_MS = 10 * 6e4;
 async function readSseDeltas(body, onDelta, readDelta, onChunk) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const size = createSizeWatch({ label: "llm.sse" });
+  const wire = createSizeWatch({ label: "llm.wire" });
   const raw = createSizeWatch({ label: "llm.raw" });
+  const events = createSizeWatch({ label: "llm.events", stepChars: 1e4 });
+  const doneLoop = step.start("sse.loop");
   let buffer = "";
   let accumulated = "";
-  for (; ; ) {
-    const { done, value } = await reader.read();
-    if (value !== void 0) {
-      buffer += decoder.decode(value, { stream: !done });
-      raw.report(buffer.length);
+  let eventCount = 0;
+  let receivedBytes = 0;
+  const startedAt = Date.now();
+  const collect = (data) => {
+    if (accumulated.length + data.length > SSE_MAX_CHARS) {
+      throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_CHARS} characters`);
     }
-    if (done) break;
-    buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
-      accumulated += data;
-      size.report(accumulated.length);
-      onDelta(data);
-    });
-  }
-  buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
     accumulated += data;
     size.report(accumulated.length);
-    onDelta(data);
-  });
-  if (accumulated.length === 0) {
-    throw new Error("Translation endpoint streamed no message text");
+    const doneDelta = step.start("sse.delta", `chars=${data.length}`);
+    try {
+      onDelta(data);
+    } finally {
+      doneDelta();
+    }
+  };
+  try {
+    for (; ; ) {
+      const doneRead = step.start("sse.read");
+      const { done, value } = await reader.read().finally(doneRead);
+      if (value !== void 0) {
+        receivedBytes += value.byteLength;
+        wire.report(receivedBytes);
+        if (receivedBytes > ENDPOINT_MAX_BYTES) {
+          throw new Error(`Translation endpoint stream exceeded ${ENDPOINT_MAX_BYTES} bytes`);
+        }
+        raw.report(value.byteLength, "chunk");
+        const doneDecode = step.start("sse.decode", `bytes=${value.byteLength} done=${done}`);
+        buffer += decoder.decode(value, { stream: !done });
+        doneDecode();
+        raw.report(buffer.length);
+      }
+      if (done) {
+        const doneDecode = step.start("sse.decode", "final");
+        buffer += decoder.decode();
+        doneDecode();
+      }
+      let folded = 0;
+      let yielded = false;
+      do {
+        const doneFold = step.start("sse.fold", `buffered=${buffer.length}`);
+        const slice = consumeSseEvents(buffer, readDelta, onChunk, collect, SSE_EVENT_SLICE);
+        doneFold();
+        buffer = slice.rest;
+        folded = slice.processed;
+        eventCount += folded;
+        events.report(eventCount);
+        if (eventCount > SSE_MAX_EVENTS) {
+          throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_EVENTS} events`);
+        }
+        if (Date.now() - startedAt > SSE_MAX_DURATION_MS) {
+          throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_DURATION_MS}ms`);
+        }
+        if (folded >= SSE_EVENT_SLICE) {
+          const doneYield = step.start("sse.yield", "slice");
+          await yieldToEventLoop().finally(doneYield);
+          yielded = true;
+        }
+      } while (folded >= SSE_EVENT_SLICE);
+      if (done) break;
+      if (!yielded) {
+        const doneYield = step.start("sse.yield", "chunk");
+        await yieldToEventLoop().finally(doneYield);
+      }
+    }
+    if (accumulated.length === 0) {
+      throw new Error("Translation endpoint streamed no message text");
+    }
+    return accumulated;
+  } finally {
+    doneLoop();
+    reader.releaseLock();
   }
-  return accumulated;
 }
-function consumeSseEvents(buffer, readDelta, onEvent, onData) {
+function yieldToEventLoop() {
+  return new Promise((resolve6) => {
+    setImmediate(resolve6);
+  });
+}
+async function readBoundedResponseText(response) {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks = [];
+  let receivedBytes = 0;
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === void 0) {
+        await yieldToEventLoop();
+        continue;
+      }
+      receivedBytes += value.byteLength;
+      if (receivedBytes > ENDPOINT_MAX_BYTES) {
+        throw new Error(`Translation endpoint response exceeded ${ENDPOINT_MAX_BYTES} bytes`);
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+      await yieldToEventLoop();
+    }
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } finally {
+    reader.releaseLock();
+  }
+}
+function consumeSseEvents(buffer, readDelta, onEvent, onData, budget = Number.POSITIVE_INFINITY) {
   let rest = buffer;
-  for (; ; ) {
+  let processed = 0;
+  while (processed < budget) {
     const boundary = rest.indexOf("\n\n");
-    if (boundary === -1) return rest;
+    if (boundary === -1) break;
     const event = rest.slice(0, boundary);
     rest = rest.slice(boundary + 2);
+    processed += 1;
     for (const line of event.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.slice("data:".length).trim();
       if (payload === "[DONE]") continue;
+      let parsed;
       try {
-        const parsed = JSON.parse(payload);
-        onEvent();
-        const delta = readDelta(parsed);
-        if (delta !== void 0) onData(delta);
+        parsed = JSON.parse(payload);
       } catch {
+        continue;
       }
+      onEvent();
+      const delta = readDelta(parsed);
+      if (delta !== void 0) onData(delta);
     }
   }
+  return { rest, processed };
 }
 function excerpt(body) {
   const flattened = body.replace(/\s+/g, " ").trim();
@@ -32835,6 +32975,7 @@ async function completeStreamFirst(client, messages, onDelta = () => void 0, opt
 }
 
 // server/translation-inflight.ts
+var step2 = createStepTracer();
 function createTranslationInflightRegistry() {
   const entries = /* @__PURE__ */ new Map();
   function wait(key, entry, options) {
@@ -32906,8 +33047,10 @@ function createTranslationInflightRegistry() {
       entry.done = (async () => produce({
         signal: controller.signal,
         progress(text) {
+          const done = step2.start("inflight.progress", `chars=${text.length} listeners=${entry.listeners.size}`);
           entry.partial = text;
           for (const listener of entry.listeners) safeNotify(listener, text);
+          done();
         }
       }))().finally(() => {
         if (entries.get(key) === entry) entries.delete(key);
@@ -33645,8 +33788,8 @@ function cleanRegex(source) {
   const end = source.endsWith("$") ? source.length - 1 : source.length;
   return source.slice(start, end);
 }
-function floatSafeRemainder(val, step) {
-  const ratio = val / step;
+function floatSafeRemainder(val, step7) {
+  const ratio = val / step7;
   const roundedRatio = Math.round(ratio);
   const tolerance = 4 * Number.EPSILON * Math.max(Math.abs(ratio), 1);
   if (Math.abs(ratio - roundedRatio) < tolerance)
@@ -52929,6 +53072,7 @@ function evictOldestIfNeeded(entries, maxEntries) {
 }
 
 // server/prompt-text.ts
+var step3 = createStepTracer();
 async function translatePromptFragment(text, translate) {
   const parts = promptTranslationParts(text);
   if (parts === null) return text;
@@ -53006,6 +53150,7 @@ function packTranslationBatches(texts, options) {
 }
 
 // server/translate.ts
+var step4 = createStepTracer();
 var ORIGINAL_FRAGMENT_KEY_PREFIX = "user-original:v1:";
 function originalFragmentKey(translatedFragment) {
   const normalized = translatedFragment.trim();
@@ -53028,11 +53173,13 @@ function createTranslator(deps) {
         `Refusing to translate ${text.length} characters (limit ${TRANSLATION_TEXT_LIMIT})`
       );
     }
-    const values = await deps.loadConfig();
+    const doneConfig = step4.start("lookup.config");
+    const values = await deps.loadConfig().finally(doneConfig);
     const pair = resolveLanguagePair(values, direction);
     const systemPrompt = resolveTranslationSystemPrompt(values, pair);
     const context = deps.context;
     const useContext = context !== void 0 && contextKey !== void 0 && values.translationContextEnabled;
+    const doneKey = step4.start("lookup.key", `chars=${text.length}`);
     const key = cacheKey({
       text,
       direction,
@@ -53044,16 +53191,21 @@ function createTranslator(deps) {
       reasoningEffort: values.translationReasoningEffort,
       ...useContext ? { scopeKey: contextKey } : {}
     });
+    doneKey();
     return { key, values, pair, systemPrompt, scopeKey: useContext ? contextKey : void 0 };
   }
   async function setup(text, direction, contextKey) {
     const lookup = await prepareCacheLookup(text, direction, contextKey);
     if ("trivial" in lookup) return lookup;
     const { key, values, pair, systemPrompt, scopeKey } = lookup;
+    const doneSnapshot = step4.start("context.snapshot", `scope=${scopeKey ?? "none"}`);
     const snapshot = scopeKey !== void 0 ? deps.context?.snapshot(scopeKey, direction, {
       hardCapChars: values.translationContextMaxChars * 2
     }) : void 0;
+    doneSnapshot();
+    const doneCache = step4.start("cache.get");
     const cached2 = cache.get(key);
+    doneCache();
     if (cached2 !== void 0) {
       if (scopeKey !== void 0) deps.context?.touch(scopeKey);
       return { cached: cached2 };
@@ -53098,6 +53250,7 @@ ${snapshot.memory}` : systemPrompt;
     return [...prepared.prefixMessages, { role: "user", content: prepared.requestContent }];
   }
   function commitTranslation(prepared, source, translated, direction) {
+    const done = step4.start("commit", `chars=${translated.length}`);
     cache.set(prepared.key, translated);
     if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, source);
     if (prepared.recordContext !== void 0) {
@@ -53108,26 +53261,31 @@ ${snapshot.memory}` : systemPrompt;
         translated
       );
     }
+    done();
   }
   function streamProducer(prepared, source, direction) {
     return async ({ signal, progress }) => {
       let accumulated = "";
+      const done = step4.start("endpoint.stream", `chars=${prepared.requestContent.length}`);
       const translated = await completeStreamFirst(
         prepared.client,
         requestMessages(prepared),
         (delta) => {
+          const doneDelta = step4.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
           accumulated += delta;
           progress(accumulated);
+          doneDelta();
         },
         { signal }
-      );
+      ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
   }
   function completeProducer(prepared, source, direction) {
     return async ({ signal }) => {
-      const translated = await prepared.client.complete(requestMessages(prepared), { signal });
+      const done = step4.start("endpoint.complete", `chars=${prepared.requestContent.length}`);
+      const translated = await prepared.client.complete(requestMessages(prepared), { signal }).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
@@ -53202,12 +53360,14 @@ ${snapshot.memory}` : systemPrompt;
     return parsed;
   }
   function deltaForwarder(onDelta) {
-    let sent = "";
+    let sentChars = 0;
     return (text) => {
-      if (!text.startsWith(sent)) return;
-      const delta = text.slice(sent.length);
-      sent = text;
-      if (delta.length > 0) onDelta(delta);
+      if (text.length <= sentChars) return;
+      const delta = text.slice(sentChars);
+      sentChars = text.length;
+      const done = step4.start("translate.forward", `chars=${text.length} delta=${delta.length}`);
+      onDelta(delta);
+      done();
     };
   }
   function promptDisplayScope(values, contextKey) {
@@ -54232,6 +54392,7 @@ ${output2}`.trim() };
 }
 
 // server/claude-message-stream.ts
+var step5 = createStepTracer();
 var ClaudeMessageStream = class {
   constructor() {
     this.messages = /* @__PURE__ */ new Map();
@@ -54294,6 +54455,7 @@ var ClaudeMessageStream = class {
     return state;
   }
   snapshots(state) {
+    const done = step5.start("claude.msg.snapshot", `blocks=${state.blocks.size}`);
     const items = [];
     const blocks = [...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
     const text = blocks.filter((block) => block.kind === "text").map((block) => block.text).join("");
@@ -54307,6 +54469,7 @@ var ClaudeMessageStream = class {
       items.push({ type: "reasoning", id: `${state.id}:thinking`, text: thinking });
       state.thinking = thinking;
     }
+    done();
     return items;
   }
 };
@@ -54619,6 +54782,7 @@ function parsePartialJsonObject(input2) {
 }
 
 // server/claude-tool-stream.ts
+var step6 = createStepTracer();
 var ClaudeToolStream = class {
   constructor() {
     this.ids = /* @__PURE__ */ new Map();
@@ -54648,9 +54812,14 @@ var ClaudeToolStream = class {
       if (!id2) return [];
       const buffer = (this.buffers.get(id2) ?? "") + event.delta.partial_json;
       this.buffers.set(id2, buffer);
+      const doneParse = step6.start("claude.tool.parse", `chars=${buffer.length}`);
       const parsed = parsePartialJsonObject(buffer);
+      doneParse();
       if (!parsed || !parsed.complete && Object.keys(parsed.value).length === 0) return [];
-      if (JSON.stringify(inputs.get(id2)) === JSON.stringify(parsed.value)) return [];
+      const doneCompare = step6.start("claude.tool.compare", `chars=${buffer.length}`);
+      const unchanged = JSON.stringify(inputs.get(id2)) === JSON.stringify(parsed.value);
+      doneCompare();
+      if (unchanged) return [];
       inputs.set(id2, parsed.value);
     } else if (event.type === "content_block_stop") {
       id2 = this.ids.get(event.index);
@@ -54660,15 +54829,10 @@ var ClaudeToolStream = class {
     } else return [];
     const name = names.get(id2);
     if (!name) return [];
-    return [{
-      type: "tool_call",
-      id: id2,
-      callId: id2,
-      name,
-      status: "running",
-      error: null,
-      detail: describeRunningTool(name, inputs.get(id2))
-    }];
+    const doneDetail = step6.start("claude.tool.detail", name);
+    const detail = describeRunningTool(name, inputs.get(id2));
+    doneDetail();
+    return [{ type: "tool_call", id: id2, callId: id2, name, status: "running", error: null, detail }];
   }
 };
 
@@ -55841,6 +56005,7 @@ function claudeForkConfiguration(config2) {
 }
 
 // server/claude-provider.ts
+var streamStep = createStepTracer();
 var CAPABILITIES = [
   "prompt.message",
   "prompt.command",
@@ -56191,12 +56356,13 @@ async function openSession(input2, context, capabilities) {
   const storedSessionId = readStoredSessionId(input2.persistence);
   let effectiveConfigDir = declaredConfigDir.length > 0 ? declaredConfigDir : configuredConfigDir;
   if (storedSessionId !== null) {
-    effectiveConfigDir = await findClaudeTranscriptConfigDir(input2.config.cwd, storedSessionId, [
+    const located = await findClaudeTranscriptConfigDir(input2.config.cwd, storedSessionId, [
       effectiveConfigDir,
       configuredConfigDir,
       resolveClaudeConfigDir(),
       import_node_path7.default.join((0, import_node_os4.homedir)(), ".claude")
-    ]) ?? effectiveConfigDir;
+    ]);
+    if (located !== void 0 && located !== import_node_path7.default.resolve(effectiveConfigDir)) effectiveConfigDir = located;
   }
   const configDirChanged = effectiveConfigDir !== declaredConfigDir;
   if (configDirChanged) {
@@ -56994,16 +57160,13 @@ async function ensureQuery(session, context, preparing) {
     stderr: (data) => captureStderr(session, data),
     ...session.claudeSessionId !== null ? { resume: session.claudeSessionId } : {},
     ...session.desiredModel !== null ? { model: session.desiredModel } : {},
-    ...session.translatedSystemPrompt !== null ? {
-      // Preset + append keeps Claude Code's built-in system prompt (only
-      // the agent-specific instructions are translated), matching the
-      // native provider.
-      systemPrompt: {
-        type: "preset",
-        preset: "claude_code",
-        append: session.translatedSystemPrompt
-      }
-    } : {},
+    // Match the native provider: always use the full preset, including
+    // auto-memory, and append only the agent-specific instructions.
+    systemPrompt: {
+      type: "preset",
+      preset: "claude_code",
+      ...session.translatedSystemPrompt !== null ? { append: session.translatedSystemPrompt } : {}
+    },
     // Keep the bypass launch capability available so a later
     // setPermissionMode("bypassPermissions") does not fail after a restart
     // (native provider parity).
@@ -57719,13 +57882,30 @@ function handleSdkMessage(session, message, context) {
     return;
   }
   if (message.type === "stream_event") {
+    const doneStream = streamStep.start("claude.stream", message.event.type);
     noteStreamEventUsage(session, message, emit);
-    if (session.cacheMaintenance) return;
-    for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
-      if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
-      emit({ type: "timeline.item", sessionId: session.id, item });
+    if (session.cacheMaintenance) {
+      doneStream();
+      return;
     }
-    for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
+    for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
+      const doneEmit = streamStep.start("claude.tool.emit", item.type);
+      try {
+        if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
+        emit({ type: "timeline.item", sessionId: session.id, item });
+      } finally {
+        doneEmit();
+      }
+    }
+    for (const item of session.messages.observe(message)) {
+      const doneEmit = streamStep.start("claude.msg.emit", item.type);
+      try {
+        emit({ type: "timeline.item", sessionId: session.id, item });
+      } finally {
+        doneEmit();
+      }
+    }
+    doneStream();
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {

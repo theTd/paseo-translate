@@ -5,6 +5,9 @@
  */
 
 import { isSerializedAttachment, promptTranslationParts } from "../shared/prompt-text";
+import { createStepTracer } from "./memory-probe";
+
+const step = createStepTracer();
 
 export { isSerializedAttachment, promptTranslationParts } from "../shared/prompt-text";
 
@@ -47,8 +50,10 @@ export async function translatePromptDisplay(
     } else {
       let partial = "";
       const result = await translate(fragment, (delta) => {
+        const done = step.start("prompt.partial", `chars=${partial.length} fragments=${translated.length}`);
         partial += delta;
         onPartial?.([...translated, partial].join("\n"));
+        done();
       });
       translated.push(result);
     }

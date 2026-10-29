@@ -18,6 +18,7 @@ import {
   type TranslationCacheStore,
 } from "./translation-cache-store";
 import type { TranslationContextManager } from "./translation-context";
+import { createStepTracer } from "./memory-probe";
 import {
   TRANSLATION_TEXT_LIMIT,
   displayTranslationDirectionEnabled,
@@ -48,6 +49,14 @@ import {
   pickBatchNonce,
   wrapTranslationBatch,
 } from "./translate-batch";
+
+/**
+ * Step markers for the translation path. A step that never finishes leaves one
+ * dangling `enter` as the last line before a crash, which is the only way to
+ * localize a synchronous stall: the host died with the event loop blocked, so
+ * nothing sampled could report where it was.
+ */
+const step = createStepTracer();
 
 export interface TranslatorDeps {
   loadConfig(): Promise<TranslateSettingsValues>;
@@ -228,7 +237,8 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         `Refusing to translate ${text.length} characters (limit ${TRANSLATION_TEXT_LIMIT})`,
       );
     }
-    const values = await deps.loadConfig();
+    const doneConfig = step.start("lookup.config");
+    const values = await deps.loadConfig().finally(doneConfig);
     const pair = resolveLanguagePair(values, direction);
     const systemPrompt = resolveTranslationSystemPrompt(values, pair);
     const context = deps.context;
@@ -247,6 +257,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     // session the moment it compacted — re-billing the whole session on its
     // next open. Turns stay out of the key too; within one session the first
     // rendering of a text wins, which itself serves consistency.
+    const doneKey = step.start("lookup.key", `chars=${text.length}`);
     const key = cacheKey({
       text,
       direction,
@@ -258,6 +269,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       reasoningEffort: values.translationReasoningEffort,
       ...(useContext ? { scopeKey: contextKey } : {}),
     });
+    doneKey();
     return { key, values, pair, systemPrompt, scopeKey: useContext ? contextKey : undefined };
   }
 
@@ -271,12 +283,16 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     const { key, values, pair, systemPrompt, scopeKey } = lookup;
     // The hard cap bounds active sessions that outpace the idle compaction
     // policy: past twice the configured size the oldest pairs drop out.
+    const doneSnapshot = step.start("context.snapshot", `scope=${scopeKey ?? "none"}`);
     const snapshot = scopeKey !== undefined
       ? deps.context?.snapshot(scopeKey, direction, {
           hardCapChars: values.translationContextMaxChars * 2,
         })
       : undefined;
+    doneSnapshot();
+    const doneCache = step.start("cache.get");
     const cached = cache.get(key);
+    doneCache();
     // get() refreshes recency inside the store; a hit skips the endpoint.
     if (cached !== undefined) {
       // A cache hit is still translation activity: keep the idle clock from
@@ -339,6 +355,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     translated: string,
     direction: TranslateDirection,
   ): void {
+    const done = step.start("commit", `chars=${translated.length}`);
     cache.set(prepared.key, translated);
     if (direction === "user-to-agent") rememberOriginalFragment(cache, translated, source);
     if (prepared.recordContext !== undefined) {
@@ -349,6 +366,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         translated,
       );
     }
+    done();
   }
 
   /** Endpoint work for one streamed miss; publishes progress, commits on success. */
@@ -359,15 +377,18 @@ export function createTranslator(deps: TranslatorDeps): Translator {
   ): (context: InflightProducerContext) => Promise<string> {
     return async ({ signal, progress }) => {
       let accumulated = "";
+      const done = step.start("endpoint.stream", `chars=${prepared.requestContent.length}`);
       const translated = await completeStreamFirst(
         prepared.client,
         requestMessages(prepared),
         (delta) => {
+          const doneDelta = step.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
           accumulated += delta;
           progress(accumulated);
+          doneDelta();
         },
         { signal },
-      );
+      ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
@@ -385,7 +406,10 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     direction: TranslateDirection,
   ): (context: InflightProducerContext) => Promise<string> {
     return async ({ signal }) => {
-      const translated = await prepared.client.complete(requestMessages(prepared), { signal });
+      const done = step.start("endpoint.complete", `chars=${prepared.requestContent.length}`);
+      const translated = await prepared.client
+        .complete(requestMessages(prepared), { signal })
+        .finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
@@ -498,16 +522,18 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     return parsed;
   }
 
-  /** Converts registry progress (full text so far) into appended deltas. */
+  /** Converts append-only registry progress (full text so far) into deltas. */
   function deltaForwarder(onDelta: (delta: string) => void): (text: string) => void {
-    let sent = "";
+    let sentChars = 0;
     return (text) => {
-      // A stream that failed over to a plain completion restarts its text;
-      // the resolved value is authoritative, so non-prefix updates are skipped.
-      if (!text.startsWith(sent)) return;
-      const delta = text.slice(sent.length);
-      sent = text;
-      if (delta.length > 0) onDelta(delta);
+      // One inflight entry only publishes its own growing accumulation. Track
+      // the offset instead of comparing the whole prefix on every delta.
+      if (text.length <= sentChars) return;
+      const delta = text.slice(sentChars);
+      sentChars = text.length;
+      const done = step.start("translate.forward", `chars=${text.length} delta=${delta.length}`);
+      onDelta(delta);
+      done();
     };
   }
 
@@ -915,9 +941,11 @@ export function createTranslateStreamManager(
           onItem: (index, update) => {
             const item = items[index];
             if (item === undefined) return;
+            const done = step.start("stream.job.update", `chars=${update.text.length} complete=${update.done}`);
             item.job.text = update.text;
             item.job.done = update.done;
             item.job.updatedAt = Date.now();
+            done();
           },
         },
       );

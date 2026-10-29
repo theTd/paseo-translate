@@ -1,4 +1,7 @@
 import { LlmRequestCanceledError } from "./llm-client";
+import { createStepTracer } from "./memory-probe";
+
+const step = createStepTracer();
 
 /**
  * Single-flight registry for endpoint translations, keyed by the translation
@@ -149,9 +152,11 @@ export function createTranslationInflightRegistry(): TranslationInflightRegistry
         produce({
           signal: controller.signal,
           progress(text) {
+            const done = step.start("inflight.progress", `chars=${text.length} listeners=${entry.listeners.size}`);
             entry.partial = text;
             // Set iteration tolerates a waiter leaving mid-loop.
             for (const listener of entry.listeners) safeNotify(listener, text);
+            done();
           },
         }))().finally(() => {
         if (entries.get(key) === entry) entries.delete(key);

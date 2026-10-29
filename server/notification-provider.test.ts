@@ -782,4 +782,27 @@ describe("notification preview shares the reply translation", () => {
     manager.dispose();
     await h.connection.close();
   });
+
+  it("finishes when a streamed heading prefix arrives without its text", async () => {
+    const encoder = new TextEncoder();
+    const h = await harness({
+      respond: () => new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(sse("# ")));
+            controller.enqueue(encoder.encode(sse(`Title\n\n${"甲".repeat(300)}`)));
+            controller.close();
+          },
+        }) as unknown as ConstructorParameters<typeof Response>[0],
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+    });
+    await h.open();
+    h.turn("started");
+    h.text("Long reply");
+    h.turn("completed");
+    await h.flush();
+    expect(completionBody(h.events)).toBe(`Title ${"甲".repeat(211)}...`);
+    await h.connection.close();
+  });
 });

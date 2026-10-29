@@ -5,7 +5,11 @@
  * route. One attempt per call; the caller owns the failure policy.
  */
 
-import { createSizeWatch } from "./memory-probe";
+import { createSizeWatch, createStepTracer } from "./memory-probe";
+
+const step = createStepTracer();
+/** Wire bytes accepted for one unary body or SSE stream, before decoding. */
+const ENDPOINT_MAX_BYTES = 8 * 1024 * 1024;
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -86,7 +90,7 @@ export function createLlmClient(
     messages: readonly ChatMessage[],
     stream: boolean,
     signal: AbortSignal | undefined,
-  ): Promise<{ response: Response; url: string; release: () => void; touch: () => void }> {
+  ): Promise<{ response: Response; url: string; release: () => void; touch: () => void; abort: () => void }> {
     if (signal?.aborted) throw new LlmRequestCanceledError();
     const path = config.protocol === "responses" ? "/responses" : "/chat/completions";
     const url = `${config.baseUrl.replace(/\/+$/, "")}${path}`;
@@ -117,6 +121,7 @@ export function createLlmClient(
       // result into a prompt) is visible here before the endpoint answers, and
       // a normal translation prompt stays far below the first magnitude.
       createSizeWatch({ label: "llm.req" }).report(payload.length, `stream=${stream}`);
+      const donePost = step.start("http.post", `chars=${payload.length} stream=${stream}`);
       const response = await fetchFn(url, {
         method: "POST",
         headers,
@@ -125,8 +130,8 @@ export function createLlmClient(
         // Node declarations; bridge them at this boundary through the
         // fetch-side signal type.
         signal: controller.signal as unknown as RequestInit["signal"],
-      });
-      return { response, url, release, touch };
+      }).finally(donePost);
+      return { response, url, release, touch, abort: () => controller.abort() };
     } catch (error) {
       release();
       if (signal?.aborted) throw new LlmRequestCanceledError();
@@ -140,18 +145,20 @@ export function createLlmClient(
   return {
     async complete(messages, requestOptions) {
       const signal = requestOptions?.signal;
-      const { response, url, release } = await postCompletions(messages, false, signal);
+      const { response, url, release, abort } = await postCompletions(messages, false, signal);
       let body: string;
       let status: number;
       let ok: boolean;
       try {
         status = response.status;
         ok = response.ok;
-        body = await response.text();
-        // The raw body, the parsed tree and the extracted text all coexist
-        // from here on, so one oversized response is three oversized objects.
+        const doneBody = step.start("http.body");
+        body = await readBoundedResponseText(response).finally(doneBody);
+        // The bounded raw body, parsed tree and extracted text coexist from
+        // here on; the wire cap keeps that overlap below the heap ceiling.
         createSizeWatch({ label: "llm.resp" }).report(body.length);
       } catch (error) {
+        abort();
         if (signal?.aborted) throw new LlmRequestCanceledError();
         throw new Error(
           `Translation endpoint request failed after ${config.timeoutMs}ms (${url}): ${describeError(error)}`,
@@ -159,6 +166,11 @@ export function createLlmClient(
         );
       } finally {
         release();
+        try {
+          await response.body?.cancel();
+        } catch {
+          // Already closed or errored; the abort above owns failed teardown.
+        }
       }
       if (!ok) {
         throw new Error(`Translation endpoint returned HTTP ${status}: ${excerpt(body)}`);
@@ -180,10 +192,10 @@ export function createLlmClient(
 
     async stream(messages, onDelta, requestOptions) {
       const signal = requestOptions?.signal;
-      const { response, url, release, touch } = await postCompletions(messages, true, signal);
+      const { response, url, release, touch, abort } = await postCompletions(messages, true, signal);
       try {
         if (!response.ok) {
-          const body = await response.text().catch(() => "");
+          const body = await readBoundedResponseText(response).catch(() => "");
           throw new Error(
             `Translation endpoint refused the stream (HTTP ${response.status}): ${excerpt(body)}`,
           );
@@ -196,7 +208,8 @@ export function createLlmClient(
         // non-streaming instead of forcing a second request.
         const contentType = response.headers.get("content-type") ?? "";
         if (!contentType.includes("text/event-stream")) {
-          const body = await response.text();
+          const doneBody = step.start("http.body", "non-sse");
+          const body = await readBoundedResponseText(response).finally(doneBody);
           createSizeWatch({ label: "llm.resp" }).report(body.length, "non-sse");
           let content: unknown;
           try {
@@ -231,6 +244,9 @@ export function createLlmClient(
           throw error;
         }
       } catch (error) {
+        // Size/parser failures must tear down the old response before the
+        // stream-first caller is allowed to start its unary fallback.
+        abort();
         if (signal?.aborted && !(error instanceof LlmRequestCanceledError)) {
           throw new LlmRequestCanceledError();
         }
@@ -238,9 +254,11 @@ export function createLlmClient(
       } finally {
         release();
         try {
+          // readSseDeltas releases its reader lock in every outcome, so this
+          // cancel reaches the original body instead of failing while locked.
           await response.body?.cancel();
         } catch {
-          // Already closed by a completed read; nothing to release.
+          // Already closed or aborted by the request controller.
         }
       }
     },
@@ -362,6 +380,18 @@ function readStreamDelta(protocol: LlmEndpointProtocol, parsed: unknown): string
  * resolving with the concatenated full text. Chunk boundaries are arbitrary
  * bytes, so decoding buffers until a blank line completes one event.
  */
+/** Events folded per synchronous slice before the reader yields to timers. */
+const SSE_EVENT_SLICE = 2_048;
+/**
+ * Hard bounds on one stream. The per-event idle timeout cannot fire on a
+ * gateway that keeps sending: it is re-armed by exactly the traffic that makes
+ * the stream pathological. These end a runaway stream with a named error
+ * instead of letting it grind the host into the heap ceiling.
+ */
+const SSE_MAX_EVENTS = 200_000;
+const SSE_MAX_CHARS = 400_000;
+const SSE_MAX_DURATION_MS = 10 * 60_000;
+
 async function readSseDeltas(
   body: NonNullable<Response["body"]>,
   onDelta: (delta: string) => void,
@@ -370,37 +400,134 @@ async function readSseDeltas(
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  // Unbounded on purpose — the caller needs the whole translation — so this
-  // marker is the only way to see a stream that never stops growing.
   const size = createSizeWatch({ label: "llm.sse" });
-  // The raw byte buffer is a separate hole: an endpoint that streams bytes
-  // without ever completing an SSE event grows this while `accumulated` stays
-  // empty, so a missing `llm.sse` line is not proof the stream was small.
+  const wire = createSizeWatch({ label: "llm.wire" });
+  // An unterminated event grows this decoded remainder while accumulated
+  // output stays empty, so buffer and total wire sizes need separate markers.
   const raw = createSizeWatch({ label: "llm.raw" });
+  const events = createSizeWatch({ label: "llm.events", stepChars: 10_000 });
+  const doneLoop = step.start("sse.loop");
   let buffer = "";
   let accumulated = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (value !== undefined) {
-      buffer += decoder.decode(value, { stream: !done });
-      raw.report(buffer.length);
+  let eventCount = 0;
+  let receivedBytes = 0;
+  const startedAt = Date.now();
+  const collect = (data: string): void => {
+    if (accumulated.length + data.length > SSE_MAX_CHARS) {
+      throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_CHARS} characters`);
     }
-    if (done) break;
-    buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
-      accumulated += data;
-      size.report(accumulated.length);
-      onDelta(data);
-    });
-  }
-  buffer = consumeSseEvents(buffer, readDelta, onChunk, (data) => {
     accumulated += data;
     size.report(accumulated.length);
-    onDelta(data);
-  });
-  if (accumulated.length === 0) {
-    throw new Error("Translation endpoint streamed no message text");
+    const doneDelta = step.start("sse.delta", `chars=${data.length}`);
+    try {
+      onDelta(data);
+    } finally {
+      doneDelta();
+    }
+  };
+  try {
+    for (;;) {
+      const doneRead = step.start("sse.read");
+      const { done, value } = await reader.read().finally(doneRead);
+      if (value !== undefined) {
+        receivedBytes += value.byteLength;
+        wire.report(receivedBytes);
+        // Check before decoding: one oversized chunk must not allocate a
+        // second, multi-megabyte string before the bound can fire.
+        if (receivedBytes > ENDPOINT_MAX_BYTES) {
+          throw new Error(`Translation endpoint stream exceeded ${ENDPOINT_MAX_BYTES} bytes`);
+        }
+        raw.report(value.byteLength, "chunk");
+        const doneDecode = step.start("sse.decode", `bytes=${value.byteLength} done=${done}`);
+        buffer += decoder.decode(value, { stream: !done });
+        doneDecode();
+        raw.report(buffer.length);
+      }
+      if (done) {
+        const doneDecode = step.start("sse.decode", "final");
+        buffer += decoder.decode();
+        doneDecode();
+      }
+
+      let folded = 0;
+      let yielded = false;
+      do {
+        const doneFold = step.start("sse.fold", `buffered=${buffer.length}`);
+        const slice = consumeSseEvents(buffer, readDelta, onChunk, collect, SSE_EVENT_SLICE);
+        doneFold();
+        buffer = slice.rest;
+        folded = slice.processed;
+        // Count lifecycle and other non-content frames too: they cost the
+        // same parsing work while leaving the delta-only output at zero.
+        eventCount += folded;
+        events.report(eventCount);
+        if (eventCount > SSE_MAX_EVENTS) {
+          throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_EVENTS} events`);
+        }
+        if (Date.now() - startedAt > SSE_MAX_DURATION_MS) {
+          throw new Error(`Translation endpoint stream exceeded ${SSE_MAX_DURATION_MS}ms`);
+        }
+        if (folded >= SSE_EVENT_SLICE) {
+          const doneYield = step.start("sse.yield", "slice");
+          await yieldToEventLoop().finally(doneYield);
+          yielded = true;
+        }
+      } while (folded >= SSE_EVENT_SLICE);
+
+      // The final read goes through the same bounded fold as every other
+      // chunk. Non-final reads always yield, including one-event chunks whose
+      // promises would otherwise resolve as an endless microtask chain.
+      if (done) break;
+      if (!yielded) {
+        const doneYield = step.start("sse.yield", "chunk");
+        await yieldToEventLoop().finally(doneYield);
+      }
+    }
+    if (accumulated.length === 0) {
+      throw new Error("Translation endpoint streamed no message text");
+    }
+    return accumulated;
+  } finally {
+    doneLoop();
+    // The outer response.body.cancel() can only succeed after this lock is
+    // released, including cap, parse, abort and downstream callback errors.
+    reader.releaseLock();
   }
-  return accumulated;
+}
+
+/** Lets timers, abort callbacks, I/O and diagnostics run before more parsing. */
+function yieldToEventLoop(): Promise<void> {
+  // Node 20 / ES2023 target: Promise.withResolvers is not available.
+  return new Promise<void>((resolve) => { setImmediate(resolve); });
+}
+
+/** Reads a unary/error body with the same wire ceiling and scheduling rule. */
+async function readBoundedResponseText(response: Response): Promise<string> {
+  if (response.body === null) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let receivedBytes = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) {
+        await yieldToEventLoop();
+        continue;
+      }
+      receivedBytes += value.byteLength;
+      if (receivedBytes > ENDPOINT_MAX_BYTES) {
+        throw new Error(`Translation endpoint response exceeded ${ENDPOINT_MAX_BYTES} bytes`);
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+      await yieldToEventLoop();
+    }
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /**
@@ -415,28 +542,36 @@ function consumeSseEvents(
   readDelta: (parsed: unknown) => string | undefined,
   onEvent: () => void,
   onData: (data: string) => void,
-): string {
+  budget = Number.POSITIVE_INFINITY,
+): { rest: string; processed: number } {
   let rest = buffer;
-  for (;;) {
+  let processed = 0;
+  while (processed < budget) {
     const boundary = rest.indexOf("\n\n");
-    if (boundary === -1) return rest;
+    if (boundary === -1) break;
     const event = rest.slice(0, boundary);
     rest = rest.slice(boundary + 2);
+    processed += 1;
     for (const line of event.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.slice("data:".length).trim();
       if (payload === "[DONE]") continue;
+      let parsed: unknown;
       try {
-        const parsed: unknown = JSON.parse(payload);
-        onEvent();
-        const delta = readDelta(parsed);
-        if (delta !== undefined) onData(delta);
+        parsed = JSON.parse(payload);
       } catch {
-        // A gateway heartbeat or comment frame; not translation content.
+        // A gateway heartbeat or malformed data frame; not translation text.
+        continue;
       }
+      onEvent();
+      const delta = readDelta(parsed);
+      // Consumer failures are not JSON errors: propagate them so the request
+      // is aborted instead of continuing to allocate behind a failed caller.
+      if (delta !== undefined) onData(delta);
     }
   }
+  return { rest, processed };
 }
 
 function excerpt(body: string): string {

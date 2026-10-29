@@ -8,6 +8,16 @@ describe("markdown blocks", () => {
     expect(blocks[0]).toMatchObject({ type: "heading", level: 1 });
   });
 
+  it("does not stall on an empty heading prefix while streaming", () => {
+    expect(parseMarkdownBlocks("before\n\n# ")).toEqual([
+      { type: "paragraph", children: [{ type: "text", text: "before" }] },
+      { type: "paragraph", children: [{ type: "text", text: "# " }] },
+    ]);
+    expect(parseMarkdownBlocks("# Title")).toMatchObject([
+      { type: "heading", level: 1, children: [{ type: "text", text: "Title" }] },
+    ]);
+  });
+
   it("keeps fenced code atomic, including unclosed fences mid-stream", () => {
     const closed = parseMarkdownBlocks("```ts\nconst a = 1;\n```\n\nafter");
     expect(closed.map((block) => block.type)).toEqual(["codeblock", "paragraph"]);

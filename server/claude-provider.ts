@@ -66,6 +66,9 @@ import {
   resolveTranslationContextKey,
   type TranslateSettingsValues,
 } from "../shared/translate";
+import { createStepTracer } from "./memory-probe";
+
+const streamStep = createStepTracer();
 
 /** Subset of the SDK's SlashCommand used for the session command list. */
 export interface CommandInfoLike {
@@ -701,9 +704,13 @@ async function openSession(
     // reclaude sync transcripts into their account config, so a session
     // persisted before that move would replay empty and resume from a
     // directory the CLI never reads. Follow the file that exists.
-    effectiveConfigDir = await findClaudeTranscriptConfigDir(input.config.cwd, storedSessionId, [
+    const located = await findClaudeTranscriptConfigDir(input.config.cwd, storedSessionId, [
       effectiveConfigDir, configuredConfigDir, resolveClaudeConfigDir(), path.join(homedir(), ".claude"),
-    ]) ?? effectiveConfigDir;
+    ]);
+    // Adopt only a genuinely different directory. A match that resolves to
+    // the declared path keeps it verbatim (a relative CLAUDE_CONFIG_DIR is
+    // legal), so an already-correct install sees no change at all.
+    if (located !== undefined && located !== path.resolve(effectiveConfigDir)) effectiveConfigDir = located;
   }
   const configDirChanged = effectiveConfigDir !== declaredConfigDir;
   if (configDirChanged) {
@@ -1613,18 +1620,15 @@ async function ensureQuery(session: ClaudeSession, context: DispatchContext, pre
     stderr: (data: string) => captureStderr(session, data),
     ...(session.claudeSessionId !== null ? { resume: session.claudeSessionId } : {}),
     ...(session.desiredModel !== null ? { model: session.desiredModel } : {}),
-    ...(session.translatedSystemPrompt !== null
-      ? {
-          // Preset + append keeps Claude Code's built-in system prompt (only
-          // the agent-specific instructions are translated), matching the
-          // native provider.
-          systemPrompt: {
-            type: "preset" as const,
-            preset: "claude_code" as const,
-            append: session.translatedSystemPrompt,
-          },
-        }
-      : {}),
+    // Match the native provider: always use the full preset, including
+    // auto-memory, and append only the agent-specific instructions.
+    systemPrompt: {
+      type: "preset" as const,
+      preset: "claude_code" as const,
+      ...(session.translatedSystemPrompt !== null
+        ? { append: session.translatedSystemPrompt }
+        : {}),
+    },
     // Keep the bypass launch capability available so a later
     // setPermissionMode("bypassPermissions") does not fail after a restart
     // (native provider parity).
@@ -2570,16 +2574,33 @@ function handleSdkMessage(
     return;
   }
   if (message.type === "stream_event") {
+    const doneStream = streamStep.start("claude.stream", message.event.type);
     // Partial deltas power the mid-turn context ring; the timeline keeps
     // rendering complete messages. Sidechain frames already returned above
     // so they never move the parent ring.
     noteStreamEventUsage(session, message, emit);
-    if (session.cacheMaintenance) return;
-    for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
-      if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
-      emit({ type: "timeline.item", sessionId: session.id, item });
+    if (session.cacheMaintenance) {
+      doneStream();
+      return;
     }
-    for (const item of session.messages.observe(message)) emit({ type: "timeline.item", sessionId: session.id, item });
+    for (const item of session.toolStream.observe(message, session.toolNames, session.toolInputs)) {
+      const doneEmit = streamStep.start("claude.tool.emit", item.type);
+      try {
+        if (item.type === "tool_call") session.subagents?.noteRootToolUse(item.callId, item.name, session.toolInputs.get(item.callId));
+        emit({ type: "timeline.item", sessionId: session.id, item });
+      } finally {
+        doneEmit();
+      }
+    }
+    for (const item of session.messages.observe(message)) {
+      const doneEmit = streamStep.start("claude.msg.emit", item.type);
+      try {
+        emit({ type: "timeline.item", sessionId: session.id, item });
+      } finally {
+        doneEmit();
+      }
+    }
+    doneStream();
     return;
   }
   if (message.type === "assistant" && message.parent_tool_use_id === null) {

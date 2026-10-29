@@ -18,7 +18,10 @@ import {
   notificationFallback,
 } from "../shared/notification-preview";
 import { createTranslator, type TranslatorDeps } from "./translate";
+import { createStepTracer } from "./memory-probe";
 import { inlineText, parseMarkdownBlocks, type BlockNode } from "../shared/markdown-parse";
+
+const step = createStepTracer();
 
 /** Source cap for items the app never translates itself (legacy plain-text preview). */
 const PREVIEW_SOURCE_LIMIT = 2_000;
@@ -199,9 +202,11 @@ export function withNotificationTranslation(
                     source,
                     "agent-to-user",
                     (delta) => {
+                      const done = step.start("notification.preview.delta", `chars=${partial.length} finished=${finished.length}`);
                       partial += delta;
                       const plain = plainSoFar(partial);
                       if (plain.length > PREVIEW_TEXT_LIMIT) finish(plain, false);
+                      done();
                     },
                     { contextKey: session.contextKey, signal },
                   )

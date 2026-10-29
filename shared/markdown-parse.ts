@@ -161,6 +161,11 @@ function parseBlocks(lines: string[]): BlockNode[] {
           candidate,
         ),
     );
+    if (paragraph.length === 0) {
+      blocks.push({ type: "paragraph", children: parseInline(line) });
+      index += 1;
+      continue;
+    }
     blocks.push({ type: "paragraph", children: parseInline(joinSoftBreaks(paragraph)) });
   }
   return blocks;

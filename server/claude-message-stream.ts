@@ -1,5 +1,7 @@
 import { isClaudeTranscriptNoise } from "./claude-transcript-content";
-import { createSizeWatch } from "./memory-probe";
+import { createSizeWatch, createStepTracer } from "./memory-probe";
+
+const step = createStepTracer();
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 
@@ -73,6 +75,7 @@ export class ClaudeMessageStream {
   }
 
   private snapshots(state: MessageText): ProviderTimelineItem[] {
+    const done = step.start("claude.msg.snapshot", `blocks=${state.blocks.size}`);
     const items: ProviderTimelineItem[] = [];
     const blocks = [...state.blocks.entries()].sort(([a], [b]) => a - b).map(([, value]) => value);
     const text = blocks.filter((block) => block.kind === "text").map((block) => block.text).join("");
@@ -86,6 +89,7 @@ export class ClaudeMessageStream {
       items.push({ type: "reasoning", id: `${state.id}:thinking`, text: thinking });
       state.thinking = thinking;
     }
+    done();
     return items;
   }
 }

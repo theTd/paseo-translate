@@ -1,3 +1,4 @@
+import { appendFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import v8 from "node:v8";
 
 /**
@@ -14,9 +15,11 @@ import v8 from "node:v8";
  * counters, and the probe reads it once per tick. Each gauge is therefore read
  * exactly once per sample, and callers stay independent of the probe.
  *
- * Overrides, so a rebuild is not needed to retune an investigation:
- *   TRANSLATE_MEMORY_PROBE_MS        tick interval; 0 keeps only the header
- *   TRANSLATE_MEMORY_PROBE_ALARM_MB  comma-separated heapUsed alarm thresholds
+ * Probes are opt-in through TRANSLATE_DIAGNOSTIC_PROBES=1. Once enabled,
+ * these overrides retune an investigation without a rebuild:
+ *   TRANSLATE_MEMORY_PROBE_MS          tick interval; 0 keeps only the header
+ *   TRANSLATE_MEMORY_PROBE_ALARM_MB    comma-separated heapUsed alarm thresholds
+ *   TRANSLATE_HEAP_SNAPSHOT_NEAR_LIMIT snapshots to write near the heap limit
  */
 
 /** A gauge is one number, or a small named group rendered as `name.key=value`. */
@@ -50,6 +53,12 @@ export interface MemoryProbeOptions {
 }
 
 const MEGABYTE = 1024 * 1024;
+export const DIAGNOSTIC_PROBES_ENV = "TRANSLATE_DIAGNOSTIC_PROBES";
+
+export function diagnosticProbesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[DIAGNOSTIC_PROBES_ENV] === "1";
+}
+
 /**
  * 10s, not 60s: the fatal events this probe exists for are shorter than a
  * minute — the observed crash went from a flat ~78MB heap to the 4GB ceiling
@@ -62,6 +71,90 @@ const DEFAULT_SNAPSHOT_NEAR_LIMIT = 1;
 /** Default alarms sit under the ~4 GB default old-space ceiling this host hit. */
 const DEFAULT_ALARM_STEPS_MB = [1_024, 2_048, 3_072, 3_584] as const;
 const LINE_PREFIX = "[translate] mem";
+
+type DiagnosticLineSink = (line: string) => void;
+
+let extraSink: DiagnosticLineSink | undefined;
+
+/**
+ * Adds a second destination for every diagnostic line.
+ *
+ * Markers normally reach a file through the host: plugin stdout becomes
+ * "Plugin output" in the daemon log. That pipeline has failed twice here — a
+ * rotated daemon log stopped being written for hours, and a crash that lands
+ * in that window leaves nothing behind. A file the plugin owns keeps the trace
+ * independent of the host's log plumbing; stdout stays for live tailing.
+ */
+export function setDiagnosticSink(sink: DiagnosticLineSink | undefined): void {
+  extraSink = sink;
+}
+
+/** Default destination for every marker: stdout, plus the installed file. */
+function defaultLog(line: string): void {
+  console.log(line);
+  extraSink?.(line);
+}
+
+/** Writes one process-lifecycle marker through the same durable sink. */
+export function writeDiagnostic(line: string): void {
+  defaultLog(line);
+}
+
+export interface FileDiagnosticSinkOptions {
+  /** Absolute path of the append-only trace file. */
+  file: string;
+  /** Rotate to `${file}.1` past this many bytes; 0 keeps one file forever. */
+  maxBytes?: number;
+}
+
+/**
+ * Wall clock for trace lines. The file carries no host log envelope, so
+ * without this the last-marker's time could only be guessed from the file's
+ * mtime — which says nothing about ordering inside a burst.
+ */
+function clockStamp(): string {
+  const now = new Date();
+  const pad = (value: number, width = 2) => String(value).padStart(width, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`;
+}
+
+/**
+ * Append-only trace sink the plugin owns. Failures are swallowed on purpose:
+ * diagnostics must never be the reason a translation fails.
+ */
+export function createFileDiagnosticSink(
+  options: FileDiagnosticSinkOptions,
+): DiagnosticLineSink & { file: string } {
+  const maxBytes = options.maxBytes ?? 4 * 1024 * 1024;
+  let bytes = 0;
+  try {
+    const stat = statSync(options.file);
+    bytes = stat.size;
+  } catch {
+    bytes = 0;
+  }
+  const sink = (line: string): void => {
+    const text = `${clockStamp()} ${line}\n`;
+    try {
+      if (maxBytes > 0 && bytes + text.length > maxBytes) {
+        // One backup only: the interesting window is the last crash, not a
+        // week of history.
+        try {
+          renameSync(options.file, `${options.file}.1`);
+        } catch {
+          // No previous file yet; the append below recreates it.
+        }
+        writeFileSync(options.file, "", "utf8");
+        bytes = 0;
+      }
+      appendFileSync(options.file, text, "utf8");
+      bytes += text.length;
+    } catch {
+      // A broken diagnostics file must not break translation.
+    }
+  };
+  return Object.assign(sink, { file: options.file });
+}
 
 /** Heap spaces worth naming; everything else is internal or negligible here. */
 const SPACE_LABELS: Readonly<Record<string, string>> = {
@@ -92,8 +185,7 @@ export function memoryProbeOptionsFromEnv(
  * Arms Node's near-heap-limit snapshot writer. Returns the state the header
  * prints, so a missing artifact is never a mystery: either it was armed, or
  * the reason it was not is on the same line.
- */
-function armHeapSnapshotWriter(limit: number): string {
+ */function armHeapSnapshotWriter(limit: number): string {
   if (limit <= 0) return "off";
   const api = (v8 as { setHeapSnapshotNearHeapLimit?: (count: number) => void })
     .setHeapSnapshotNearHeapLimit;
@@ -108,7 +200,7 @@ function armHeapSnapshotWriter(limit: number): string {
 
 export function createMemoryProbe(options: MemoryProbeOptions = {}) {
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
-  const log = options.log ?? ((line: string) => { console.log(line); });
+  const log = options.log ?? defaultLog;
   const memoryUsage = options.memoryUsage ?? (() => process.memoryUsage());
   const now = options.now ?? (() => Date.now());
   const heapStatistics = options.heapStatistics ?? (() => v8.getHeapStatistics());
@@ -286,13 +378,15 @@ export interface SizeWatchOptions {
  * if the process dies before the next tick.
  */
 export function createSizeWatch(options: SizeWatchOptions) {
-  const log = options.log ?? ((line: string) => { console.log(line); });
+  const log = options.log ?? defaultLog;
+  const enabled = () => options.log !== undefined || diagnosticProbesEnabled();
   const step = options.stepChars ?? 65_536;
   let next = step;
   let peak = 0;
   return {
     /** Notes the current size; logs only when it crosses the next magnitude. */
     report(chars: number, detail?: string): void {
+      if (!enabled()) return;
       if (chars > peak) peak = chars;
       if (chars < next) return;
       while (next <= chars) next *= 2;
@@ -307,3 +401,50 @@ export function createSizeWatch(options: SizeWatchOptions) {
 }
 
 export type SizeWatch = ReturnType<typeof createSizeWatch>;
+
+export interface StepTracerOptions {
+  log?: (line: string) => void;
+  /** A step taking at least this long also logs a matching `exit`. */
+  slowMs?: number;
+  now?: () => number;
+}
+
+/**
+ * Enter/exit markers for one request path, aimed at the failure the heap gauge
+ * and the size watches could not localize: the host went from a flat ~86MB heap
+ * to the 4GB ceiling while the main thread never returned, so nothing that
+ * needs the event loop can report where it was.
+ *
+ * The `enter` line is written *before* the work starts, so a step that never
+ * finishes leaves exactly one dangling `enter` as the last line in the log —
+ * that is the whole point. `exit` is written only for a step that took
+ * `slowMs` or more, which keeps a healthy path at one line per step.
+ * These markers are disabled unless diagnostic probes are explicitly enabled.
+ */
+export function createStepTracer(options: StepTracerOptions = {}) {
+  const log = options.log ?? defaultLog;
+  const enabled = () => options.log !== undefined || diagnosticProbesEnabled();
+  const slowMs = options.slowMs ?? 1_000;
+  const now = options.now ?? (() => Date.now());
+  let nextId = 0;
+  return {
+    /** Logs `step enter`; the returned function logs a slow `step exit`. */
+    start(name: string, detail?: string): () => void {
+      if (!enabled()) return () => undefined;
+      const id = nextId++;
+      const suffix = detail === undefined || detail.length === 0 ? "" : ` ${detail}`;
+      log(`${LINE_PREFIX} step enter #${id} ${name}${suffix}`);
+      const startedAt = now();
+      let finished = false;
+      return () => {
+        if (finished) return;
+        finished = true;
+        const elapsed = now() - startedAt;
+        if (elapsed < slowMs) return;
+        log(`${LINE_PREFIX} step exit #${id} ${name}${suffix} ms=${elapsed}`);
+      };
+    },
+  };
+}
+
+export type StepTracer = ReturnType<typeof createStepTracer>;

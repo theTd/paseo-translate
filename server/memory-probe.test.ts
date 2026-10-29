@@ -1,6 +1,18 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import type { HeapInfo } from "node:v8";
 import { describe, expect, it, vi } from "vitest";
-import { createMemoryProbe, createSizeWatch, memoryProbeOptionsFromEnv } from "./memory-probe";
+import {
+  createFileDiagnosticSink,
+  createMemoryProbe,
+  createSizeWatch,
+  createStepTracer,
+  DIAGNOSTIC_PROBES_ENV,
+  diagnosticProbesEnabled,
+  memoryProbeOptionsFromEnv,
+  setDiagnosticSink,
+} from "./memory-probe";
 
 const MEGABYTE = 1024 * 1024;
 
@@ -37,6 +49,33 @@ function harness(overrides: {
     },
   };
 }
+
+describe("diagnostic probe opt-in", () => {
+  it("is disabled by default and only enabled by an explicit opt-in", () => {
+    expect(diagnosticProbesEnabled({})).toBe(false);
+    expect(diagnosticProbesEnabled({ [DIAGNOSTIC_PROBES_ENV]: "0" })).toBe(false);
+    expect(diagnosticProbesEnabled({ [DIAGNOSTIC_PROBES_ENV]: "true" })).toBe(false);
+    expect(diagnosticProbesEnabled({ [DIAGNOSTIC_PROBES_ENV]: "1" })).toBe(true);
+  });
+
+  it("keeps step and size probes silent unless the environment enables them", () => {
+    const spy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      vi.stubEnv(DIAGNOSTIC_PROBES_ENV, "0");
+      createStepTracer().start("disabled")();
+      createSizeWatch({ label: "disabled", stepChars: 1 }).report(10);
+      expect(spy).not.toHaveBeenCalled();
+
+      vi.stubEnv(DIAGNOSTIC_PROBES_ENV, "1");
+      createStepTracer().start("enabled")();
+      createSizeWatch({ label: "enabled", stepChars: 1 }).report(10);
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+      spy.mockRestore();
+    }
+  });
+});
 
 describe("memory probe", () => {
   it("renders one line with heap, delta and each gauge", () => {
@@ -214,5 +253,106 @@ describe("size watch", () => {
     const h = watch();
     h.size.report(200, "id=msg_1");
     expect(h.lines[0]).toBe("[translate] mem big llm.sse chars=200 id=msg_1");
+  });
+});
+
+describe("step tracer", () => {
+  function tracer(slowMs = 1_000) {
+    const lines: string[] = [];
+    let clock = 0;
+    const t = createStepTracer({
+      slowMs,
+      log: (line) => lines.push(line),
+      now: () => clock,
+    });
+    return { t, lines, advance: (ms: number) => { clock += ms; } };
+  }
+
+  it("logs the enter before the work, so a stall cannot hide it", () => {
+    const h = tracer();
+    h.t.start("endpoint.stream", "chars=108748");
+    expect(h.lines).toEqual(["[translate] mem step enter #0 endpoint.stream chars=108748"]);
+  });
+
+  it("stays quiet on exit for a fast step", () => {
+    const h = tracer();
+    const done = h.t.start("cache.get");
+    h.advance(3);
+    done();
+    expect(h.lines).toHaveLength(1);
+  });
+
+  it("logs the exit with elapsed time once a step is slow", () => {
+    const h = tracer();
+    const done = h.t.start("context.compact", "scope=s");
+    h.advance(4_200);
+    done();
+    expect(h.lines[1]).toBe("[translate] mem step exit #0 context.compact scope=s ms=4200");
+  });
+
+  it("numbers steps and only reports each exit once", () => {
+    const h = tracer();
+    const first = h.t.start("a");
+    const second = h.t.start("b");
+    h.advance(2_000);
+    first();
+    first();
+    second();
+    expect(h.lines).toEqual([
+      "[translate] mem step enter #0 a",
+      "[translate] mem step enter #1 b",
+      "[translate] mem step exit #0 a ms=2000",
+      "[translate] mem step exit #1 b ms=2000",
+    ]);
+  });
+});
+
+describe("file diagnostic sink", () => {
+  it("appends every line and keeps one backup past the byte cap", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "translate-trace-"));
+    const file = path.join(directory, "trace.log");
+    try {
+      const sink = createFileDiagnosticSink({ file, maxBytes: 40 });
+      sink("aaaa");
+      sink("bbbb");
+      const firstTwo = readFileSync(file, "utf8").trimEnd().split("\n");
+      expect(firstTwo).toHaveLength(2);
+      expect(firstTwo[0]).toMatch(/^\d\d:\d\d:\d\d\.\d{3} aaaa$/);
+      expect(firstTwo[1]).toMatch(/^\d\d:\d\d:\d\d\.\d{3} bbbb$/);
+
+      sink("c".repeat(40));
+      const rotated = readFileSync(`${file}.1`, "utf8");
+      expect(rotated).toContain("aaaa");
+      expect(readFileSync(file, "utf8")).toContain("c".repeat(40));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("routes default marker output to whatever sink is installed", () => {
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      setDiagnosticSink((line) => lines.push(line));
+      const probe = createMemoryProbe({
+        intervalMs: 0,
+        memoryUsage: () => ({
+          rss: 0,
+          heapTotal: 0,
+          heapUsed: 0,
+          external: 0,
+          arrayBuffers: 0,
+        }),
+        heapStatistics: () => ({ heap_size_limit: 1 }) as unknown as HeapInfo,
+        heapSpaces: () => [],
+      });
+      probe.start();
+      expect(lines[0]).toContain("[translate] mem probe start");
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      setDiagnosticSink(undefined);
+      spy.mockRestore();
+      expect(existsSync(path.join(tmpdir(), "never-created"))).toBe(false);
+    }
   });
 });
