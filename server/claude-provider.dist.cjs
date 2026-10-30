@@ -32757,9 +32757,13 @@ function buildChatBody(config2, messages, stream) {
   return {
     model: config2.model,
     messages,
-    temperature: 0,
+    // No `temperature`: reasoning models on this protocol hard-reject any
+    // value but the default (a 400 that fails the fail-closed prompt path),
+    // and the plugin cannot know which model is reasoning-capable. Losing
+    // the determinism nudge beats failing the turn.
     stream,
-    ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning_effort: config2.reasoningEffort } : {}
+    ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning_effort: config2.reasoningEffort } : {},
+    ...config2.promptCacheKey !== void 0 && config2.promptCacheKey.length > 0 ? { prompt_cache_key: config2.promptCacheKey } : {}
   };
 }
 function buildResponsesBody(config2, messages, stream) {
@@ -32771,7 +32775,7 @@ function buildResponsesBody(config2, messages, stream) {
     } else if (message.role === "user") {
       input2.push({ role: "user", content: [{ type: "input_text", text: message.content }] });
     } else {
-      input2.push({ role: "assistant", content: [{ type: "input_text", text: message.content }] });
+      input2.push({ role: "assistant", content: message.content });
     }
   }
   return {
@@ -32780,7 +32784,8 @@ function buildResponsesBody(config2, messages, stream) {
     input: input2,
     stream,
     store: false,
-    ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning: { effort: config2.reasoningEffort } } : {}
+    ...config2.reasoningEffort !== void 0 && config2.reasoningEffort.length > 0 && config2.reasoningEffort !== "default" ? { reasoning: { effort: config2.reasoningEffort } } : {},
+    ...config2.promptCacheKey !== void 0 && config2.promptCacheKey.length > 0 ? { prompt_cache_key: config2.promptCacheKey } : {}
   };
 }
 function readResponseText(protocol, parsed) {
@@ -32882,7 +32887,21 @@ async function readSseDeltas(body, onDelta, readDelta, onChunk) {
           yielded = true;
         }
       } while (folded >= SSE_EVENT_SLICE);
-      if (done) break;
+      if (done) {
+        const slice = consumeSseEvents(
+          buffer.endsWith("\n") || buffer.endsWith("\r") ? `${buffer}
+` : `${buffer}
+
+`,
+          readDelta,
+          onChunk,
+          collect,
+          SSE_EVENT_SLICE
+        );
+        eventCount += slice.processed;
+        buffer = slice.rest;
+        break;
+      }
       if (!yielded) {
         const doneYield = step.start("sse.yield", "chunk");
         await yieldToEventLoop().finally(doneYield);
@@ -32933,28 +32952,45 @@ function consumeSseEvents(buffer, readDelta, onEvent, onData, budget = Number.PO
   let rest = buffer;
   let processed = 0;
   while (processed < budget) {
-    const boundary = rest.indexOf("\n\n");
-    if (boundary === -1) break;
-    const event = rest.slice(0, boundary);
-    rest = rest.slice(boundary + 2);
+    const boundary = findEventBoundary(rest);
+    if (boundary === null) break;
+    const event = rest.slice(0, boundary.index);
+    rest = rest.slice(boundary.index + boundary.length);
     processed += 1;
-    for (const line of event.split("\n")) {
+    if (event.length === 0) continue;
+    let payload = "";
+    let hasData = false;
+    for (const line of event.split(/\r\n|\r|\n/)) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice("data:".length).trim();
-      if (payload === "[DONE]") continue;
-      let parsed;
-      try {
-        parsed = JSON.parse(payload);
-      } catch {
-        continue;
-      }
-      onEvent();
-      const delta = readDelta(parsed);
-      if (delta !== void 0) onData(delta);
+      const value = trimmed.slice("data:".length).trim();
+      payload = hasData ? `${payload}
+${value}` : value;
+      hasData = true;
     }
+    if (!hasData || payload === "[DONE]") continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      continue;
+    }
+    onEvent();
+    const delta = readDelta(parsed);
+    if (delta !== void 0) onData(delta);
   }
   return { rest, processed };
+}
+function findEventBoundary(buffer) {
+  let crlf = buffer.indexOf("\r\n\r\n");
+  let lf = buffer.indexOf("\n\n");
+  let cr = buffer.indexOf("\r\r");
+  if (crlf !== -1 && (lf === -1 || crlf <= lf) && (cr === -1 || crlf <= cr)) {
+    return { index: crlf, length: 4 };
+  }
+  if (lf !== -1 && (cr === -1 || lf < cr)) return { index: lf, length: 2 };
+  if (cr !== -1) return { index: cr, length: 2 };
+  return null;
 }
 function excerpt(body) {
   const flattened = body.replace(/\s+/g, " ").trim();
@@ -32970,8 +33006,19 @@ async function completeStreamFirst(client, messages, onDelta = () => void 0, opt
     if (isTranslationCanceled(error62) || options?.signal?.aborted) {
       throw isTranslationCanceled(error62) ? error62 : new LlmRequestCanceledError();
     }
+    if (isPermanentHttpRefusal(error62)) throw error62;
     return client.complete(messages, options);
   }
+}
+function isPermanentHttpRefusal(error62) {
+  const message = error62 instanceof Error ? error62.message : String(error62);
+  const status = /\bHTTP (\d{3})\b/.exec(message)?.[1];
+  if (status === void 0) return false;
+  const code = Number(status);
+  if (code < 400 || code > 499) return false;
+  if (code === 408 || code === 429) return false;
+  if (code === 400 || code === 422) return !/stream/i.test(message);
+  return true;
 }
 
 // server/translation-inflight.ts
@@ -53217,7 +53264,12 @@ function createTranslator(deps) {
         model: values.endpointModel,
         timeoutMs: values.translationTimeoutMs,
         reasoningEffort: values.translationReasoningEffort,
-        protocol: values.endpointProtocol
+        protocol: values.endpointProtocol,
+        // One key per session scope: every request of the session replays the
+        // same prefix, so a stable key is what makes an endpoint's prompt
+        // cache reachable at all. Standalone translations have no replayable
+        // prefix, so they send no key.
+        ...scopeKey !== void 0 && deps.promptCacheKeys !== void 0 ? { promptCacheKey: deps.promptCacheKeys.resolve(scopeKey).key } : {}
       },
       { fetchFn: deps.fetchFn }
     );

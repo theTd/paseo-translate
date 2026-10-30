@@ -19,6 +19,7 @@ import {
 } from "./translation-cache-store";
 import type { TranslationContextManager } from "./translation-context";
 import { createStepTracer } from "./memory-probe";
+import type { PromptCacheKeyManager } from "./prompt-cache-key";
 import {
   TRANSLATION_TEXT_LIMIT,
   displayTranslationDirectionEnabled,
@@ -80,6 +81,12 @@ export interface TranslatorDeps {
    * tests hermetic; the plugin entry injects one shared instance.
    */
   inflight?: TranslationInflightRegistry;
+  /**
+   * `prompt_cache_key` resolution for the request prefix (see
+   * server/prompt-cache-key.ts). Absent means no key is sent, which keeps
+   * tests hermetic and gateways that reject the parameter untouched.
+   */
+  promptCacheKeys?: PromptCacheKeyManager;
 }
 
 /** Per-call options for translate/translateStream. */
@@ -308,6 +315,13 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         timeoutMs: values.translationTimeoutMs,
         reasoningEffort: values.translationReasoningEffort,
         protocol: values.endpointProtocol,
+        // One key per session scope: every request of the session replays the
+        // same prefix, so a stable key is what makes an endpoint's prompt
+        // cache reachable at all. Standalone translations have no replayable
+        // prefix, so they send no key.
+        ...(scopeKey !== undefined && deps.promptCacheKeys !== undefined
+          ? { promptCacheKey: deps.promptCacheKeys.resolve(scopeKey).key }
+          : {}),
       },
       { fetchFn: deps.fetchFn },
     );

@@ -130,6 +130,31 @@ fail-soft — a failed compaction retries later and never blocks a translation.
 Turn the whole feature off with **Session translation context** to restore
 independent per-request translation.
 
+### Prompt cache key
+
+Every request of one session replays the same prefix (system prompt, then the
+turns committed so far, then the memory), so the plugin sends a stable
+`prompt_cache_key` per session and endpoint prompt caches can actually hit.
+The derived key is a hash of the session scope: deterministic across daemon
+restarts, distinct between sessions. Standalone translations (no replayable
+prefix) send no key. Gateways that reject the parameter are unaffected because
+it is absent unless a session key exists.
+
+Each agent's composer row gets a **⛁** pill to override that key by hand:
+
+- **Pin key** — send a readable label (for example a project name) verbatim.
+  Several sessions pinned to the same label share one endpoint cache prefix.
+- **New key** — move the session to a fresh cache namespace without touching
+  its transcript. The escape hatch when a gateway's cache is stuck on a stale
+  prefix.
+- **Use automatic** — drop the override and go back to the derived key.
+
+Overrides live in the translation cache store under their own key prefix, so
+they survive daemon restarts and never join a translation cache key: rotating
+the key changes only which endpoint cache later requests land in. Keys are
+limited to letters, digits, `.`, `_`, `:`, `-` (128 chars) so a strict gateway
+cannot reject them.
+
 ## Install
 
 Requires Paseo >= 0.8.0 with plugins enabled (`pluginsEnabled: true` in the
@@ -467,3 +492,7 @@ approval before running it while sessions are in use.
   minimize endpoint spend.
 - The inner agent command is split on spaces; quoted arguments are not
   supported in the settings UI.
+- `prompt_cache_key` is only a hint: gateways that ignore it still serve every
+  request, just without the shared prefix cache. A pinned key is sent verbatim,
+  so a gateway rejecting it fails the request until the key is reset to
+  automatic.

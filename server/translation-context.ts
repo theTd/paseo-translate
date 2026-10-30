@@ -7,6 +7,7 @@ import { createStepTracer } from "./memory-probe";
  */
 const step = createStepTracer();
 import type { TranslationCacheStore } from "./translation-cache-store";
+import type { PromptCacheKeyManager } from "./prompt-cache-key";
 import {
   resolveLanguagePair,
   unwrapTranslationInput,
@@ -41,6 +42,12 @@ export interface TranslationContextManagerDeps {
   now?: () => number;
   /** Sweep cadence; 0 disables the timer (tests drive sweep() manually). */
   sweepIntervalMs?: number;
+  /**
+   * `prompt_cache_key` resolution. Compaction replays the scope's history to
+   * the same endpoint; carrying the scope's key lets that call land in the
+   * session's prompt cache like every other request. Absent sends no key.
+   */
+  promptCacheKeys?: Pick<PromptCacheKeyManager, "resolve">;
 }
 
 interface ScopeState {
@@ -194,6 +201,9 @@ export function createTranslationContextManager(deps: TranslationContextManagerD
           timeoutMs: values.translationTimeoutMs,
           reasoningEffort: values.translationReasoningEffort,
           protocol: values.endpointProtocol,
+          ...(deps.promptCacheKeys !== undefined
+            ? { promptCacheKey: deps.promptCacheKeys.resolve(scopeKey).key }
+            : {}),
         },
         { fetchFn: deps.fetchFn },
       );

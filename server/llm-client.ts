@@ -27,6 +27,12 @@ export interface LlmEndpointConfig {
   /** OpenAI-compatible reasoning effort; omit or "default" to send none. */
   reasoningEffort?: string;
   protocol: LlmEndpointProtocol;
+  /**
+   * `prompt_cache_key`: an affinity key the endpoint uses to route requests
+   * of one conversation to the same prompt cache. Omitted sends nothing, so
+   * gateways that reject the parameter stay usable.
+   */
+  promptCacheKey?: string;
 }
 
 /** Per-request options shared by `complete` and `stream`. */
@@ -273,12 +279,18 @@ function buildChatBody(
   return {
     model: config.model,
     messages,
-    temperature: 0,
+    // No `temperature`: reasoning models on this protocol hard-reject any
+    // value but the default (a 400 that fails the fail-closed prompt path),
+    // and the plugin cannot know which model is reasoning-capable. Losing
+    // the determinism nudge beats failing the turn.
     stream,
     ...(config.reasoningEffort !== undefined &&
     config.reasoningEffort.length > 0 &&
     config.reasoningEffort !== "default"
       ? { reasoning_effort: config.reasoningEffort }
+      : {}),
+    ...(config.promptCacheKey !== undefined && config.promptCacheKey.length > 0
+      ? { prompt_cache_key: config.promptCacheKey }
       : {}),
   };
 }
@@ -303,11 +315,15 @@ function buildResponsesBody(
     } else if (message.role === "user") {
       input.push({ role: "user", content: [{ type: "input_text", text: message.content }] });
     } else {
-      // Assistant history goes in as input_text too: the Responses input
-      // schema only accepts output_text inside a full output item (with
-      // type/id/status), and strictly-validating compatible gateways reject
-      // anything else. Conditioning only needs the text either way.
-      input.push({ role: "assistant", content: [{ type: "input_text", text: message.content }] });
+      // Assistant history travels as a plain string, never as typed content
+      // parts. Part-type validators disagree per role: OpenAI's own input
+      // content parts are input_*, while strictly-validating gateways treat
+      // an assistant message's content as output content and reject
+      // `input_text` there ("Supported values are: output_text"). The
+      // "easy message" shape accepts a bare string for every role, so no
+      // validator has a part type to reject. Conditioning only needs the
+      // text.
+      input.push({ role: "assistant", content: message.content });
     }
   }
   return {
@@ -320,6 +336,9 @@ function buildResponsesBody(
     config.reasoningEffort.length > 0 &&
     config.reasoningEffort !== "default"
       ? { reasoning: { effort: config.reasoningEffort } }
+      : {}),
+    ...(config.promptCacheKey !== undefined && config.promptCacheKey.length > 0
+      ? { prompt_cache_key: config.promptCacheKey }
       : {}),
   };
 }
@@ -477,7 +496,20 @@ async function readSseDeltas(
       // The final read goes through the same bounded fold as every other
       // chunk. Non-final reads always yield, including one-event chunks whose
       // promises would otherwise resolve as an endless microtask chain.
-      if (done) break;
+      if (done) {
+        // Proxies close the stream right after the last frame without the
+        // trailing blank line; that frame is still the endpoint's answer.
+        const slice = consumeSseEvents(
+          buffer.endsWith("\n") || buffer.endsWith("\r") ? `${buffer}\n` : `${buffer}\n\n`,
+          readDelta,
+          onChunk,
+          collect,
+          SSE_EVENT_SLICE,
+        );
+        eventCount += slice.processed;
+        buffer = slice.rest;
+        break;
+      }
       if (!yielded) {
         const doneYield = step.start("sse.yield", "chunk");
         await yieldToEventLoop().finally(doneYield);
@@ -536,6 +568,13 @@ async function readBoundedResponseText(response: Response): Promise<string> {
  * lifecycle), which re-arms the idle timeout. Comment frames such as
  * `: keep-alive` do not: a gateway that keeps a stuck request open with
  * heartbeats must still time out, or every retry would join that request.
+ *
+ * Framing follows the SSE spec, not the LF conventions one gateway happens
+ * to use: lines end with CRLF, LF or CR, an event ends at a blank line, and
+ * several `data:` lines in one event concatenate with `\n` before parsing.
+ * Endpoints differ (Azure and several Java/nginx frontends send CRLF), and
+ * getting this wrong turns a valid translation into "streamed no message
+ * text" plus a billed fallback request.
  */
 function consumeSseEvents(
   buffer: string,
@@ -547,31 +586,58 @@ function consumeSseEvents(
   let rest = buffer;
   let processed = 0;
   while (processed < budget) {
-    const boundary = rest.indexOf("\n\n");
-    if (boundary === -1) break;
-    const event = rest.slice(0, boundary);
-    rest = rest.slice(boundary + 2);
+    const boundary = findEventBoundary(rest);
+    if (boundary === null) break;
+    const event = rest.slice(0, boundary.index);
+    rest = rest.slice(boundary.index + boundary.length);
     processed += 1;
-    for (const line of event.split("\n")) {
+    if (event.length === 0) continue;
+    let payload = "";
+    let hasData = false;
+    for (const line of event.split(/\r\n|\r|\n/)) {
       const trimmed = line.trim();
       if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice("data:".length).trim();
-      if (payload === "[DONE]") continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(payload);
-      } catch {
-        // A gateway heartbeat or malformed data frame; not translation text.
-        continue;
-      }
-      onEvent();
-      const delta = readDelta(parsed);
-      // Consumer failures are not JSON errors: propagate them so the request
-      // is aborted instead of continuing to allocate behind a failed caller.
-      if (delta !== undefined) onData(delta);
+      const value = trimmed.slice("data:".length).trim();
+      // `data:` lines of one event join with a newline before parsing.
+      payload = hasData ? `${payload}\n${value}` : value;
+      hasData = true;
     }
+    if (!hasData || payload === "[DONE]") continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      // A gateway heartbeat or malformed data frame; not translation text.
+      continue;
+    }
+    onEvent();
+    const delta = readDelta(parsed);
+    // Consumer failures are not JSON errors: propagate them so the request
+    // is aborted instead of continuing to allocate behind a failed caller.
+    if (delta !== undefined) onData(delta);
   }
   return { rest, processed };
+}
+
+/**
+ * First blank-line boundary in `buffer`, over any of the spec's three line
+ * endings. Returns the offset where the *event text* stops and the number of
+ * characters the separator occupies (2 for CRLF, else 1). `null` when no
+ * complete event is buffered yet.
+ */
+function findEventBoundary(buffer: string): { index: number; length: number } | null {
+  let crlf = buffer.indexOf("\r\n\r\n");
+  let lf = buffer.indexOf("\n\n");
+  let cr = buffer.indexOf("\r\r");
+  // A CRLF pair already contains an `\r`; the single-character searches must
+  // not match inside it, so compare the earliest index first and let CRLF
+  // win at the same offset.
+  if (crlf !== -1 && (lf === -1 || crlf <= lf) && (cr === -1 || crlf <= cr)) {
+    return { index: crlf, length: 4 };
+  }
+  if (lf !== -1 && (cr === -1 || lf < cr)) return { index: lf, length: 2 };
+  if (cr !== -1) return { index: cr, length: 2 };
+  return null;
 }
 
 function excerpt(body: string): string {
@@ -605,6 +671,34 @@ export async function completeStreamFirst(
     if (isTranslationCanceled(error) || options?.signal?.aborted) {
       throw isTranslationCanceled(error) ? error : new LlmRequestCanceledError();
     }
+    // A client-side refusal (4xx other than the timeout/rate-limit classes)
+    // cannot become a success by dropping `stream`: the same request body
+    // without the flag hits the same validator. Retrying it only doubles the
+    // bill and delays the failure, so surface it instead.
+    if (isPermanentHttpRefusal(error)) throw error;
     return client.complete(messages, options);
   }
+}
+
+/**
+ * True when the unary fallback cannot succeed: the exact same request body
+ * with only `stream` flipped would hit the same rejection.
+ *
+ * The one 4xx that backwards into a fallback is a gateway refusing the
+ * `stream` flag itself (typically 400 or 422 with "stream" in the error
+ * body) — dropping the flag is exactly the fix, so those keep the retry.
+ * Everything else in 4xx is about the request's content, credentials or
+ * route: 401/403 (key), 404/405 (missing route), 413 (too large), or a 400
+ * whose body never mentions streaming. Billing a second identical call there
+ * only doubles the cost and delays the failure. 408 and 429 stay retryable.
+ */
+function isPermanentHttpRefusal(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = /\bHTTP (\d{3})\b/.exec(message)?.[1];
+  if (status === undefined) return false;
+  const code = Number(status);
+  if (code < 400 || code > 499) return false;
+  if (code === 408 || code === 429) return false;
+  if (code === 400 || code === 422) return !/stream/i.test(message);
+  return true;
 }

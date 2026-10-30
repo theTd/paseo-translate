@@ -26,6 +26,8 @@ import {
   defaultTranslationCacheDirectory,
 } from "./server/translation-cache-store";
 import { createTranslationContextManager } from "./server/translation-context";
+import { createPromptCacheKeyManager } from "./server/prompt-cache-key";
+import { promptCacheKeySetRpc, promptCacheKeyStatusRpc } from "./shared/prompt-cache-key";
 import { createFileDiagnosticSink, createMemoryProbe, createStepTracer, diagnosticProbesEnabled,
   memoryProbeOptionsFromEnv, setDiagnosticSink } from "./server/memory-probe";
 import { installProcessDiagnostics } from "./server/process-diagnostics";
@@ -66,6 +68,12 @@ export default function contribute(server: PluginServerContext) {
   const cacheStore = createPersistentTranslationCacheStore({
     directory: defaultTranslationCacheDirectory(),
   });
+  // Manual `prompt_cache_key` control per transcript. Backed by the same
+  // persistent store as the translation cache (its own key namespace), so a
+  // pinned key survives daemon restarts and stays out of cache-key space:
+  // rotating it moves future requests to a new cache namespace without
+  // invalidating anything already translated.
+  const promptCacheKeys = createPromptCacheKeyManager(cacheStore);
   // One process-wide transcript manager, shared like the cache: every
   // translation for the same agent (prompt path, display path, questions)
   // feeds one transcript, so terminology stays consistent for the
@@ -74,6 +82,7 @@ export default function contribute(server: PluginServerContext) {
   // which is restart-stable but separate from the display path's agent id.
   const context = createTranslationContextManager({
     loadConfig,
+    promptCacheKeys,
     memoryStore: createPersistentTranslationCacheStore({
       directory: path.join(defaultTranslationCacheDirectory(), "context"),
       maxEntries: CONTEXT_MEMORY_CAPACITY,
@@ -109,7 +118,7 @@ export default function contribute(server: PluginServerContext) {
   memoryProbe?.track({ name: "inflight", read: () => inflight.stats() });
   memoryProbe?.track({ name: "context", read: () => context.stats() });
   memoryProbe?.start();
-  const deps = { loadConfig, cacheStore, context, inflight };
+  const deps = { loadConfig, cacheStore, context, inflight, promptCacheKeys };
   const forkCoordinator = new ClaudeForkCoordinator();
   const cacheDefaults = server.registerSettings(claudeCacheSettings);
   const cacheCoordinator = new ClaudeCacheCompactionCoordinator(createClaudeCachePreferenceStore(
@@ -153,6 +162,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(translateStreamPollRpc, createTranslateStreamPollHandler(streamManager));
   server.handle(translateStreamCancelRpc, createTranslateStreamCancelHandler(streamManager));
   server.handle(translateProvidersRpc, createProvidersHandler());
+  server.handle(promptCacheKeyStatusRpc, ({ sessionKey }) => promptCacheKeys.resolve(sessionKey));
+  server.handle(promptCacheKeySetRpc, ({ sessionKey, action }) =>
+    promptCacheKeys.configure(sessionKey, action));
   return () => {
     void cpuProfile?.dispose();
     void heapProfile?.dispose();

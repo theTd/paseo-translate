@@ -27,6 +27,7 @@ import {
   type TranslateSettingsValues,
 } from "../shared/translate";
 import { parseTranslationBatch } from "./translate-batch";
+import { createPromptCacheKeyManager, derivePromptCacheKey } from "./prompt-cache-key";
 
 /** The framed final user message for one source text under the test language pair. */
 function requestFor(text: string, direction: "user-to-agent" | "agent-to-user"): string {
@@ -937,6 +938,49 @@ describe("session translation context", () => {
     });
     await noKey.translate("World", "user-to-agent");
     expect(calls[1].body?.messages).toHaveLength(2);
+  });
+
+  it("sends one prompt_cache_key per session and follows a manual override", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown> & {
+        messages: Array<{ role: string; content: string }>;
+      };
+      bodies.push(body);
+      const lastUser = body.messages.filter((message) => message.role === "user").at(-1);
+      return new Response(
+        JSON.stringify({
+          choices: [{ message: { content: `T:${unwrapTranslationInput(lastUser?.content ?? "")}` } }],
+        }),
+        { status: 200 },
+      );
+    }) as typeof fetch;
+    const context = createTranslationContextManager({
+      loadConfig: async () => values,
+      sweepIntervalMs: 0,
+    });
+    const promptCacheKeys = createPromptCacheKeyManager(createMemoryTranslationCacheStore());
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn,
+      context,
+      promptCacheKeys,
+    });
+
+    await translator.translate("Hello", "user-to-agent", { contextKey: "agent-a" });
+    expect(bodies[0]?.prompt_cache_key).toBe(derivePromptCacheKey("agent-a"));
+
+    // A different session gets a different key; a standalone translation (no
+    // replayable prefix) sends none.
+    await translator.translate("World", "user-to-agent", { contextKey: "agent-b" });
+    expect(bodies[1]?.prompt_cache_key).toBe(derivePromptCacheKey("agent-b"));
+    await translator.translate("Standalone", "user-to-agent");
+    expect(bodies[2] !== undefined && "prompt_cache_key" in bodies[2]).toBe(false);
+
+    // A pinned key replaces the derived one on the very next request.
+    promptCacheKeys.configure("agent-a", { key: "shared-prefix" });
+    await translator.translate("Third", "user-to-agent", { contextKey: "agent-a" });
+    expect(bodies[3]?.prompt_cache_key).toBe("shared-prefix");
   });
 });
 

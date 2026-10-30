@@ -83,6 +83,9 @@ describe("translation endpoint client", () => {
     const body = requestBody(calls[0]);
     expect(body.model).toBe("mt");
     expect(body.stream).toBe(false);
+    // No temperature: reasoning models on this protocol hard-reject any value
+    // but the default, and the plugin cannot know which model that applies to.
+    expect("temperature" in body).toBe(false);
     expect(body.messages).toEqual([
       { role: "system", content: "sys" },
       { role: "user", content: "Hello" },
@@ -246,6 +249,62 @@ describe("translation endpoint streaming", () => {
     );
     await expect(client.stream([{ role: "user", content: "x" }], () => {})).rejects.toThrow(
       /unexpected response.*Bad Gateway/,
+    );
+  });
+
+  // Framing varies between compliant gateways; all three shapes are legal SSE
+  // and each was a silent "streamed no message text" before the parser
+  // followed the spec instead of LF-only conventions.
+  it("decodes CRLF-framed events", async () => {
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000, protocol: "chat-completions" },
+      {
+        fetchFn: capturingFetch([], () =>
+          sseResponse([
+            `data: ${JSON.stringify({ choices: [{ delta: { content: "Hal" } }] })}\r\n\r\n`,
+            `data: ${JSON.stringify({ choices: [{ delta: { content: "lo" } }] })}\r\n\r\n`,
+            "data: [DONE]\r\n\r\n",
+          ]),
+        ),
+      },
+    );
+    const deltas: string[] = [];
+    await expect(client.stream([{ role: "user", content: "x" }], (delta) => deltas.push(delta)))
+      .resolves.toBe("Hallo");
+    expect(deltas).toEqual(["Hal", "lo"]);
+  });
+
+  it("joins a multi-line data field before parsing it", async () => {
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000, protocol: "chat-completions" },
+      {
+        fetchFn: capturingFetch([], () =>
+          sseResponse([
+            // One JSON payload split across two `data:` lines, as the spec
+            // allows and some proxies emit when wrapping long frames.
+            'data: {"choices":\ndata: [{"delta":{"content":"Hallo"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ]),
+        ),
+      },
+    );
+    await expect(client.stream([{ role: "user", content: "x" }], () => {})).resolves.toBe("Hallo");
+  });
+
+  it("keeps the last event when the stream closes without a trailing blank line", async () => {
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000, protocol: "chat-completions" },
+      {
+        fetchFn: capturingFetch([], () =>
+          sseResponse([
+            `data: ${JSON.stringify({ choices: [{ delta: { content: "Hallo" } }] })}\n\n`,
+            `data: ${JSON.stringify({ choices: [{ delta: { content: " Welt" } }] })}\n`,
+          ]),
+        ),
+      },
+    );
+    await expect(client.stream([{ role: "user", content: "x" }], () => {})).resolves.toBe(
+      "Hallo Welt",
     );
   });
 });
@@ -415,6 +474,40 @@ describe("stream-first completion policy", () => {
     await expect(completeStreamFirst(client, [{ role: "user", content: "x" }])).resolves.toBe("ok");
     expect(calls).toHaveLength(1);
   });
+
+  it("does not bill a second request when the rejection is about the request itself", async () => {
+    const calls: CapturedCall[] = [];
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000, protocol: "chat-completions" },
+      {
+        fetchFn: capturingFetch(calls, () =>
+          jsonResponse({ error: { message: "Incorrect API key provided" } }, 401),
+        ),
+      },
+    );
+    await expect(completeStreamFirst(client, [{ role: "user", content: "x" }])).rejects.toThrow(
+      /HTTP 401/,
+    );
+    // Dropping `stream` cannot fix a bad key: the fallback would burn a second
+    // request and delay the failure.
+    expect(calls).toHaveLength(1);
+  });
+
+  it("still falls back when the rejection is the stream flag itself", async () => {
+    const calls: CapturedCall[] = [];
+    const client = createLlmClient(
+      { baseUrl: "https://llm.example/v1", apiKey: "k", model: "mt", timeoutMs: 5_000, protocol: "chat-completions" },
+      {
+        fetchFn: capturingFetch(calls, () =>
+          calls.length === 1
+            ? jsonResponse({ error: { message: "stream is not supported for this model" } }, 400)
+            : jsonResponse({ choices: [{ message: { content: "ok" } }] }),
+        ),
+      },
+    );
+    await expect(completeStreamFirst(client, [{ role: "user", content: "x" }])).resolves.toBe("ok");
+    expect(calls).toHaveLength(2);
+  });
 });
 
 describe("responses protocol", () => {
@@ -453,9 +546,10 @@ describe("responses protocol", () => {
     expect(body.instructions).toBe("sys\n\nsys2");
     expect(body.input).toEqual([
       { role: "user", content: [{ type: "input_text", text: "older" }] },
-      // Assistant history travels as input_text: the Responses input schema
-      // rejects output_text outside a full output item.
-      { role: "assistant", content: [{ type: "input_text", text: "Älter" }] },
+      // Assistant history stays a bare string: typed parts there are output
+      // content on role-strict gateways, which reject input_text with
+      // "Supported values are: output_text".
+      { role: "assistant", content: "Älter" },
       { role: "user", content: [{ type: "input_text", text: "Hello" }] },
     ]);
     expect(body.store).toBe(false);
@@ -474,6 +568,23 @@ describe("responses protocol", () => {
     const body = requestBody(calls[0]);
     expect("instructions" in body).toBe(false);
     expect("reasoning" in body).toBe(false);
+    // No manual key configured: the parameter is absent, so gateways that
+    // reject it stay usable.
+    expect("prompt_cache_key" in body).toBe(false);
+  });
+
+  it("sends prompt_cache_key on both protocols when one is configured", async () => {
+    for (const protocol of ["responses", "chat-completions"] as const) {
+      const calls: CapturedCall[] = [];
+      const client = createLlmClient(
+        { ...responsesConfig, protocol, promptCacheKey: "tr-session-42" },
+        { fetchFn: capturingFetch(calls, () => (protocol === "responses"
+          ? responsesText("ok")
+          : jsonResponse({ choices: [{ message: { content: "ok" } }] }))) },
+      );
+      await client.complete([{ role: "user", content: "x" }]);
+      expect(requestBody(calls[0]).prompt_cache_key).toBe("tr-session-42");
+    }
   });
 
   it("streams response.output_text.delta events and ignores other event types", async () => {
