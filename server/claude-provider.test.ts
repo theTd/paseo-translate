@@ -11,7 +11,11 @@ import {
   type ProviderEvent,
   type ProviderInput,
 } from "@getpaseo/plugin/server/provider";
-import { createTranslateClaudeProvider } from "./claude-provider";
+import {
+  createTranslateClaudeProvider,
+  resetCatalogModelsCacheForTests,
+  type CatalogProbeTiming,
+} from "./claude-provider";
 import { ClaudeForkCoordinator } from "./claude-fork-coordinator";
 import { ClaudeCacheCompactionCoordinator } from "./claude-cache-compaction";
 import { createTranslateHandler, createTranslator } from "./translate";
@@ -84,6 +88,7 @@ function createFakeFactory() {
       description?: string;
       argumentHint?: string;
     }> | null,
+    supportedModelsFailures: 0,
     supportedModels: null as
       | Array<{
           value: string;
@@ -157,6 +162,10 @@ function createFakeFactory() {
         return undefined;
       },
       async supportedModels() {
+        if (state.supportedModelsFailures > 0) {
+          state.supportedModelsFailures -= 1;
+          throw new Error("model probe failed");
+        }
         if (state.supportedModels === null) throw new Error("no models mocked");
         return state.supportedModels;
       },
@@ -260,6 +269,7 @@ async function createHarness(
   forkCoordinator?: ClaudeForkCoordinator,
   fetchFn: typeof fetch = translatingFetch(),
   cacheCoordinator?: ClaudeCacheCompactionCoordinator,
+  catalogProbeTiming?: CatalogProbeTiming,
 ) {
   const fake = createFakeFactory();
   const provider = createTranslateClaudeProvider({
@@ -269,6 +279,9 @@ async function createHarness(
     queryFactory: fake.factory,
     forkCoordinator,
     cacheCoordinator,
+    // Production waits seconds between probe attempts; tests that are not
+    // about the retry policy must not pay that wall time.
+    catalogProbeTiming: catalogProbeTiming ?? { attemptTimeoutsMs: [1_000, 1_000, 1_000], retryDelaysMs: [0, 0] },
     ...(cacheStore !== undefined ? { cacheStore } : {}),
     ...(context !== undefined ? { context } : {}),
   });
@@ -1037,6 +1050,64 @@ describe("translate claude provider", () => {
     expect(models.find((model) => model.id === "claude-haiku-4-5")?.thinkingOptions?.map((option) => option.id)).toEqual(["default"]);
     // The probe query is discarded immediately.
     expect(fake.state.options?.abortController?.signal.aborted).toBe(true);
+  });
+
+  it("retries a failed model probe instead of caching a degraded list", async () => {
+    resetCatalogModelsCacheForTests();
+    const timing: CatalogProbeTiming = {
+      attemptTimeoutsMs: [1_000, 1_000, 1_000],
+      retryDelaysMs: [0, 0],
+    };
+    const { fake, events, send } = await createHarness(
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, timing,
+    );
+    fake.state.supportedModelsFailures = 1;
+    fake.state.supportedModels = [{ value: "claude-squad-only", displayName: "Squad only" }];
+    const probesBefore = fake.state.allOptions.length;
+    await send({ type: "catalog", requestId: "r-retry" });
+    await waitFor(events, (event) => event.type === "catalog");
+    expect(fake.state.allOptions.length - probesBefore).toBe(2);
+    const catalogEvent = events.find((event) => event.type === "catalog");
+    if (catalogEvent?.type !== "catalog") throw new Error("catalog event missing");
+    expect(catalogEvent.catalog.models.map((model) => model.id)).toContain("claude-squad-only");
+  });
+
+  it("reuses the last good model list when every probe attempt fails", async () => {
+    resetCatalogModelsCacheForTests();
+    const timing: CatalogProbeTiming = { attemptTimeoutsMs: [1_000, 1_000], retryDelaysMs: [0] };
+    const { fake, events, send } = await createHarness(
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, timing,
+    );
+    fake.state.supportedModels = [{ value: "claude-squad-only", displayName: "Squad only" }];
+    await send({ type: "catalog", requestId: "r-good" });
+    await waitFor(events, (event) => event.type === "catalog");
+    events.length = 0;
+
+    fake.state.supportedModelsFailures = 2;
+    await send({ type: "catalog", requestId: "r-degraded" });
+    await waitFor(events, (event) => event.type === "catalog");
+    expect(events.some((event) => event.type === "request.failed")).toBe(false);
+    const catalogEvent = events.find((event) => event.type === "catalog");
+    if (catalogEvent?.type !== "catalog") throw new Error("catalog event missing");
+    expect(catalogEvent.catalog.models.map((model) => model.id)).toContain("claude-squad-only");
+  });
+
+  it("falls back to the curated catalog when no probe attempt succeeds and nothing good was cached", async () => {
+    resetCatalogModelsCacheForTests();
+    const timing: CatalogProbeTiming = { attemptTimeoutsMs: [1_000, 1_000], retryDelaysMs: [0] };
+    const { fake, events, send } = await createHarness(
+      undefined, undefined, undefined, undefined, undefined, undefined, undefined, timing,
+    );
+    fake.state.supportedModels = [{ value: "claude-squad-only", displayName: "Squad only" }];
+    fake.state.supportedModelsFailures = 2;
+    await send({ type: "catalog", requestId: "r-no-good" });
+    await waitFor(events, (event) => event.type === "catalog");
+    expect(events.some((event) => event.type === "request.failed")).toBe(false);
+    const catalogEvent = events.find((event) => event.type === "catalog");
+    if (catalogEvent?.type !== "catalog") throw new Error("catalog event missing");
+    const ids = catalogEvent.catalog.models.map((model) => model.id);
+    expect(ids).toContain("claude-sonnet-5");
+    expect(ids).not.toContain("claude-squad-only");
   });
 
   it("applies model and mode live and schedules thinking for the next query", async () => {

@@ -116,7 +116,27 @@ export interface ClaudeProviderDeps extends TranslatorDeps {
   queryFactory?: ClaudeQueryFactory;
   /** Test seam; defaults to the real SDK forkSession (conversation rewind). */
   forkSession?: (sessionId: string, options: { upToMessageId: string }) => Promise<{ sessionId: string }>;
+  /** Test seam: per-attempt timeouts and the waits between model-probe retries. */
+  catalogProbeTiming?: CatalogProbeTiming;
 }
+
+export interface CatalogProbeTiming {
+  /** One entry per attempt: how long that attempt may take. */
+  attemptTimeoutsMs: readonly number[];
+  /** Wait before retry N (index 0 = before the second attempt). */
+  retryDelaysMs: readonly number[];
+}
+
+/**
+ * The daemon gives a catalog refresh 120 s by default, so the worst case
+ * (10 + 2 + 20 + 5 + 30 = 67 s) must stay well below it. The first attempt is
+ * short because a healthy CLI answers in a second or two; the later ones
+ * absorb a cold start or a launcher syncing credentials.
+ */
+const DEFAULT_CATALOG_PROBE_TIMING: CatalogProbeTiming = {
+  attemptTimeoutsMs: [10_000, 20_000, 30_000],
+  retryDelaysMs: [2_000, 5_000],
+};
 
 const CAPABILITIES = [
   "prompt.message",
@@ -319,6 +339,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
     sessions,
     translator,
     queryFactory,
+    catalogProbeTiming: deps.catalogProbeTiming ?? DEFAULT_CATALOG_PROBE_TIMING,
     resolveVersion: deps.resolveVersion ?? (async (executable) => {
       try {
         return (await execCommand(executable ?? "claude", ["--version"], { shell: false, timeout: 5_000 })).stdout;
@@ -396,6 +417,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
 }
 
 interface DispatchContext {
+  catalogProbeTiming: CatalogProbeTiming;
   cacheCoordinator?: import("./claude-cache-compaction").ClaudeCacheCompactionCoordinator;
   forkCoordinator?: ClaudeForkCoordinator;
   unregisterForks: Map<string, () => void>;
@@ -1906,6 +1928,11 @@ async function applyConfigChanges(
 /** Last catalog mapped from the CLI; reused for session.config states. */
 let catalogModelsCache: ProviderModel[] | null = null;
 
+/** Test seam: forget the last good model list between tests. */
+export function resetCatalogModelsCacheForTests(): void {
+  catalogModelsCache = null;
+}
+
 /**
  * Probes the CLI for its real model list (same data the native provider
  * surface shows) through a throwaway query, then discards the process.
@@ -1919,15 +1946,62 @@ async function probeCatalog(context: DispatchContext): Promise<{
   return { models, ...claudeModeCatalog(process.env) };
 }
 
+type ProbeAttempt =
+  | { kind: "ok"; models: ProviderModel[] }
+  | { kind: "unsupported" }
+  | { kind: "failed"; reason: string };
+
+/**
+ * Asks the CLI for its real model list, retrying transient failures (a slow
+ * start right after boot, credentials syncing in the launcher, a busy
+ * machine). When every attempt fails, the last good list from this process is
+ * reused; failing that, the curated catalog stands in — a probe failure must
+ * never erase model choices, and the daemon caches whatever catalog it gets
+ * until a forced refresh.
+ */
 async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
   const values = await context.loadValues();
   const executable =
     values.claudeExecutablePath.length > 0 ? values.claudeExecutablePath : resolvePathClaude();
-  const abort = new AbortController();
   const version = context.resolveVersion(executable).catch(() => undefined);
   const configDir = resolveConfiguredClaudeConfigDir(values.claudeConfigDir);
+  const { attemptTimeoutsMs, retryDelaysMs } = context.catalogProbeTiming;
+  const attempts = Math.max(1, attemptTimeoutsMs.length);
+  let failed = false;
+  for (let index = 0; index < attempts; index += 1) {
+    if (index > 0) await sleep(retryDelaysMs[index - 1] ?? retryDelaysMs.at(-1) ?? 0);
+    const timeoutMs = attemptTimeoutsMs[index] ?? attemptTimeoutsMs.at(-1) ?? 10_000;
+    const attempt = await probeModelsOnce(context, executable, configDir, timeoutMs);
+    // A CLI without the model surface will not grow one between attempts.
+    if (attempt.kind === "unsupported") break;
+    if (attempt.kind === "ok") {
+      if (index > 0) {
+        console.warn(`[translate-claude] model probe succeeded on attempt ${index + 1}/${attempts}`);
+      }
+      return rememberCatalog(await completeClaudeCatalog(attempt.models, configDir, await version));
+    }
+    failed = true;
+    console.warn(
+      `[translate-claude] model probe attempt ${index + 1}/${attempts} failed: ${attempt.reason}`,
+    );
+  }
+  if (failed && catalogModelsCache !== null) {
+    console.warn("[translate-claude] model probe failed on every attempt; reusing the last good model list");
+    return catalogModelsCache;
+  }
+  // Curated plus configured models, exactly what a CLI without model
+  // discovery shows.
+  return rememberCatalog(await completeClaudeCatalog([], configDir, await version));
+}
+
+async function probeModelsOnce(
+  context: DispatchContext,
+  executable: string | null,
+  configDir: string,
+  timeoutMs: number,
+): Promise<ProbeAttempt> {
+  const abort = new AbortController();
   const sink = new ClaudeMessageInput();
-  let models: ProviderModel[] = [];
   try {
     const query = context.queryFactory({ prompt: sink.iterable, options: {
       cwd: process.env.USERPROFILE ?? process.env.HOME ?? process.cwd(),
@@ -1936,19 +2010,30 @@ async function probeModels(context: DispatchContext): Promise<ProviderModel[]> {
       settingSources: ["user"], settings: { disableAllHooks: true },
       ...(executable !== null ? { pathToClaudeCodeExecutable: executable } : {}),
     } });
-    if (query.supportedModels) {
-      const infos = await withTimeout(query.supportedModels(), 5_000, "model probe timed out");
-      models = infos.map(modelInfoToProviderModel);
-    }
-  } catch {
-    // A failed probe does not remove curated or configured model choices.
+    if (!query.supportedModels) return { kind: "unsupported" };
+    const infos = await withTimeout(
+      query.supportedModels(),
+      timeoutMs,
+      `model probe timed out after ${Math.round(timeoutMs / 1000)}s`,
+    );
+    const models = infos.map(modelInfoToProviderModel);
+    if (models.length === 0) return { kind: "failed", reason: "the CLI reported no models" };
+    return { kind: "ok", models };
+  } catch (error) {
+    return { kind: "failed", reason: describe(error) };
   } finally {
     sink.close();
     abort.abort();
   }
-  const catalog = await completeClaudeCatalog(models, configDir, await version);
+}
+
+function rememberCatalog(catalog: ProviderModel[]): ProviderModel[] {
   catalogModelsCache = catalog;
   return catalog;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function modelInfoToProviderModel(info: ModelInfoLike): ProviderModel {
