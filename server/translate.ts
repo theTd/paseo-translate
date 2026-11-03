@@ -201,6 +201,63 @@ function rememberOriginalFragment(
 }
 
 /**
+ * Cache keys gained the wire protocol (`296eb2a`) and later the session scope
+ * (`9b6bf42`). Entries written before those fields existed keep the older JSON
+ * shape, so an upgraded plugin misses every one of them — and since the
+ * daemon default protocol also moved to `responses`, the next open re-bills
+ * the whole transcript. A translation's text does not depend on the wire
+ * protocol, so serve the pre-upgrade entry and promote it under the current
+ * key; the legacy line then ages out through the normal LRU.
+ */
+function legacyAwareStore(store: TranslationCacheStore): TranslationCacheStore {
+  return {
+    get(key) {
+      const value = store.get(key);
+      if (value !== undefined) return value;
+      const legacy = legacyCacheKey(key);
+      if (legacy === undefined) return undefined;
+      const older = store.get(legacy);
+      if (older === undefined) return undefined;
+      store.set(key, older);
+      return older;
+    },
+    set(key, value) {
+      store.set(key, value);
+    },
+    stats() {
+      return store.stats();
+    },
+  };
+}
+
+const PROMPT_DISPLAY_KEY_PREFIX = "prompt-display:v1:";
+
+/**
+ * The pre-upgrade shape of `key`: the same JSON without `protocol` and
+ * `scope`. Those are the only fields added since the first persistent cache
+ * format, and `JSON.parse`/`stringify` preserves the remaining order, so the
+ * result is byte-identical to what the older code wrote. Non-JSON keys
+ * (restored-original fragments) have no legacy variant.
+ */
+function legacyCacheKey(key: string): string | undefined {
+  const prefix = key.startsWith(PROMPT_DISPLAY_KEY_PREFIX) ? PROMPT_DISPLAY_KEY_PREFIX : "";
+  const encoded = key.slice(prefix.length);
+  if (!encoded.startsWith("{")) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(encoded);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const fields = { ...(parsed as Record<string, unknown>) };
+  if (!("protocol" in fields) && !("scope" in fields)) return undefined;
+  delete fields["protocol"];
+  delete fields["scope"];
+  return `${prefix}${JSON.stringify(fields)}`;
+}
+
+/**
  * Cached translation service shared by the prompt path (fail closed, unary),
  * the timeline renderer path (display only, unary fallback), and the
  * streaming renderer path (display only, stream-first). Settings are re-read
@@ -208,7 +265,7 @@ function rememberOriginalFragment(
  * plugin reload.
  */
 export function createTranslator(deps: TranslatorDeps): Translator {
-  const cache = deps.cacheStore ?? createMemoryTranslationCacheStore();
+  const cache = legacyAwareStore(deps.cacheStore ?? createMemoryTranslationCacheStore());
   const inflight = deps.inflight ?? createTranslationInflightRegistry();
 
   type PreparedMiss = {

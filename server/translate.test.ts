@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +18,7 @@ import {
 } from "./translation-context";
 import {
   resolveLanguagePair,
+  resolveTranslationSystemPrompt,
   TRANSLATION_BATCH_ADDENDUM,
   translationItemClose,
   translationItemOpen,
@@ -35,6 +37,26 @@ function requestFor(text: string, direction: "user-to-agent" | "agent-to-user"):
     ? { source: "en", target: "de" }
     : { source: "de", target: "en" };
   return translationRequestMessage(wrapTranslationInput(text), pair);
+}
+
+/**
+ * The cache key the plugin wrote before `protocol` and `scope` joined it, in
+ * the exact field order of the old `cacheKey` (see the legacy-lookup note in
+ * translate.ts).
+ */
+function legacyCacheKeyFor(text: string, direction: "user-to-agent" | "agent-to-user"): string {
+  const pair = resolveLanguagePair(values, direction);
+  const digest = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
+  return JSON.stringify({
+    direction,
+    source: pair.source,
+    target: pair.target,
+    baseUrl: digest(values.endpointBaseUrl),
+    model: digest(values.endpointModel),
+    effort: values.translationReasoningEffort,
+    prompt: digest(resolveTranslationSystemPrompt(values, pair)),
+    text: digest(text),
+  });
 }
 
 const tempRoots: string[] = [];
@@ -253,6 +275,24 @@ describe("translate service", () => {
     });
     await expect(second.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
     expect(secondCalls).toHaveLength(0);
+  });
+
+  it("serves pre-upgrade cache entries written before the key carried protocol and scope", async () => {
+    const store = createMemoryTranslationCacheStore();
+    store.set(legacyCacheKeyFor("Hello", "user-to-agent"), "OLD:Hello");
+    const calls: Captured[] = [];
+    const translator = createTranslator({
+      loadConfig: async () => values,
+      fetchFn: translatingFetch(calls, (text) => `T:${text}`),
+      cacheStore: store,
+    });
+    // Session context is enabled in `values`, so the lookup asks for a scoped
+    // key; the pre-upgrade entry was written before scope existed.
+    await expect(
+      translator.translate("Hello", "user-to-agent", { contextKey: "agent-1" }),
+    ).resolves.toBe("OLD:Hello");
+    await expect(translator.getCachedTranslation("Hello", "user-to-agent")).resolves.toBe("OLD:Hello");
+    expect(calls).toHaveLength(0);
   });
 
   it("sends a custom system prompt and invalidates the cache when it changes", async () => {

@@ -2203,7 +2203,7 @@ async function buildReplayRestore(
         if (block.length > TRANSLATION_TEXT_LIMIT) return undefined;
         try {
           const back = await translatePromptFragment(block, (fragment) =>
-            context.translator.translate(fragment, "agent-to-user"),
+            context.translator.translate(fragment, "agent-to-user", { contextKey }),
           );
           if (back.trim().length === 0 || back === block) return undefined;
           return back;
