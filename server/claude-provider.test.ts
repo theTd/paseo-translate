@@ -3262,8 +3262,9 @@ describe("translate claude provider extended protocol", () => {
     const pathModule = await import("node:path");
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
     const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = pathModule.join(configDir, "projects", encoded);
+    // The source canonicalizes the cwd before encoding (macOS /var is
+    // /private/var), so the fixture must use the same helper.
+    const projectDir = claudeProjectDirOf(cwd, configDir);
     await fs.mkdir(pathModule.join(projectDir, "cs-replay", "subagents"), { recursive: true });
     await fs.writeFile(
       pathModule.join(projectDir, "cs-replay.jsonl"),
@@ -3337,8 +3338,9 @@ describe("translate claude provider extended protocol", () => {
     const pathModule = await import("node:path");
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
     const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = pathModule.join(configDir, "projects", encoded);
+    // The source canonicalizes the cwd before encoding (macOS /var is
+    // /private/var), so the fixture must use the same helper.
+    const projectDir = claudeProjectDirOf(cwd, configDir);
     await fs.mkdir(pathModule.join(projectDir, "cs-replay-flat", "subagents"), { recursive: true });
     await fs.writeFile(
       pathModule.join(projectDir, "cs-replay-flat.jsonl"),
@@ -3403,8 +3405,9 @@ describe("translate claude provider extended protocol", () => {
     const pathModule = await import("node:path");
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
     const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = pathModule.join(configDir, "projects", encoded);
+    // The source canonicalizes the cwd before encoding (macOS /var is
+    // /private/var), so the fixture must use the same helper.
+    const projectDir = claudeProjectDirOf(cwd, configDir);
     await fs.mkdir(pathModule.join(projectDir, "cs-new", "subagents"), { recursive: true });
     await fs.writeFile(
       pathModule.join(projectDir, "cs-new.jsonl"),
@@ -3498,8 +3501,9 @@ describe("translate claude provider extended protocol", () => {
     const pathModule = await import("node:path");
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
     const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = pathModule.join(configDir, "projects", encoded);
+    // The source canonicalizes the cwd before encoding (macOS /var is
+    // /private/var), so the fixture must use the same helper.
+    const projectDir = claudeProjectDirOf(cwd, configDir);
     await fs.mkdir(projectDir, { recursive: true });
     await fs.writeFile(
       pathModule.join(projectDir, "cs-rt.jsonl"),
@@ -3548,8 +3552,9 @@ describe("translate claude provider extended protocol", () => {
     const pathModule = await import("node:path");
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
     const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = pathModule.join(configDir, "projects", encoded);
+    // The source canonicalizes the cwd before encoding (macOS /var is
+    // /private/var), so the fixture must use the same helper.
+    const projectDir = claudeProjectDirOf(cwd, configDir);
     await fs.mkdir(pathModule.join(projectDir, "cs-fb", "subagents"), { recursive: true });
     const cacheStore = createMemoryTranslationCacheStore();
     const translator = createTranslator({ loadConfig: async () => values, cacheStore, fetchFn: translatingFetch() });
@@ -3621,8 +3626,9 @@ describe("translate claude provider extended protocol", () => {
     const pathModule = await import("node:path");
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
     const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = pathModule.join(configDir, "projects", encoded);
+    // The source canonicalizes the cwd before encoding (macOS /var is
+    // /private/var), so the fixture must use the same helper.
+    const projectDir = claudeProjectDirOf(cwd, configDir);
     await fs.mkdir(projectDir, { recursive: true });
     const attachment = JSON.stringify({ type: "note", mimeType: "text/plain", extra: 1 });
     const big = `prefix-${"x".repeat(100_001)}`;
@@ -3666,8 +3672,9 @@ describe("translate claude provider extended protocol", () => {
     const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
     const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
     const cacheDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "translate-cache-"));
-    const encoded = cwd.replace(/[^a-zA-Z0-9]/g, "-");
-    const projectDir = pathModule.join(configDir, "projects", encoded);
+    // The source canonicalizes the cwd before encoding (macOS /var is
+    // /private/var), so the fixture must use the same helper.
+    const projectDir = claudeProjectDirOf(cwd, configDir);
     await fs.mkdir(projectDir, { recursive: true });
     const previous = process.env["CLAUDE_CONFIG_DIR"];
     process.env["CLAUDE_CONFIG_DIR"] = configDir;
