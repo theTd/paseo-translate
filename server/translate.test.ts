@@ -117,6 +117,33 @@ function translatingFetch(calls: Captured[], map: (text: string) => string): typ
 }
 
 describe("translate service", () => {
+  it("passes CJK-free user text through untranslated for a CJK user and an English agent", async () => {
+    const calls: Captured[] = [];
+    const zhEn = { ...values, userLanguage: "zh-CN", agentLanguage: "en" };
+    const translator = createTranslator({
+      loadConfig: async () => zhEn,
+      fetchFn: translatingFetch(calls, (text) => `EN:${text}`),
+    });
+    const english = "Refactor server/a.ts and report the changed files.";
+    await expect(translator.translate(english, "user-to-agent")).resolves.toBe(english);
+    // The cap guards the endpoint; a prompt the inner agent can take verbatim
+    // must not fail just because it exceeds it.
+    await expect(
+      translator.translate("x".repeat(150_000), "user-to-agent"),
+    ).resolves.toHaveLength(150_000);
+    expect(calls).toHaveLength(0);
+    await expect(translator.translate("修一下 server/a.ts", "user-to-agent")).resolves.toBe(
+      "EN:修一下 server/a.ts",
+    );
+    await expect(translator.translate("Done.", "agent-to-user")).resolves.toBe("EN:Done.");
+    expect(calls).toHaveLength(2);
+    const german = createTranslator({
+      loadConfig: async () => ({ ...zhEn, agentLanguage: "de" }),
+      fetchFn: translatingFetch(calls, (text) => `DE:${text}`),
+    });
+    await expect(german.translate(english, "user-to-agent")).resolves.toBe(`DE:${english}`);
+  });
+
   it("sends the language pair in the system prompt", async () => {
     const calls: Captured[] = [];
     const translator = createTranslator({

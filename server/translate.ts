@@ -200,6 +200,28 @@ function rememberOriginalFragment(
   cache.set(key, original);
 }
 
+const CJK_SOURCE_LANGUAGE_RE = /^(?:zh|ja|ko)\b|chinese|japanese|korean|中文|汉语|漢語|日本語|한국어/i;
+const ENGLISH_TARGET_LANGUAGE_RE = /^en\b|^english$/i;
+/** Every range that carries CJK text: kana, han, hangul, CJK punctuation, fullwidth forms. */
+const CJK_TEXT_RE =
+  /[\u3000-\u303f\u3040-\u30ff\u3100-\u312f\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]|[\u{20000}-\u{2fa1f}]/u;
+
+/**
+ * User→agent text this language pair does not need translated: a CJK-speaking
+ * user writing to an English agent, text with no CJK character at all.
+ * English instructions, paths, code and Paseo's own English system prompt all
+ * fall here — the agent must receive them verbatim anyway, so a translation
+ * request would only cost a round trip (and hit the length cap on long
+ * prompts the agent could take as-is).
+ */
+export function isUntranslatableForPair(text: string, pair: LanguagePair): boolean {
+  return (
+    CJK_SOURCE_LANGUAGE_RE.test(pair.source.trim()) &&
+    ENGLISH_TARGET_LANGUAGE_RE.test(pair.target.trim()) &&
+    !CJK_TEXT_RE.test(text)
+  );
+}
+
 /**
  * Cache keys gained the wire protocol (`296eb2a`) and later the session scope
  * (`9b6bf42`). Entries written before those fields existed keep the older JSON
@@ -296,14 +318,19 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     contextKey?: string,
   ): Promise<CacheLookup> {
     if (text.trim().length === 0) return { trivial: text } as const;
+    const doneConfig = step.start("lookup.config");
+    const values = await deps.loadConfig().finally(doneConfig);
+    const pair = resolveLanguagePair(values, direction);
+    // Already in the agent's language: pass it through before the length cap,
+    // which exists for the endpoint, not for the inner agent.
+    if (direction === "user-to-agent" && isUntranslatableForPair(text, pair)) {
+      return { trivial: text } as const;
+    }
     if (text.length > TRANSLATION_TEXT_LIMIT) {
       throw new Error(
         `Refusing to translate ${text.length} characters (limit ${TRANSLATION_TEXT_LIMIT})`,
       );
     }
-    const doneConfig = step.start("lookup.config");
-    const values = await deps.loadConfig().finally(doneConfig);
-    const pair = resolveLanguagePair(values, direction);
     const systemPrompt = resolveTranslationSystemPrompt(values, pair);
     const context = deps.context;
     const useContext =
