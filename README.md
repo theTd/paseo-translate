@@ -36,6 +36,13 @@ Slash-command frames keep their command word verbatim; only the free-text
 remainder is translated. Non-text content blocks (images) pass through
 untouched.
 
+Text that is already in the agent's language is never sent to the endpoint:
+when **Your language** is Chinese, Japanese or Korean and **Agent language**
+is English, prompt text without a single CJK character (English
+instructions, paths, code, Paseo's own English system prompt) is forwarded
+verbatim. This also keeps long prompts the inner agent could take as-is
+from failing the translation length cap.
+
 Display jobs that start within 80ms for the same session share one tagged
 endpoint call (up to 40 items / 80k source chars). A lone live reply still
 streams. If the model does not return the item tags, that batch falls back
@@ -194,7 +201,11 @@ Create agents against **Translate (ACP)**, **Translate (Claude Code)**, or
 **Translate (Codex)**. Provider-list icons retain Claude's and Codex's native
 logos with a small translation badge at the bottom right. The generic ACP wrapper
 uses Paseo's agent fallback icon with the same badge. ACP sessions spawn the inner agent through the
-translating proxy; the direct providers talk to Claude Code or Codex natively.
+translating proxy with the session's own environment (daemon and
+`agent.session_open` hook variables, minus the translation bridge id), so
+wrapped agents that read per-session credentials work as they do under a
+natively spawned provider; the direct providers talk to Claude Code or Codex
+natively.
 
 ## Claude cache countdown and AFK compaction
 

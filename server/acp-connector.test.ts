@@ -34,6 +34,24 @@ process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "agent/env", param
 require("node:readline").createInterface({ input: process.stdin }).on("line", () => undefined);
 `;
 
+/**
+ * Agent that reports a select option whose real choice is the empty string,
+ * then echoes requests like ECHO_AGENT.
+ */
+const CONFIG_AGENT = `
+process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s", update: { configOptions: [{ id: "thought", type: "select", name: "Thinking", currentValue: "", options: [{ value: "", label: "Default" }, { value: "low", label: "Low" }] }] } } }) + "\\n");
+const readline = require("node:readline");
+readline.createInterface({ input: process.stdin }).on("line", (line) => {
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  let message;
+  try { message = JSON.parse(trimmed); } catch { return; }
+  if (message && typeof message.method === "string" && message.id !== undefined && message.id !== null) {
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { method: message.method, params: message.params ?? null } }) + "\\n");
+  }
+});
+`;
+
 const streams: AcpStream[] = [];
 
 function echoStream(translate: (text: string, contextKey?: string) => Promise<string>): AcpStream {
@@ -186,6 +204,45 @@ describe("translating ACP connector", () => {
     expect(frame).toMatchObject({
       method: "agent/env",
       params: { SESSION_TOKEN: "s3cret", SHARED: "settings", PASEO_TRANSLATE_AGENT_ID: null },
+    });
+  });
+
+  it("keeps an inner agent's empty select value valid for the host and maps it back", async () => {
+    const stream = createTranslatingAcpStream({
+      command: [process.execPath, "-e", CONFIG_AGENT],
+      translate: async (text) => text,
+    });
+    streams.push(stream);
+    const [update] = await readCount(stream, 1);
+    expect(update).toMatchObject({
+      params: {
+        update: {
+          configOptions: [
+            {
+              id: "thought",
+              currentValue: "default",
+              options: [
+                { value: "default" },
+                { value: "low" },
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const writer = stream.writable.getWriter();
+    await writer.write({
+      jsonrpc: "2.0",
+      id: 7,
+      method: "session/set_config_option",
+      params: { sessionId: "s", configId: "thought", value: "default" },
+    } as AcpStreamMessage);
+    writer.releaseLock();
+    const [response] = await readCount(stream, 1);
+    expect(response).toMatchObject({
+      id: 7,
+      result: { method: "session/set_config_option", params: { value: "" } },
     });
   });
 

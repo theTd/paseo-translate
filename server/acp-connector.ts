@@ -4,6 +4,11 @@ import { isSerializedAttachment, restorePromptFragment, translatePromptFragment 
 import type { PromptTranslationFragment } from "../shared/prompt-text";
 import { omitTranslationBridgeEnv } from "../shared/translate";
 import {
+  createEmptyValueState,
+  denormalizeOutboundFrame,
+  normalizeInboundFrame,
+} from "./acp-config-values";
+import {
   MAX_SESSION_LIST_TITLES_PER_FRAME,
   SESSION_TITLE_DISPLAY_LIMIT,
 } from "./session-titles";
@@ -87,6 +92,9 @@ const KILL_GRACE_MS = 3_000;
  */
 export function createTranslatingAcpStream(config: TranslatingConnectorConfig): AcpStream {
   const [executable, ...args] = config.command;
+  // Inner agents may report an empty select value; the host rejects it, so
+  // swap it for a stand-in inbound and map it back outbound (per connection).
+  const emptyValues = createEmptyValueState();
   if (!executable || executable.trim().length === 0) {
     throw new Error("Translate connector requires an inner agent command");
   }
@@ -217,6 +225,7 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
       );
       return;
     }
+    parsed = normalizeInboundFrame(parsed, emptyValues);
     try {
       enqueueInbound(await maybeTranslateInbound(parsed));
     } catch {
@@ -360,6 +369,9 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
   /** Returns the frame to forward, or null when it was blocked. */
   async function rewriteFrame(message: AcpStreamMessage): Promise<AcpStreamMessage | null> {
     if (!("method" in message)) return message;
+    if (message.method === "session/set_config_option") {
+      return denormalizeOutboundFrame(message, emptyValues);
+    }
     if (message.method === "session/prompt") return rewritePrompt(message);
     if (message.method === "session/new" || message.method === "session/load") {
       return rewriteSession(message);
