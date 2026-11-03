@@ -24,18 +24,40 @@ const NOT_CONFIGURED_MARKERS = [
 export type TranslationErrorKind = "busy" | "fatal" | "retryable";
 
 /**
+ * True when a fresh request cannot succeed: the same body would hit the same
+ * rejection. Credentials (401/403), a missing route (404/405), or content the
+ * endpoint refuses (413, or a 400 without the stream complaint) do not become
+ * valid by trying again, and every attempt opens a new billed job.
+ *
+ * The one 4xx that backwards into a retry is a gateway refusing the `stream`
+ * flag itself (typically 400 or 422 with "stream" in the body): dropping the
+ * flag is exactly the fix, so those stay retryable. 408 and 429 are transient
+ * despite being 4xx.
+ */
+export function isPermanentTranslationHttpRefusal(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = /\bHTTP (\d{3})\b/.exec(message)?.[1];
+  if (status === undefined) return false;
+  const code = Number(status);
+  if (code < 400 || code > 499 || code === 408 || code === 429) return false;
+  if (code === 400 || code === 422) return !/stream/i.test(message);
+  return true;
+}
+
+/**
  * Classifies a translation RPC failure. `busy` gets a longer backoff so a
  * reopened long session does not retry-storm the pending-job server window;
- * `fatal` (oversized text, unconfigured endpoint) fails immediately;
- * everything else (unknown job, network, timeout, HTTP 5xx, malformed
- * responses) is treated as transient.
+ * `fatal` (oversized text, unconfigured endpoint, permanent HTTP refusal)
+ * fails immediately; everything else (unknown job, network, timeout, HTTP
+ * 5xx, malformed responses) is treated as transient.
  */
 export function classifyTranslationError(error: unknown): TranslationErrorKind {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes(TRANSLATION_BUSY_MESSAGE)) return "busy";
   if (
     message.startsWith(TRANSLATION_LIMIT_REFUSAL_PREFIX) ||
-    NOT_CONFIGURED_MARKERS.some((marker) => message.includes(marker))
+    NOT_CONFIGURED_MARKERS.some((marker) => message.includes(marker)) ||
+    isPermanentTranslationHttpRefusal(error)
   ) {
     return "fatal";
   }

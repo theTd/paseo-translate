@@ -144,8 +144,9 @@ export async function runDisplayTranslationChain(
       }
     }
 
-    // A fatal stream failure (oversized text, unconfigured endpoint) fails
-    // identically on the unary path, so skip straight to the failure below.
+    // A fatal stream failure (oversized text, unconfigured endpoint, a 4xx
+    // the endpoint will refuse again) fails identically on the unary path,
+    // so skip straight to the failure below.
     if (classifyTranslationError(lastError) !== "fatal") {
       for (let attempt = 1; attempt <= DISPLAY_UNARY_MAX_ATTEMPTS; attempt++) {
         try {

@@ -102,6 +102,23 @@ describe("hasVisibleTranslation", () => {
 });
 
 describe("runDisplayTranslationChain", () => {
+  it.each([401, 403, 404, 405, 413, 400, 422])(
+    "does not repeat an unrecoverable HTTP %s refusal",
+    async (status) => {
+      const error = new Error(`Translation endpoint returned HTTP ${status}: refused`);
+      const harness = createHarness({
+        poll: async () => {
+          throw error;
+        },
+      });
+      const outcome = await runDisplayTranslationChain(harness.rpcs, harness.callbacks);
+      expect(outcome).toEqual({ status: "failed", error });
+      expect(harness.rpcs.startCalls).toBe(1);
+      expect(harness.rpcs.unaryCalls).toBe(0);
+      expect(harness.callbacks.sleeps).toEqual([]);
+    },
+  );
+
   it("propagates a unary success after exhausted stream attempts (N1 regression)", async () => {
     const harness = createHarness({
       start: async () => {

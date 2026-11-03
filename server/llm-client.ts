@@ -5,6 +5,7 @@
  * route. One attempt per call; the caller owns the failure policy.
  */
 
+import { isPermanentTranslationHttpRefusal } from "../shared/translation-retry";
 import { createSizeWatch, createStepTracer } from "./memory-probe";
 
 const step = createStepTracer();
@@ -675,30 +676,7 @@ export async function completeStreamFirst(
     // cannot become a success by dropping `stream`: the same request body
     // without the flag hits the same validator. Retrying it only doubles the
     // bill and delays the failure, so surface it instead.
-    if (isPermanentHttpRefusal(error)) throw error;
+    if (isPermanentTranslationHttpRefusal(error)) throw error;
     return client.complete(messages, options);
   }
-}
-
-/**
- * True when the unary fallback cannot succeed: the exact same request body
- * with only `stream` flipped would hit the same rejection.
- *
- * The one 4xx that backwards into a fallback is a gateway refusing the
- * `stream` flag itself (typically 400 or 422 with "stream" in the error
- * body) — dropping the flag is exactly the fix, so those keep the retry.
- * Everything else in 4xx is about the request's content, credentials or
- * route: 401/403 (key), 404/405 (missing route), 413 (too large), or a 400
- * whose body never mentions streaming. Billing a second identical call there
- * only doubles the cost and delays the failure. 408 and 429 stay retryable.
- */
-function isPermanentHttpRefusal(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  const status = /\bHTTP (\d{3})\b/.exec(message)?.[1];
-  if (status === undefined) return false;
-  const code = Number(status);
-  if (code < 400 || code > 499) return false;
-  if (code === 408 || code === 429) return false;
-  if (code === 400 || code === 422) return !/stream/i.test(message);
-  return true;
 }

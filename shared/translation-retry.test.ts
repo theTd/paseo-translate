@@ -104,4 +104,27 @@ describe("classifyTranslationError", () => {
     );
     expect(classifyTranslationError("plain string failure")).toBe("retryable");
   });
+
+  it("treats 4xx refusals a fresh request cannot repair as fatal", () => {
+    for (const status of [400, 401, 403, 404, 405, 413, 422]) {
+      expect(
+        classifyTranslationError(new Error(`Translation endpoint returned HTTP ${status}: refused`)),
+      ).toBe("fatal");
+    }
+  });
+
+  it("keeps the stream-flag 4xx and the transient 4xx retryable", () => {
+    expect(
+      classifyTranslationError(new Error("Translation endpoint returned HTTP 400: unknown field stream")),
+    ).toBe("retryable");
+    expect(
+      classifyTranslationError(new Error("Translation endpoint returned HTTP 422: bad stream value")),
+    ).toBe("retryable");
+    expect(classifyTranslationError(new Error("Translation endpoint returned HTTP 408: timeout"))).toBe(
+      "retryable",
+    );
+    expect(
+      classifyTranslationError(new Error("Translation endpoint returned HTTP 429: slow down")),
+    ).toBe("retryable");
+  });
 });
