@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
 import { isSerializedAttachment, restorePromptFragment, translatePromptFragment } from "./prompt-text";
 import type { PromptTranslationFragment } from "../shared/prompt-text";
+import { omitTranslationBridgeEnv } from "../shared/translate";
 import {
   MAX_SESSION_LIST_TITLES_PER_FRAME,
   SESSION_TITLE_DISPLAY_LIMIT,
@@ -10,6 +11,14 @@ export interface TranslatingConnectorConfig {
   /** argv of the inner ACP-speaking agent, e.g. ["node", "agent.js"]. */
   command: readonly string[];
   env?: Readonly<Record<string, string>>;
+  /**
+   * Environment of the session this connection belongs to (`session.open`
+   * `config.env`, captured per async context in provider.ts). Command-mode
+   * providers receive it from the host at spawn time; the SDK calls
+   * `connector()` without arguments, so connector mode has to carry it over
+   * itself. Sits below the fixed settings `env` and above `process.env`.
+   */
+  sessionEnv?: Readonly<Record<string, string>>;
   /**
    * Translates one user-language text fragment into the agent language.
    * Fail closed: when this rejects, the prompt never reaches the inner agent.
@@ -84,7 +93,9 @@ export function createTranslatingAcpStream(config: TranslatingConnectorConfig): 
   const frameScope = (params: unknown): string | undefined =>
     config.scopeKey ?? readFrameSessionId(params);
   const child = spawn(executable, args, {
-    env: { ...process.env, ...config.env },
+    // The bridge agent id stays internal (see omitTranslationBridgeEnv);
+    // fixed settings env wins over anything the session carries.
+    env: { ...process.env, ...omitTranslationBridgeEnv(config.sessionEnv ?? {}), ...config.env },
     stdio: ["pipe", "pipe", "pipe"],
   });
   child.stderr.on("data", () => undefined);

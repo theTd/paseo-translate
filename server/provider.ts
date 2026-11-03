@@ -1,7 +1,7 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import { createTranslatingAcpStream } from "./acp-connector";
+import { currentSessionEnv, withSessionEnv } from "./acp-session-env";
 import { createTranslator, type TranslatorDeps } from "./translate";
 import {
   TRANSLATE_PROVIDER_ID,
@@ -11,36 +11,29 @@ import {
 } from "../shared/translate";
 
 /**
- * Agent id of the session being opened, visible to `connector()`. The ACP
- * runner calls `connector()` without arguments, once per session, inside the
- * async work started by `send(session.open)`; running that send in this
- * storage hands the bridged agent id to exactly that connection, however
- * many sessions open concurrently. Outside an open (catalog, session list)
- * the store is empty and frames fall back to their inner session id.
- */
-const openingAgent = new AsyncLocalStorage<string>();
-
-/**
  * Registers one ACP provider that wraps the configured inner agent command.
  * Every prompt is translated into the agent language before the inner agent
  * sees it; everything the agent emits streams back untouched.
  */
 export function createTranslateProvider(deps: TranslatorDeps): ProviderRegistration {
   const translator = createTranslator(deps);
-  const registration = runAcpProvider({
+  const registration = withSessionEnv(runAcpProvider({
     id: TRANSLATE_PROVIDER_ID,
     label: TRANSLATE_PROVIDER_LABEL,
     description:
       "Converses in your language while the wrapped ACP agent works in its own. Prompts are translated before they reach the agent; replies are translated in the app after the stream completes.",
     icon: "icons/acp-translate.svg",
     async connector() {
-      const scopeKey = openingAgent.getStore();
+      const sessionEnv = currentSessionEnv();
+      const scopeKey =
+        sessionEnv !== undefined ? resolveTranslationContextKey(sessionEnv, "") : "";
       const values = await deps.loadConfig();
       assertAcpConfigured(values);
       return createTranslatingAcpStream({
         command: values.innerAgentCommand,
         env: values.innerAgentEnv,
-        ...(scopeKey !== undefined ? { scopeKey } : {}),
+        ...(sessionEnv !== undefined ? { sessionEnv } : {}),
+        ...(scopeKey.length > 0 ? { scopeKey } : {}),
         translate: values.translatePrompts
           ? (text, contextKey) => translator.translate(text, "user-to-agent", { contextKey })
           : passThrough,
@@ -63,22 +56,9 @@ export function createTranslateProvider(deps: TranslatorDeps): ProviderRegistrat
         },
       });
     },
-  });
+  }));
   return {
     ...registration,
-    async connect(request) {
-      const connection = await registration.connect(request);
-      return {
-        ...connection,
-        send(input) {
-          if (input.type !== "session.open") return connection.send(input);
-          const agentId = resolveTranslationContextKey(input.config.env, "");
-          return agentId.length > 0
-            ? openingAgent.run(agentId, () => connection.send(input))
-            : connection.send(input);
-        },
-      };
-    },
     async getCatalogCacheKey(options) {
       const values = await deps.loadConfig();
       // Equivalent commands share discovery; endpoint and languages do not

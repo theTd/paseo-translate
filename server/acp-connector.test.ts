@@ -22,6 +22,18 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
+/**
+ * Minimal agent that reports the spawn environment of a few keys, so the
+ * test sees exactly what the inner process was started with.
+ */
+const ENV_AGENT = `
+const keys = ["SESSION_TOKEN", "SHARED", "PASEO_TRANSLATE_AGENT_ID"];
+const reported = {};
+for (const key of keys) reported[key] = process.env[key] ?? null;
+process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "agent/env", params: reported }) + "\\n");
+require("node:readline").createInterface({ input: process.stdin }).on("line", () => undefined);
+`;
+
 const streams: AcpStream[] = [];
 
 function echoStream(translate: (text: string, contextKey?: string) => Promise<string>): AcpStream {
@@ -158,6 +170,25 @@ afterEach(async () => {
 });
 
 describe("translating ACP connector", () => {
+  it("spawns the inner agent with the session env, keeping the bridge id internal and settings env on top", async () => {
+    const stream = createTranslatingAcpStream({
+      command: [process.execPath, "-e", ENV_AGENT],
+      env: { SHARED: "settings" },
+      sessionEnv: {
+        SESSION_TOKEN: "s3cret",
+        SHARED: "session",
+        PASEO_TRANSLATE_AGENT_ID: "agent-1",
+      },
+      translate: async (text) => text,
+    });
+    streams.push(stream);
+    const [frame] = await readCount(stream, 1);
+    expect(frame).toMatchObject({
+      method: "agent/env",
+      params: { SESSION_TOKEN: "s3cret", SHARED: "settings", PASEO_TRANSLATE_AGENT_ID: null },
+    });
+  });
+
   it("records the exact translated prompt fragments before forwarding the frame", async () => {
     const remembered: Array<readonly PromptTranslationFragment[]> = [];
     const stream = createTranslatingAcpStream({
