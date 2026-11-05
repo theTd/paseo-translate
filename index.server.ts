@@ -88,8 +88,12 @@ export default function contribute(server: PluginServerContext) {
   // libuv's small thread pool, so a translation can wait on unrelated fs work.
   const settingsReader = createCachedSettingsReader(settings);
   // Fail closed at use time: incomplete settings reject here with a clear
-  // error instead of letting untranslated text reach the agent.
+  // error instead of letting untranslated text reach the agent. Every
+  // translation path starts here, so it also waits for the persistent stores'
+  // disk images: they load in the background, and a lookup made before that
+  // would miss, re-bill a cached translation, and replay agent-language prompts.
   const loadConfig = async () => {
+    await storesLoaded;
     const state = await settingsReader.read();
     if (state.status !== "ready") {
       throw new Error(`Translate plugin settings are invalid: ${state.error}`);
@@ -117,6 +121,15 @@ export default function contribute(server: PluginServerContext) {
     maxEntries: 2000,
   });
   const promptCacheKeys = createPromptCacheKeyManager(promptCacheKeyStore, cacheStore);
+  const contextMemoryStore = createPersistentTranslationCacheStore({
+    directory: path.join(defaultTranslationCacheDirectory(), "context"),
+    maxEntries: CONTEXT_MEMORY_CAPACITY,
+  });
+  const storesLoaded = Promise.all([
+    cacheStore.loaded(),
+    promptCacheKeyStore.loaded(),
+    contextMemoryStore.loaded(),
+  ]);
   // One process-wide transcript manager, shared like the cache: every
   // translation for the same agent (prompt path, display path, questions)
   // feeds one transcript, so terminology stays consistent for the
@@ -126,10 +139,7 @@ export default function contribute(server: PluginServerContext) {
   const context = createTranslationContextManager({
     loadConfig,
     promptCacheKeys,
-    memoryStore: createPersistentTranslationCacheStore({
-      directory: path.join(defaultTranslationCacheDirectory(), "context"),
-      maxEntries: CONTEXT_MEMORY_CAPACITY,
-    }),
+    memoryStore: contextMemoryStore,
   });
   // One single-flight registry, shared like the cache: the prompt path, the
   // display jobs of every client and the notification previews join one

@@ -6,7 +6,12 @@ import { claudeCachePreferencesSchema } from "../shared/claude-cache-compaction"
 
 vi.mock("./translation-cache-store", async (original) => {
   const module = await original<typeof import("./translation-cache-store")>();
-  return { ...module, createPersistentTranslationCacheStore: () => module.createMemoryTranslationCacheStore() };
+  return { ...module, createPersistentTranslationCacheStore: () => ({
+    ...module.createMemoryTranslationCacheStore(),
+    loaded: async () => undefined,
+    ready: async () => undefined,
+    flush: async () => undefined,
+  }) };
 });
 vi.mock("./claude-cache-preferences", () => ({ createClaudeCachePreferenceStore: () => ({ get: () => undefined, set: vi.fn() }) }));
 

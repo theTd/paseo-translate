@@ -36,7 +36,7 @@ __export(claude_provider_exports, {
 });
 module.exports = __toCommonJS(claude_provider_exports);
 var import_node_crypto6 = require("node:crypto");
-var import_node_fs4 = require("node:fs");
+var import_node_fs5 = require("node:fs");
 var import_node_os4 = require("node:os");
 var import_node_path7 = __toESM(require("node:path"));
 var import_server = require("@getpaseo/plugin/server");
@@ -32528,6 +32528,7 @@ var import_provider = require("@getpaseo/plugin/server/provider");
 var import_node_crypto3 = require("node:crypto");
 
 // shared/translation-retry.ts
+var TRANSLATION_BUSY_MESSAGE = "Translation is busy; try again in a moment";
 function isPermanentTranslationHttpRefusal(error62) {
   const message = error62 instanceof Error ? error62.message : String(error62);
   const status = /\bHTTP (\d{3})\b/.exec(message)?.[1];
@@ -33119,6 +33120,103 @@ function safeNotify(listener, text) {
     listener(text);
   } catch {
   }
+}
+
+// server/translation-upstream.ts
+var MAX_CONCURRENT_UPSTREAM = 6;
+var MAX_QUEUED_UPSTREAM = 64;
+var PRIORITY_UPSTREAM_HEADROOM = 2;
+function createUpstreamGate(options = {}) {
+  const maxConcurrent = Math.max(1, options.maxConcurrent ?? MAX_CONCURRENT_UPSTREAM);
+  const maxQueued = Math.max(0, options.maxQueued ?? MAX_QUEUED_UPSTREAM);
+  const priorityLimit = maxConcurrent + Math.max(0, options.priorityHeadroom ?? PRIORITY_UPSTREAM_HEADROOM);
+  const priorityQueue = [];
+  const displayQueue = [];
+  let active = 0;
+  function queuedCount() {
+    return priorityQueue.length + displayQueue.length;
+  }
+  function queueFor(entry) {
+    return entry.priority ? priorityQueue : displayQueue;
+  }
+  function dequeue(entry) {
+    const queue = queueFor(entry);
+    const index = queue.indexOf(entry);
+    if (index >= 0) queue.splice(index, 1);
+  }
+  function detach(entry) {
+    if (entry.onAbort !== void 0) {
+      entry.signal?.removeEventListener("abort", entry.onAbort);
+      entry.onAbort = void 0;
+    }
+  }
+  function start(entry) {
+    entry.queued = false;
+    detach(entry);
+    active += 1;
+    void (async () => {
+      try {
+        entry.resolve(await entry.task());
+      } catch (error62) {
+        entry.reject(error62);
+      } finally {
+        active -= 1;
+        drain();
+      }
+    })();
+  }
+  function limitFor(priority) {
+    return priority ? priorityLimit : maxConcurrent;
+  }
+  function drain() {
+    while (active < priorityLimit && priorityQueue.length > 0) {
+      start(priorityQueue.shift());
+    }
+    while (active < maxConcurrent && displayQueue.length > 0) {
+      start(displayQueue.shift());
+    }
+  }
+  return {
+    run(task, waitOptions) {
+      const signal = waitOptions?.signal;
+      if (signal?.aborted) return Promise.reject(new LlmRequestCanceledError());
+      return new Promise((resolve6, reject) => {
+        const entry = {
+          task,
+          resolve: (value) => resolve6(value),
+          reject,
+          signal,
+          priority: waitOptions?.priority === true,
+          queued: true
+        };
+        if (active < limitFor(entry.priority)) {
+          start(entry);
+          return;
+        }
+        if (!entry.priority && displayQueue.length >= maxQueued) {
+          reject(new Error(TRANSLATION_BUSY_MESSAGE));
+          return;
+        }
+        queueFor(entry).push(entry);
+        const onAbort = () => {
+          if (!entry.queued) return;
+          entry.queued = false;
+          dequeue(entry);
+          detach(entry);
+          reject(new LlmRequestCanceledError());
+        };
+        entry.onAbort = onAbort;
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+    stats() {
+      return {
+        active,
+        queued: queuedCount(),
+        priorityQueued: priorityQueue.length
+      };
+    }
+  };
 }
 
 // shared/translate.ts
@@ -52829,6 +52927,7 @@ function omitTranslationBridgeEnv(env) {
 }
 var TRANSLATION_TEXT_LIMIT = 1e5;
 var TRANSLATION_CACHE_CAPACITY = 1e4;
+var TRANSLATION_CACHE_CHAR_CAPACITY = 4e7;
 var translateDirectionSchema = external_exports.enum(["user-to-agent", "agent-to-user"]);
 var translateSettings = (0, import_plugin.defineSettings)({
   id: "translate",
@@ -53084,40 +53183,50 @@ function resolveTranslationBatchSystemPrompt(settings, pair) {
 }
 
 // server/translation-cache-store.ts
-function createMemoryTranslationCacheStore(options) {
-  const maxEntries = options?.maxEntries ?? TRANSLATION_CACHE_CAPACITY;
+function createLruEntries() {
   const entries = /* @__PURE__ */ new Map();
+  let chars = 0;
+  function write(key, value) {
+    const previous = entries.get(key);
+    if (previous !== void 0) chars -= key.length + previous.length;
+    entries.delete(key);
+    entries.set(key, value);
+    chars += key.length + value.length;
+    return previous !== value;
+  }
+  function evict(maxEntries, maxChars) {
+    while (entries.size > maxEntries || chars > maxChars) {
+      const oldest = entries.keys().next().value;
+      if (oldest === void 0) return;
+      const value = entries.get(oldest);
+      entries.delete(oldest);
+      if (value !== void 0) chars -= oldest.length + value.length;
+    }
+  }
   return {
+    entries,
     get(key) {
       const value = entries.get(key);
-      if (value === void 0) return void 0;
-      refreshRecency(entries, key, value);
+      if (value !== void 0) write(key, value);
       return value;
     },
-    set(key, value) {
-      refreshRecency(entries, key, value);
-      evictOldestIfNeeded(entries, maxEntries);
-    },
-    stats() {
-      return countRetained(entries);
-    }
+    write,
+    evict,
+    stats: () => ({ entries: entries.size, chars })
   };
 }
-function refreshRecency(entries, key, value) {
-  entries.delete(key);
-  entries.set(key, value);
-}
-function countRetained(entries) {
-  let chars = 0;
-  for (const value of entries.values()) chars += value.length;
-  return { entries: entries.size, chars };
-}
-function evictOldestIfNeeded(entries, maxEntries) {
-  while (entries.size > maxEntries) {
-    const oldest = entries.keys().next().value;
-    if (oldest === void 0) return;
-    entries.delete(oldest);
-  }
+function createMemoryTranslationCacheStore(options) {
+  const maxEntries = options?.maxEntries ?? TRANSLATION_CACHE_CAPACITY;
+  const maxChars = options?.maxChars ?? TRANSLATION_CACHE_CHAR_CAPACITY;
+  const index = createLruEntries();
+  return {
+    get: (key) => index.get(key),
+    set(key, value) {
+      index.write(key, value);
+      index.evict(maxEntries, maxChars);
+    },
+    stats: () => index.stats()
+  };
 }
 
 // server/prompt-text.ts
@@ -53256,9 +53365,20 @@ function legacyCacheKey(key) {
   delete fields["scope"];
   return `${prefix}${JSON.stringify(fields)}`;
 }
+var sharedUpstreamGates = /* @__PURE__ */ new WeakMap();
+function upstreamGateFor(deps) {
+  if (deps.upstream !== void 0) return deps.upstream;
+  let gate = sharedUpstreamGates.get(deps);
+  if (gate === void 0) {
+    gate = createUpstreamGate();
+    sharedUpstreamGates.set(deps, gate);
+  }
+  return gate;
+}
 function createTranslator(deps) {
   const cache = legacyAwareStore(deps.cacheStore ?? createMemoryTranslationCacheStore());
   const inflight = deps.inflight ?? createTranslationInflightRegistry();
+  const upstream = upstreamGateFor(deps);
   async function prepareCacheLookup(text, direction, contextKey) {
     if (text.trim().length === 0) return { trivial: text };
     const doneConfig = step4.start("lookup.config");
@@ -53364,29 +53484,35 @@ ${snapshot.memory}` : systemPrompt;
     }
     done();
   }
-  function streamProducer(prepared, source, direction) {
+  function streamProducer(prepared, source, direction, priority = false) {
     return async ({ signal, progress }) => {
       let accumulated = "";
       const done = step4.start("endpoint.stream", `chars=${prepared.requestContent.length}`);
-      const translated = await completeStreamFirst(
-        prepared.client,
-        requestMessages(prepared),
-        (delta) => {
-          const doneDelta = step4.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
-          accumulated += delta;
-          progress(accumulated);
-          doneDelta();
-        },
-        { signal }
+      const translated = await upstream.run(
+        () => completeStreamFirst(
+          prepared.client,
+          requestMessages(prepared),
+          (delta) => {
+            const doneDelta = step4.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
+            accumulated += delta;
+            progress(accumulated);
+            doneDelta();
+          },
+          { signal }
+        ),
+        { signal, priority }
       ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
   }
-  function completeProducer(prepared, source, direction) {
+  function completeProducer(prepared, source, direction, priority = false) {
     return async ({ signal }) => {
       const done = step4.start("endpoint.complete", `chars=${prepared.requestContent.length}`);
-      const translated = await prepared.client.complete(requestMessages(prepared), { signal }).finally(done);
+      const translated = await upstream.run(
+        () => prepared.client.complete(requestMessages(prepared), { signal }),
+        { signal, priority }
+      ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
@@ -53423,7 +53549,7 @@ ${snapshot.memory}` : systemPrompt;
       outer?.removeEventListener("abort", onOuterAbort);
     }
   }
-  async function runPackUpstream(packPrepared, packTexts, direction, signal) {
+  async function runPackUpstream(packPrepared, packTexts, direction, signal, priority) {
     const first = packPrepared[0];
     if (first === void 0) throw new Error("Invariant: empty translation pack");
     const nonce = pickBatchNonce(packTexts);
@@ -53448,7 +53574,10 @@ ${snapshot.memory}` : systemPrompt;
         })
       }
     ];
-    const output2 = await completeStreamFirst(first.client, messages, () => void 0, { signal });
+    const output2 = await upstream.run(
+      () => completeStreamFirst(first.client, messages, () => void 0, { signal }),
+      { signal, priority }
+    );
     const parsed = parseTranslationBatch(output2, packTexts.length, nonce);
     if (parsed === null) return null;
     parsed.forEach((translated, offset) => {
@@ -53519,7 +53648,7 @@ ${snapshot.memory}` : systemPrompt;
         );
         if (joined !== void 0) return joined;
       }
-      return joinOrStart(prepared, completeProducer(prepared, text, direction), {
+      return joinOrStart(prepared, completeProducer(prepared, text, direction, options?.priority === true), {
         signal: options?.signal
       });
     },
@@ -53530,7 +53659,7 @@ ${snapshot.memory}` : systemPrompt;
         if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
         return prepared.cached;
       }
-      return joinOrStart(prepared, streamProducer(prepared, text, direction), {
+      return joinOrStart(prepared, streamProducer(prepared, text, direction, options?.priority === true), {
         onProgress: deltaForwarder(onDelta),
         signal: options?.signal
       });
@@ -53538,6 +53667,7 @@ ${snapshot.memory}` : systemPrompt;
     async translateMany(texts, direction, options) {
       const onItem = options?.onItem;
       const signals = options?.signals;
+      const priority = options?.priority === true;
       if (texts.length === 0) return [];
       const preparedList = [];
       for (const text of texts) {
@@ -53595,7 +53725,7 @@ ${snapshot.memory}` : systemPrompt;
         if (packIndexes.length === 1) {
           const index = packIndexes[0];
           const prepared = misses.get(index);
-          const produce = streamProducer(prepared, texts[index] ?? "", direction);
+          const produce = streamProducer(prepared, texts[index] ?? "", direction, priority);
           track(
             index,
             inflight.start(prepared.key, (context) => packLane(() => produce(context)), {
@@ -53613,10 +53743,10 @@ ${snapshot.memory}` : systemPrompt;
           livePackItems -= 1;
           if (livePackItems === 0) packAbort.abort();
         };
-        const upstream = packLane(
-          () => runPackUpstream(packPrepared, packTexts, direction, packAbort.signal)
+        const packWork = packLane(
+          () => runPackUpstream(packPrepared, packTexts, direction, packAbort.signal, priority)
         );
-        upstream.catch(() => void 0);
+        packWork.catch(() => void 0);
         packIndexes.forEach((index, position) => {
           const prepared = packPrepared[position];
           const source = packTexts[position] ?? "";
@@ -53627,10 +53757,10 @@ ${snapshot.memory}` : systemPrompt;
               prepared.key,
               async (context) => {
                 context.signal.addEventListener("abort", leavePack, { once: true });
-                const parsed = await upstream;
+                const parsed = await packWork;
                 const translated = parsed?.[position];
                 if (translated !== void 0) return translated;
-                return fallbackLane(() => streamProducer(prepared, source, direction)(context));
+                return fallbackLane(() => streamProducer(prepared, source, direction, priority)(context));
               },
               { onProgress: progressFor(index), signal: signals?.[index] }
             )
@@ -55693,8 +55823,11 @@ function renderImageOutputMarkdown(uri, altText = "Image") {
 }
 
 // server/claude-transcript.ts
+var import_node_fs4 = require("node:fs");
 var import_promises15 = require("node:fs/promises");
 var import_node_path6 = require("node:path");
+var import_node_readline = require("node:readline");
+var import_promises16 = require("node:timers/promises");
 
 // server/provider-replay-timestamps.ts
 function replayTimelineEvent(sessionId, source) {
@@ -55716,18 +55849,34 @@ function normalizeReplayTimestamp(...values) {
 function readString3(value) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : void 0;
 }
-async function readJsonLines(path3) {
-  const raw = await (0, import_promises15.readFile)(path3, "utf8");
-  const entries = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (line.trim().length === 0) continue;
-    try {
-      const parsed = JSON.parse(line);
-      if (typeof parsed === "object" && parsed !== null) entries.push(parsed);
-    } catch {
+var YIELD_EVERY_LINES = 200;
+var YIELD_EVERY_BYTES = 2 * 1024 * 1024;
+async function* readJsonLines(path3) {
+  const stream = (0, import_node_fs4.createReadStream)(path3, { encoding: "utf8" });
+  const lines = (0, import_node_readline.createInterface)({ input: stream, crlfDelay: Infinity });
+  let lineCount = 0;
+  let byteCount = 0;
+  try {
+    for await (const line of lines) {
+      lineCount += 1;
+      byteCount += Buffer.byteLength(line, "utf8") + 1;
+      if (line.trim().length > 0) {
+        try {
+          const parsed = JSON.parse(line);
+          if (typeof parsed === "object" && parsed !== null) yield parsed;
+        } catch {
+        }
+      }
+      if (lineCount >= YIELD_EVERY_LINES || byteCount >= YIELD_EVERY_BYTES) {
+        lineCount = 0;
+        byteCount = 0;
+        await (0, import_promises16.setImmediate)();
+      }
     }
+  } finally {
+    lines.close();
+    stream.destroy();
   }
-  return entries;
 }
 function readTotalTokens2(entry) {
   const usage = typeof entry.message?.usage === "object" && entry.message.usage !== null ? entry.message.usage : entry.usage;
@@ -55946,13 +56095,32 @@ async function collectEntry(collector, entry, idSeed, restoreUserBlock, remember
     }
   }
 }
-function rewindIdentity(entry) {
+var REWIND_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+function rewindUserMessageUuid(entry) {
   const uuid3 = typeof entry.uuid === "string" ? entry.uuid : void 0;
-  if (uuid3 === void 0 || uuid3.length === 0) return {};
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid3)) {
-    return {};
-  }
+  if (uuid3 === void 0 || uuid3.length === 0) return void 0;
+  return REWIND_UUID.test(uuid3) ? uuid3 : void 0;
+}
+function rewindIdentity(entry) {
+  const uuid3 = rewindUserMessageUuid(entry);
+  if (uuid3 === void 0) return {};
   return { messageId: uuid3, revertToken: uuid3 };
+}
+function replayedUserMessageUuid(entry) {
+  if (entry.isCompactSummary) return void 0;
+  if (entry.type !== "user") return void 0;
+  const content = entry.message?.content;
+  if (isClaudeSyntheticUserEntry(entry)) {
+    if (!Array.isArray(content) || !content.some((block) => typeof block === "object" && block !== null && block.type === "tool_result")) return void 0;
+  }
+  const hasText = typeof content === "string" ? content.trim().length > 0 && !isClaudeTranscriptNoise(content) : Array.isArray(content) && content.some((block) => {
+    if (typeof block !== "object" || block === null) return false;
+    if (block.type !== "text") return false;
+    const text = readString3(block.text);
+    return text !== void 0 && !isClaudeTranscriptNoise(text);
+  });
+  if (!hasText) return void 0;
+  return rewindUserMessageUuid(entry);
 }
 function flattenReplayContent(content) {
   if (typeof content === "string") return content;
@@ -55980,16 +56148,31 @@ async function readClaudeReplay(cwd, claudeSessionId, restore, configDir) {
     return empty;
   }
 }
+async function readClaudeRewindUserMessageIds(cwd, claudeSessionId, configDir) {
+  try {
+    const projectDir = claudeProjectDir(cwd, configDir);
+    const ids = [];
+    for await (const entry of readJsonLines((0, import_node_path6.join)(projectDir, `${claudeSessionId}.jsonl`))) {
+      if (isSidechainEntry(entry)) continue;
+      const uuid3 = replayedUserMessageUuid(entry);
+      if (uuid3 !== void 0) ids.push(uuid3);
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+function isSidechainEntry(entry) {
+  return typeof entry.parent_tool_use_id === "string" && entry.parent_tool_use_id.length > 0 || entry.isSidechain === true;
+}
 async function readReplayInner(cwd, claudeSessionId, restore, configDir) {
   const projectDir = claudeProjectDir(cwd, configDir);
-  const entries = await readJsonLines((0, import_node_path6.join)(projectDir, `${claudeSessionId}.jsonl`));
-  if (entries.length === 0) return { rootItems: [], children: [] };
   const root = createCollector(null);
+  let entryCount = 0;
   let seed = 0;
-  for (const entry of entries) {
-    if (typeof entry.parent_tool_use_id === "string" && entry.parent_tool_use_id.length > 0 || entry.isSidechain === true) {
-      continue;
-    }
+  for await (const entry of readJsonLines((0, import_node_path6.join)(projectDir, `${claudeSessionId}.jsonl`))) {
+    entryCount += 1;
+    if (isSidechainEntry(entry)) continue;
     await collectEntry(
       root,
       entry,
@@ -55998,6 +56181,7 @@ async function readReplayInner(cwd, claudeSessionId, restore, configDir) {
       restore?.rememberRootMessage
     );
   }
+  if (entryCount === 0) return { rootItems: [], children: [] };
   const children = await readReplayChildren(projectDir, claudeSessionId, root, restore);
   return { rootItems: root.items, children };
 }
@@ -56070,13 +56254,14 @@ async function stageReplayChild(projectDir, claudeSessionId, agentId, restoreUse
   }
   const canonicalId = readString3(meta3?.toolUseId);
   if (canonicalId === void 0) return null;
-  const entries = await readJsonLines(`${base}.jsonl`);
-  if (entries.length === 0) return null;
   const collector = createCollector(canonicalId);
+  let entryCount = 0;
   let seed = 0;
-  for (const entry of entries) {
+  for await (const entry of readJsonLines(`${base}.jsonl`)) {
+    entryCount += 1;
     await collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`, restoreUserBlock);
   }
+  if (entryCount === 0) return null;
   return { canonicalId, meta: meta3 ?? {}, collector };
 }
 
@@ -56137,7 +56322,7 @@ function scanPathForClaude(pathValue, platform) {
       if (directory.length === 0) continue;
       const candidate = import_node_path7.default.join(directory, name);
       try {
-        (0, import_node_fs4.accessSync)(candidate, import_node_fs4.constants.X_OK);
+        (0, import_node_fs5.accessSync)(candidate, import_node_fs5.constants.X_OK);
         return candidate;
       } catch {
       }
@@ -56485,7 +56670,7 @@ async function openSession(input2, context, capabilities) {
         translatedSystemPrompt = await context.translator.translate(
           input2.config.systemPrompt,
           "user-to-agent",
-          { contextKey }
+          { contextKey, priority: true }
         );
       } catch (error62) {
         context.emit({
@@ -56920,7 +57105,10 @@ async function promptSession(input2, context) {
     if (prompt.type === "command") {
       original = `/${prompt.name}${prompt.arguments.trim() ? ` ${prompt.arguments}` : ""}`;
       const values = await context.loadValues();
-      const args = values.translatePrompts && prompt.arguments.trim() ? await context.translator.translate(prompt.arguments, "user-to-agent", { contextKey: session.contextKey }) : prompt.arguments;
+      const args = values.translatePrompts && prompt.arguments.trim() ? await context.translator.translate(prompt.arguments, "user-to-agent", {
+        contextKey: session.contextKey,
+        priority: true
+      }) : prompt.arguments;
       blocks = [{ type: "text", text: `/${prompt.name}${args.trim() ? ` ${args}` : ""}` }];
     } else {
       original = rawPromptText(prompt.content);
@@ -56982,8 +57170,11 @@ async function executeLocalRewind(session, input2, active, context, args) {
     throw new Error("Invalid message UUID. Usage: /rewind <user_message_uuid> or /rewind");
   }
   if (!requested && session.claudeSessionId && session.rewindUserMessageIds.length === 0) {
-    const history = await readClaudeReplay(session.config.cwd, session.claudeSessionId, void 0, session.config.env.CLAUDE_CONFIG_DIR);
-    session.rewindUserMessageIds = history.rootItems.flatMap((item) => item.type === "user_message" && typeof item.revertToken === "string" ? [item.revertToken] : []);
+    session.rewindUserMessageIds = await readClaudeRewindUserMessageIds(
+      session.config.cwd,
+      session.claudeSessionId,
+      session.config.env.CLAUDE_CONFIG_DIR
+    );
   }
   const candidates = requested ? [requested] : [...new Set(session.rewindUserMessageIds)].reverse();
   if (session.closed || session.active !== active) return;
@@ -57173,7 +57364,7 @@ function isImageMimeType(mimeType) {
 }
 async function buildMessageBlocks(content, context, contextKey) {
   const values = await context.loadValues();
-  const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent", { contextKey }) : async (text) => text;
+  const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent", { contextKey, priority: true }) : async (text) => text;
   const blocks = [];
   const displayFragments = [];
   let hasContent = false;
@@ -57790,7 +57981,7 @@ async function respondToPermission(session, permissionId, response, context) {
 async function resolveQuestionAllow(question, response, resolve6, context, contextKey) {
   try {
     const values = await context.loadValues();
-    const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent", { contextKey }) : async (text) => text;
+    const translate = values.translatePrompts ? (text) => context.translator.translate(text, "user-to-agent", { contextKey, priority: true }) : async (text) => text;
     const answers = await resolveQuestionAnswers(
       question.translatedQuestions,
       Array.isArray(question.requestInput.questions) ? question.requestInput.questions : [],

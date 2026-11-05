@@ -139,6 +139,20 @@ describe("persistent translation cache store", () => {
     expect(second.get("key-b")).toBe("value-b");
   });
 
+  it("misses until the disk image is loaded, then serves it", async () => {
+    const directory = cacheDirectory();
+    const first = createPersistentTranslationCacheStore({ directory });
+    await first.ready();
+    first.set("key", "value");
+    await first.flush();
+
+    const second = createPersistentTranslationCacheStore({ directory });
+    expect(second.get("key")).toBeUndefined();
+    await second.loaded();
+    expect(second.get("key")).toBe("value");
+    await second.ready();
+  });
+
   it("resolves ready after a set made during startup reaches the disk", async () => {
     const directory = cacheDirectory();
     const store = createPersistentTranslationCacheStore({ directory });

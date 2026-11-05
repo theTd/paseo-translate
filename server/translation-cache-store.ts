@@ -27,6 +27,8 @@ export interface TranslationCacheStore {
  * store to memory-only by design, not as a caller error.
  */
 export interface PersistentTranslationCacheStore extends TranslationCacheStore {
+  /** Resolves once the disk image is in memory (writes may still be queued). */
+  loaded(): Promise<void>;
   ready(): Promise<void>;
   flush(): Promise<void>;
 }
@@ -288,6 +290,9 @@ export function createPersistentTranslationCacheStore(
     },
     stats() {
       return index.stats();
+    },
+    loaded() {
+      return startup;
     },
     ready() {
       return startup.then(flush);
