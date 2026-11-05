@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   readClaudeReplay,
+  readClaudeRewindUserMessageIds,
   type ReplayResult,
   type ReplayUserTextRestore,
 } from "./claude-transcript";
@@ -56,11 +57,15 @@ function projectDirOf(fixture: Fixture): string {
   return path.join(fixture.configDir, "projects", encoded);
 }
 
-function writeRootSession(fixture: Fixture, lines: string[]): void {
+function writeRootFile(fixture: Fixture, contents: string): void {
   const projectDir = projectDirOf(fixture);
   mkdirSync(projectDir, { recursive: true });
+  writeFileSync(path.join(projectDir, `${fixture.sessionId}.jsonl`), contents, "utf8");
+}
+
+function writeRootSession(fixture: Fixture, lines: string[]): void {
   // No trailing newline: split("\n") then yields exactly lines.length
-  writeFileSync(path.join(projectDir, `${fixture.sessionId}.jsonl`), lines.join("\n"), "utf8");
+  writeRootFile(fixture, lines.join("\n"));
 }
 
 it("replays from an explicit fork storage root without changing the daemon environment", async () => {
@@ -428,4 +433,125 @@ it("replays compaction markers while filtering summaries, synthetic text and pla
   expect(textsOf(result.rootItems).filter(Boolean)).toEqual(["Visible user", "Visible assistant"]);
   expect(restoreRootBlock).toHaveBeenCalledTimes(1);
   expect(result.rootItems.at(-1)).toMatchObject({ type: "tool_call", status: "completed", detail: { type: "read", content: "File contents" } });
+});
+
+describe("streamed transcript reads", () => {
+  it("replays a CRLF transcript", async () => {
+    const fixture = createFixture();
+    writeRootFile(fixture, `${userText("first")}\r\n${assistantText("second")}\r\n${userText("third")}`);
+    const result = await replay(fixture);
+    expect(textsOf(result.rootItems)).toEqual(["first", "second", "third"]);
+  });
+
+  it("skips a blank line and a corrupt line in the middle", async () => {
+    const fixture = createFixture();
+    writeRootFile(fixture, `${userText("before")}\n\n{not json\n${assistantText("after")}`);
+    const result = await replay(fixture);
+    expect(textsOf(result.rootItems)).toEqual(["before", "after"]);
+  });
+
+  it("parses a 20k-line transcript", async () => {
+    const fixture = createFixture();
+    const total = 20_000;
+    const lines: string[] = [];
+    for (let i = 0; i < total; i++) lines.push(assistantText(`big-${String(i).padStart(5, "0")}`));
+    writeRootSession(fixture, lines);
+    const result = await replay(fixture);
+    expect(result.rootItems).toHaveLength(total);
+    const texts = textsOf(result.rootItems);
+    expect(texts[0]).toBe("big-00000");
+    expect(texts[texts.length - 1]).toBe(`big-${String(total - 1).padStart(5, "0")}`);
+  });
+
+  it("yields to the event loop while a transcript is still streaming", async () => {
+    const fixture = createFixture();
+    // Above the reader's 200-line yield interval, below one 64 KiB read chunk:
+    // the only macrotask boundary before EOF is the reader's own yield.
+    const total = 300;
+    const lines: string[] = [];
+    for (let i = 0; i < total; i++) lines.push(userText(`yield-${i}`));
+    writeRootSession(fixture, lines);
+    let processed = 0;
+    let processedWhenImmediateRan: number | undefined;
+    const result = await replay(fixture, {
+      restoreRootBlock: (block) => {
+        processed += 1;
+        if (processed === 1) {
+          setImmediate(() => { processedWhenImmediateRan = processed; });
+        }
+        return block;
+      },
+      restoreChildBlock: (block) => block,
+    });
+    expect(result.rootItems).toHaveLength(total);
+    // Without a cooperative yield the immediate only runs after every entry
+    // was collected, i.e. at `total`.
+    expect(processedWhenImmediateRan).toBeDefined();
+    expect(processedWhenImmediateRan!).toBeLessThan(total);
+  });
+
+  it("reads a missing transcript as an empty replay", async () => {
+    const fixture = createFixture();
+    const result = await replay(fixture);
+    expect(result).toEqual({ rootItems: [], children: [] });
+  });
+
+  it("skips a sidecar whose transcript is missing", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [userText("root only")]);
+    const sidecarDir = path.join(projectDirOf(fixture), fixture.sessionId, "subagents");
+    mkdirSync(sidecarDir, { recursive: true });
+    writeFileSync(
+      path.join(sidecarDir, "agent-ghost.meta.json"),
+      JSON.stringify({ agentType: "Explore", description: "ghost", toolUseId: "tu-ghost" }),
+      "utf8",
+    );
+    const result = await replay(fixture);
+    expect(result.children).toEqual([]);
+    expect(textsOf(result.rootItems)).toEqual(["root only"]);
+  });
+});
+
+describe("rewind anchor scan", () => {
+  it("collects exactly the root user-message uuids a replay would carry", async () => {
+    const fixture = createFixture();
+    const visible = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f";
+    const sidechain = "11111111-1111-4111-8111-111111111111";
+    writeRootSession(fixture, [
+      userText("visible", visible),
+      JSON.stringify({
+        type: "user",
+        uuid: sidechain,
+        parent_tool_use_id: "tu-parent",
+        message: { content: [{ type: "text", text: "sidechain" }] },
+      }),
+      JSON.stringify({
+        type: "user",
+        uuid: visible,
+        isCompactSummary: true,
+        message: { content: [{ type: "text", text: "summary" }] },
+      }),
+      userText("[Request interrupted by user]"),
+      userText("<local-command-stdout>internal</local-command-stdout>", visible),
+      JSON.stringify({
+        type: "user",
+        uuid: visible,
+        toolUseResult: {},
+        message: { content: [{ type: "tool_result", tool_use_id: "tu-1", content: "out" }] },
+      }),
+      userText("second", visible),
+    ]);
+    const replayResult = await replay(fixture);
+    const replayed = replayResult.rootItems.flatMap((item) =>
+      item.type === "user_message" && typeof item.revertToken === "string" ? [item.revertToken] : []);
+    expect(replayed).toEqual([visible, visible]);
+    expect(await readClaudeRewindUserMessageIds(fixture.cwd, fixture.sessionId, fixture.configDir))
+      .toEqual(replayed);
+  });
+
+  it("reads a missing transcript as no anchors", async () => {
+    const fixture = createFixture();
+    expect(await readClaudeRewindUserMessageIds(fixture.cwd, fixture.sessionId, fixture.configDir))
+      .toEqual([]);
+  });
 });

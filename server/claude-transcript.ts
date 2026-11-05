@@ -1,5 +1,8 @@
+import { createReadStream } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
+import { setImmediate as yieldEventLoop } from "node:timers/promises";
 import type { ProviderTimelineItem } from "@getpaseo/plugin/server/provider";
 import { normalizeReplayTimestamp, type ReplayedTimelineItem } from "./provider-replay-timestamps";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
@@ -97,19 +100,47 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-async function readJsonLines(path: string): Promise<ReplayEntry[]> {
-  const raw = await readFile(path, "utf8");
-  const entries: ReplayEntry[] = [];
-  for (const line of raw.split(/\r?\n/)) {
-    if (line.trim().length === 0) continue;
-    try {
-      const parsed: unknown = JSON.parse(line);
-      if (typeof parsed === "object" && parsed !== null) entries.push(parsed as ReplayEntry);
-    } catch {
-      // A single corrupt line never fails the whole replay.
+/** Cooperative-yield intervals: a big transcript must never starve another RPC. */
+const YIELD_EVERY_LINES = 200;
+const YIELD_EVERY_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Streams a transcript's JSONL entries.
+ *
+ * Claude keeps a whole session in one file that can run to ~100 MB, and every
+ * plugin RPC shares this event loop with a 30 s host timeout. Reading the file
+ * whole and parsing it in one synchronous pass starves every other RPC for
+ * seconds, so this reads with readline and hands the loop a turn between
+ * chunks. A blank line and a corrupt line are skipped exactly as before; a
+ * read error rejects, which callers already treat as "no replay".
+ */
+async function* readJsonLines(path: string): AsyncGenerator<ReplayEntry> {
+  const stream = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  let lineCount = 0;
+  let byteCount = 0;
+  try {
+    for await (const line of lines) {
+      lineCount += 1;
+      byteCount += Buffer.byteLength(line, "utf8") + 1;
+      if (line.trim().length > 0) {
+        try {
+          const parsed: unknown = JSON.parse(line);
+          if (typeof parsed === "object" && parsed !== null) yield parsed as ReplayEntry;
+        } catch {
+          // A single corrupt line never fails the whole replay.
+        }
+      }
+      if (lineCount >= YIELD_EVERY_LINES || byteCount >= YIELD_EVERY_BYTES) {
+        lineCount = 0;
+        byteCount = 0;
+        await yieldEventLoop();
+      }
     }
+  } finally {
+    lines.close();
+    stream.destroy();
   }
-  return entries;
 }
 
 function readTotalTokens(entry: ReplayEntry): number | undefined {
@@ -365,18 +396,49 @@ async function collectEntry(
   }
 }
 
+const REWIND_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function rewindUserMessageUuid(entry: ReplayEntry): string | undefined {
+  const uuid = typeof entry.uuid === "string" ? entry.uuid : undefined;
+  if (uuid === undefined || uuid.length === 0) return undefined;
+  return REWIND_UUID.test(uuid) ? uuid : undefined;
+}
+
 /** Live rewind anchors use the Claude-side user uuid as revertToken. */
 function rewindIdentity(
   entry: ReplayEntry,
 ): { messageId: string; revertToken: string } | Record<string, never> {
-  const uuid = typeof entry.uuid === "string" ? entry.uuid : undefined;
-  if (uuid === undefined || uuid.length === 0) return {};
-  if (
-    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(uuid)
-  ) {
-    return {};
-  }
+  const uuid = rewindUserMessageUuid(entry);
+  if (uuid === undefined) return {};
   return { messageId: uuid, revertToken: uuid };
+}
+
+/**
+ * The uuid `collectEntry` stamps on this entry's replayed root user message,
+ * or undefined when the entry yields no user message. Mirrors the user branch
+ * of `collectEntry`; the transcript tests compare the two so they cannot
+ * drift silently.
+ */
+function replayedUserMessageUuid(entry: ReplayEntry): string | undefined {
+  if (entry.isCompactSummary) return undefined;
+  if (entry.type !== "user") return undefined;
+  const content = entry.message?.content;
+  // Synthetic control turns replay only for their tool_result blocks; their
+  // text is internal metadata.
+  if (isClaudeSyntheticUserEntry(entry)) {
+    if (!Array.isArray(content) || !content.some((block) =>
+      typeof block === "object" && block !== null && block.type === "tool_result")) return undefined;
+  }
+  const hasText = typeof content === "string"
+    ? content.trim().length > 0 && !isClaudeTranscriptNoise(content)
+    : Array.isArray(content) && content.some((block) => {
+        if (typeof block !== "object" || block === null) return false;
+        if ((block as { type?: unknown }).type !== "text") return false;
+        const text = readString((block as { text?: unknown }).text);
+        return text !== undefined && !isClaudeTranscriptNoise(text);
+      });
+  if (!hasText) return undefined;
+  return rewindUserMessageUuid(entry);
 }
 
 function flattenReplayContent(content: unknown): string | null {
@@ -420,10 +482,50 @@ export async function readClaudeReplay(
   }
 }
 
+/**
+ * Rewind anchors only: the root transcript's user-message uuids.
+ *
+ * `/rewind` without an argument runs a full replay only to read these ids out
+ * of its root user messages, so a large transcript paid for every timeline
+ * item it never used. This streams the same file through the same filters
+ * (sidechain frames out, blank/corrupt lines skipped, synthetic entries and
+ * transcript noise ignored) and keeps only the uuids a replayed user message
+ * would carry. Never throws: a failed read reads as no anchors, exactly like
+ * the replay.
+ */
+export async function readClaudeRewindUserMessageIds(
+  cwd: string,
+  claudeSessionId: string,
+  configDir?: string,
+): Promise<string[]> {
+  try {
+    const projectDir = claudeProjectDir(cwd, configDir);
+    const ids: string[] = [];
+    for await (const entry of readJsonLines(join(projectDir, `${claudeSessionId}.jsonl`))) {
+      if (isSidechainEntry(entry)) continue;
+      const uuid = replayedUserMessageUuid(entry);
+      if (uuid !== undefined) ids.push(uuid);
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+
 interface ReplayMeta {
   agentType?: unknown;
   description?: unknown;
   toolUseId?: unknown;
+}
+
+/**
+ * Sidechain frames live in the same file on older CLIs (`parent_tool_use_id`)
+ * or are flagged inline on newer ones (`isSidechain`); children replay from
+ * sidecars either way.
+ */
+function isSidechainEntry(entry: ReplayEntry): boolean {
+  return (typeof entry.parent_tool_use_id === "string" && entry.parent_tool_use_id.length > 0) ||
+    entry.isSidechain === true;
 }
 
 async function readReplayInner(
@@ -433,21 +535,12 @@ async function readReplayInner(
   configDir?: string,
 ): Promise<ReplayResult> {
   const projectDir = claudeProjectDir(cwd, configDir);
-  const entries = await readJsonLines(join(projectDir, `${claudeSessionId}.jsonl`));
-  if (entries.length === 0) return { rootItems: [], children: [] };
-
   const root = createCollector(null);
+  let entryCount = 0;
   let seed = 0;
-  for (const entry of entries) {
-    // Sidechain frames live in the same file on older CLIs
-    // (`parent_tool_use_id`) or are flagged inline on newer ones
-    // (`isSidechain`); children replay from sidecars either way.
-    if (
-      (typeof entry.parent_tool_use_id === "string" && entry.parent_tool_use_id.length > 0) ||
-      entry.isSidechain === true
-    ) {
-      continue;
-    }
+  for await (const entry of readJsonLines(join(projectDir, `${claudeSessionId}.jsonl`))) {
+    entryCount += 1;
+    if (isSidechainEntry(entry)) continue;
     await collectEntry(
       root,
       entry,
@@ -456,6 +549,7 @@ async function readReplayInner(
       restore?.rememberRootMessage,
     );
   }
+  if (entryCount === 0) return { rootItems: [], children: [] };
 
   const children = await readReplayChildren(projectDir, claudeSessionId, root, restore);
   return { rootItems: root.items, children };
@@ -555,12 +649,13 @@ async function stageReplayChild(
   }
   const canonicalId = readString(meta?.toolUseId);
   if (canonicalId === undefined) return null;
-  const entries = await readJsonLines(`${base}.jsonl`);
-  if (entries.length === 0) return null;
   const collector = createCollector(canonicalId);
+  let entryCount = 0;
   let seed = 0;
-  for (const entry of entries) {
+  for await (const entry of readJsonLines(`${base}.jsonl`)) {
+    entryCount += 1;
     await collectEntry(collector, entry, `replay-${canonicalId}-${seed++}`, restoreUserBlock);
   }
+  if (entryCount === 0) return null;
   return { canonicalId, meta: meta ?? {}, collector };
 }
