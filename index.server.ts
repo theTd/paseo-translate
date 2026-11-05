@@ -73,12 +73,19 @@ export default function contribute(server: PluginServerContext) {
   const cacheStore = createPersistentTranslationCacheStore({
     directory: defaultTranslationCacheDirectory(),
   });
-  // Manual `prompt_cache_key` control per transcript. Backed by the same
-  // persistent store as the translation cache (its own key namespace), so a
-  // pinned key survives daemon restarts and stays out of cache-key space:
-  // rotating it moves future requests to a new cache namespace without
-  // invalidating anything already translated.
-  const promptCacheKeys = createPromptCacheKeyManager(cacheStore);
+  // Manual `prompt_cache_key` control per transcript gets its own small
+  // persistent store. A pin is read on every request but rewritten only when
+  // the user changes it, so in the translation LRU it sank to the cold end and
+  // was evicted by translation traffic. The separate store keeps pins alive
+  // across daemon restarts; the translation store is still passed as the
+  // migration source for pins written before the split. Rotating a pin only
+  // moves future requests to a new cache namespace, never invalidates
+  // translations: the key is namespaced out of the translation cache-key space.
+  const promptCacheKeyStore = createPersistentTranslationCacheStore({
+    directory: path.join(defaultTranslationCacheDirectory(), "prompt-cache-keys"),
+    maxEntries: 2000,
+  });
+  const promptCacheKeys = createPromptCacheKeyManager(promptCacheKeyStore, cacheStore);
   // One process-wide transcript manager, shared like the cache: every
   // translation for the same agent (prompt path, display path, questions)
   // feeds one transcript, so terminology stays consistent for the
