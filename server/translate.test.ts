@@ -283,22 +283,27 @@ describe("translate service", () => {
   it("serves translations from the persistent cache across translator instances", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "translate-store-"));
     tempRoots.push(directory);
+    const firstStore = createPersistentTranslationCacheStore({ directory });
+    await firstStore.ready();
     const firstCalls: Captured[] = [];
     const first = createTranslator({
       loadConfig: async () => values,
       fetchFn: translatingFetch(firstCalls, (text) => `T:${text}`),
-      cacheStore: createPersistentTranslationCacheStore({ directory }),
+      cacheStore: firstStore,
     });
     await expect(first.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
     expect(firstCalls).toHaveLength(1);
+    await firstStore.flush();
 
     // A fresh translator over the same directory (the reopened-session case)
     // must not bill the endpoint again.
+    const secondStore = createPersistentTranslationCacheStore({ directory });
+    await secondStore.ready();
     const secondCalls: Captured[] = [];
     const second = createTranslator({
       loadConfig: async () => values,
       fetchFn: translatingFetch(secondCalls, (text) => `T:${text}`),
-      cacheStore: createPersistentTranslationCacheStore({ directory }),
+      cacheStore: secondStore,
     });
     await expect(second.translate("Hello", "user-to-agent")).resolves.toBe("T:Hello");
     expect(secondCalls).toHaveLength(0);
@@ -717,18 +722,23 @@ describe("user original restoration", () => {
   it("persists reverse entries across instances (the reopened-session case)", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "translate-reverse-"));
     tempRoots.push(directory);
+    const firstStore = createPersistentTranslationCacheStore({ directory });
+    await firstStore.ready();
     const first = createTranslator({
       loadConfig: async () => values,
       fetchFn: translatingFetch([], (text) => `T:${text}`),
-      cacheStore: createPersistentTranslationCacheStore({ directory }),
+      cacheStore: firstStore,
     });
     await first.translate("Hello", "user-to-agent");
+    await firstStore.flush();
+    const secondStore = createPersistentTranslationCacheStore({ directory });
+    await secondStore.ready();
     const second = createTranslator({
       loadConfig: async () => values,
       fetchFn: translatingFetch([], () => {
         throw new Error("must not bill the endpoint after a restart");
       }),
-      cacheStore: createPersistentTranslationCacheStore({ directory }),
+      cacheStore: secondStore,
     });
     expect(second.restoreOriginalFragment("T:Hello")).toBe("Hello");
   });

@@ -17,10 +17,19 @@ import type { TranslationCacheStore } from "./translation-cache-store";
  * short enough for every gateway. A stored override wins over the derived key
  * so the key can be pinned or rotated by hand (see shared/prompt-cache-key).
  *
- * The override lives in its own key namespace of the same store, so it is
- * persisted, evictable under the usual LRU rules, and never part of a
- * translation cache key (rotating it must not invalidate cached translations —
- * only future requests move to the new cache namespace).
+ * Overrides live in their own persistent store (created in index.server.ts),
+ * not in the translation LRU. A pin is read on every request but written only
+ * when the user changes it, so in the shared store it sank to the cold end
+ * whenever translation traffic was heavy and was evicted silently — the pin
+ * disappeared while the translation cache it was supposed to be independent
+ * of stayed healthy. The store is still namespaced under
+ * PROMPT_CACHE_KEY_STORE_PREFIX, so a pin is never part of a translation cache
+ * key: rotating it moves future requests to a new cache namespace without
+ * invalidating anything already translated.
+ *
+ * Pins written before the split sit in the translation store. The manager
+ * therefore takes that store as `legacyStore` and migrates a surviving pin
+ * into the dedicated store on the first resolve that needs it.
  */
 export interface PromptCacheKeyManager {
   resolve(scopeKey: string): { key: string; pinned: boolean; derived: string };
@@ -46,12 +55,44 @@ export function derivePromptCacheKey(scopeKey: string): string {
   return `${DERIVED_PREFIX}${createHash("sha256").update(scopeKey, "utf8").digest("hex").slice(0, 32)}`;
 }
 
+/**
+ * Store view that copies a pre-split override into the dedicated store the
+ * first time it is read there. Only a missing entry falls back: an empty
+ * value is the explicit "automatic" marker written by configure("derive"),
+ * and treating it as missing would resurrect the old pin on every resolve.
+ */
+function withLegacyOverrides(
+  store: TranslationCacheStore,
+  legacyStore: TranslationCacheStore | undefined,
+): TranslationCacheStore {
+  if (legacyStore === undefined || legacyStore === store) return store;
+  return {
+    get(key) {
+      const value = store.get(key);
+      if (value !== undefined) return value;
+      const legacy = legacyStore.get(key);
+      if (legacy !== undefined) store.set(key, legacy);
+      return legacy;
+    },
+    set(key, value) {
+      store.set(key, value);
+    },
+    stats() {
+      return store.stats();
+    },
+  };
+}
+
 export function createPromptCacheKeyManager(
   store: TranslationCacheStore | undefined,
+  legacyStore?: TranslationCacheStore,
 ): PromptCacheKeyManager {
+  const overrides =
+    store === undefined ? undefined : withLegacyOverrides(store, legacyStore);
+
   function resolve(scopeKey: string): { key: string; pinned: boolean; derived: string } {
     const derived = derivePromptCacheKey(scopeKey);
-    const pinned = readPromptCacheKeyOverride(store, scopeKey);
+    const pinned = readPromptCacheKeyOverride(overrides, scopeKey);
     return pinned === undefined
       ? { key: derived, pinned: false, derived }
       : { key: pinned, pinned: true, derived };
@@ -61,11 +102,11 @@ export function createPromptCacheKeyManager(
     resolve,
     configure(scopeKey, action) {
       if (action === "derive") {
-        writePromptCacheKeyOverride(store, scopeKey, "");
+        writePromptCacheKeyOverride(overrides, scopeKey, "");
       } else if (action === "regenerate") {
         // `randomUUID` has dashes only; the value must pass the key schema.
         writePromptCacheKeyOverride(
-          store,
+          overrides,
           scopeKey,
           randomUUID().replace(/-/g, "").slice(0, 24),
         );
@@ -76,7 +117,7 @@ export function createPromptCacheKeyManager(
             `A prompt cache key must be 1-${PROMPT_CACHE_KEY_MAX_LENGTH} characters`,
           );
         }
-        writePromptCacheKeyOverride(store, scopeKey, key);
+        writePromptCacheKeyOverride(overrides, scopeKey, key);
       }
       return resolve(scopeKey);
     },

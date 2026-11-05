@@ -88,6 +88,15 @@ export const TRANSLATION_TEXT_LIMIT = 100_000;
  * once appends far exceed it.
  */
 export const TRANSLATION_CACHE_CAPACITY = 10_000;
+/**
+ * Character budget for the same cache. The entry cap bounds only how many
+ * translations are kept: 10 000 long messages can still exhaust the plugin
+ * process's heap, which the daemon sees only as "Plugin process exited". The
+ * store therefore also evicts once the retained key+value characters pass
+ * this bar. 40 M UTF-16 characters is roughly 80 MB of string data, before
+ * object and JSONL overhead.
+ */
+export const TRANSLATION_CACHE_CHAR_CAPACITY = 40_000_000;
 
 export const translateDirectionSchema = z.enum(["user-to-agent", "agent-to-user"]);
 export type TranslateDirection = z.output<typeof translateDirectionSchema>;

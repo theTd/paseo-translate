@@ -1,10 +1,31 @@
-import { describe, expect, it } from "vitest";
-import { createMemoryTranslationCacheStore } from "./translation-cache-store";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  createMemoryTranslationCacheStore,
+  createPersistentTranslationCacheStore,
+} from "./translation-cache-store";
 import { createPromptCacheKeyManager, derivePromptCacheKey } from "./prompt-cache-key";
 import {
   PROMPT_CACHE_KEY_STORE_PREFIX,
   promptCacheKeyValueSchema,
 } from "../shared/prompt-cache-key";
+
+const tempRoots: string[] = [];
+
+function tempDirectory(): string {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "translate-prompt-key-"));
+  tempRoots.push(directory);
+  return directory;
+}
+
+afterEach(() => {
+  while (tempRoots.length > 0) {
+    const root = tempRoots.pop();
+    if (root !== undefined) rmSync(root, { recursive: true, force: true });
+  }
+});
 
 describe("derivePromptCacheKey", () => {
   it("is stable per scope and distinct across scopes", () => {
@@ -68,5 +89,68 @@ describe("createPromptCacheKeyManager", () => {
   it("refuses an empty pinned key", () => {
     const manager = createPromptCacheKeyManager(createMemoryTranslationCacheStore());
     expect(() => manager.configure("agent-a", { key: "   " })).toThrow(/1-128 characters/);
+  });
+
+  it("migrates a pin left in the shared translation store on first resolve", () => {
+    const shared = createMemoryTranslationCacheStore();
+    const dedicated = createMemoryTranslationCacheStore();
+    shared.set(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a", "legacy-pin");
+
+    const manager = createPromptCacheKeyManager(dedicated, shared);
+    expect(manager.resolve("agent-a")).toMatchObject({ key: "legacy-pin", pinned: true });
+    // The pin is copied so it survives the next eviction in the old store.
+    expect(dedicated.get(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a")).toBe("legacy-pin");
+  });
+
+  it("prefers the dedicated store over the legacy one", () => {
+    const shared = createMemoryTranslationCacheStore();
+    const dedicated = createMemoryTranslationCacheStore();
+    shared.set(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a", "legacy-pin");
+    dedicated.set(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a", "current-pin");
+
+    const manager = createPromptCacheKeyManager(dedicated, shared);
+    expect(manager.resolve("agent-a")).toMatchObject({ key: "current-pin", pinned: true });
+  });
+
+  it("writes pins only to the dedicated store", () => {
+    const shared = createMemoryTranslationCacheStore();
+    const dedicated = createMemoryTranslationCacheStore();
+    const manager = createPromptCacheKeyManager(dedicated, shared);
+
+    manager.configure("agent-a", { key: "new-pin" });
+    expect(dedicated.get(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a")).toBe("new-pin");
+    expect(shared.get(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a")).toBeUndefined();
+  });
+
+  it("does not resurrect a migrated pin after configure('derive')", () => {
+    const shared = createMemoryTranslationCacheStore();
+    const dedicated = createMemoryTranslationCacheStore();
+    shared.set(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a", "legacy-pin");
+
+    const manager = createPromptCacheKeyManager(dedicated, shared);
+    expect(manager.resolve("agent-a").pinned).toBe(true); // migrated first
+    expect(manager.configure("agent-a", "derive").pinned).toBe(false);
+    // The explicit "automatic" marker in the dedicated store must win over
+    // the old pin still sitting in the shared store.
+    expect(manager.resolve("agent-a").pinned).toBe(false);
+  });
+
+  it("keeps a migrated pin across a restart of the dedicated store", async () => {
+    const shared = createMemoryTranslationCacheStore();
+    shared.set(PROMPT_CACHE_KEY_STORE_PREFIX + "agent-a", "migrated-pin");
+    const directory = tempDirectory();
+
+    const dedicated = createPersistentTranslationCacheStore({ directory, maxEntries: 2000 });
+    await dedicated.ready();
+    const manager = createPromptCacheKeyManager(dedicated, shared);
+    expect(manager.resolve("agent-a")).toMatchObject({ key: "migrated-pin", pinned: true });
+    await dedicated.flush();
+
+    const restarted = createPersistentTranslationCacheStore({ directory, maxEntries: 2000 });
+    await restarted.ready();
+    expect(createPromptCacheKeyManager(restarted).resolve("agent-a")).toMatchObject({
+      key: "migrated-pin",
+      pinned: true,
+    });
   });
 });

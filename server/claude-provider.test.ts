@@ -3680,7 +3680,9 @@ describe("translate claude provider extended protocol", () => {
     process.env["CLAUDE_CONFIG_DIR"] = configDir;
     try {
       // First "process": prompt, translating and recording the reverse entry.
-      const first = await createHarness(undefined, createPersistentTranslationCacheStore({ directory: cacheDir }));
+      const firstStore = createPersistentTranslationCacheStore({ directory: cacheDir });
+      await firstStore.ready();
+      const first = await createHarness(undefined, firstStore);
       await first.send(openInput);
       first.fake.use(async function* () {
         yield assistantText("a-persist", "Hallo");
@@ -3688,6 +3690,7 @@ describe("translate claude provider extended protocol", () => {
       });
       await first.send(promptInput("Hello world"));
       await waitFor(first.events, (event) => event.type === "session.turn" && event.state === "completed");
+      await firstStore.flush();
       await first.registration.close();
 
       // Claude persisted the translated prompt.
@@ -3708,6 +3711,8 @@ describe("translate claude provider extended protocol", () => {
       // Second "process": a fresh store over the same directory must restore
       // the original with zero endpoint calls — the fetch rejects on any use.
       const fake2 = createFakeFactory();
+      const secondStore = createPersistentTranslationCacheStore({ directory: cacheDir });
+      await secondStore.ready();
       const provider2 = createTranslateClaudeProvider({
     resolveVersion: async () => undefined,
         loadConfig: async () => values,
@@ -3715,7 +3720,7 @@ describe("translate claude provider extended protocol", () => {
           throw new Error("endpoint must not be billed on exact restore");
         }) as typeof fetch,
         queryFactory: fake2.factory,
-        cacheStore: createPersistentTranslationCacheStore({ directory: cacheDir }),
+        cacheStore: secondStore,
       });
       const registration2 = await provider2.connect({
         versions: [1],
