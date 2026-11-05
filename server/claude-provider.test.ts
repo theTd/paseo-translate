@@ -3256,6 +3256,51 @@ describe("translate claude provider extended protocol", () => {
     }
   });
 
+  it("collects rewind anchors from the transcript when replay was skipped", async () => {
+    const fs = await import("node:fs/promises");
+    const os = await import("node:os");
+    const pathModule = await import("node:path");
+    const configDir = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-config-"));
+    const cwd = await fs.mkdtemp(pathModule.join(os.tmpdir(), "claude-cwd-"));
+    const previous = process.env["CLAUDE_CONFIG_DIR"];
+    delete process.env["CLAUDE_CONFIG_DIR"];
+    try {
+      const projectDir = claudeProjectDirOf(cwd, configDir);
+      await fs.mkdir(projectDir, { recursive: true });
+      const anchor = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f";
+      await fs.writeFile(
+        pathModule.join(projectDir, "cs-anchor.jsonl"),
+        JSON.stringify({
+          type: "user",
+          uuid: anchor,
+          message: { content: [{ type: "text", text: "work" }] },
+          parent_tool_use_id: null,
+        }),
+      );
+      const { fake, events, send } = await createHarness();
+      await send({
+        ...openInput,
+        config: {
+          ...openInput.config,
+          cwd,
+          env: { CLAUDE_CONFIG_DIR: pathModule.resolve(configDir) },
+        },
+        persistence: { version: 1, data: { claudeSessionId: "cs-anchor" } },
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      // No replay ran, so the local /rewind command has to find its anchors
+      // in the persisted transcript itself.
+      await send(promptInput("/rewind", "m-anchor"));
+      await waitFor(events, (event) => event.type === "session.turn" && event.state === "completed");
+      expect(fake.state.rewindFilesCalls).toEqual([{ userMessageId: anchor, dryRun: false }]);
+    } finally {
+      if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
+      else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fs.rm(configDir, { recursive: true, force: true });
+      await fs.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("replays persisted transcripts including subagent sidecars", async () => {
     const fs = await import("node:fs/promises");
     const os = await import("node:os");

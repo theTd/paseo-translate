@@ -54,7 +54,11 @@ import { ClaudeToolStream } from "./claude-tool-stream";
 import { assertClaudeMode, claudeModeCatalog, isClaudeMode } from "./claude-permission-modes";
 import { materializeImageOutput, renderImageOutputMarkdown } from "./image-output";
 import { describeFinishedTool, describeRunningTool } from "./claude-tool-details";
-import { readClaudeReplay, type ReplayUserTextRestore } from "./claude-transcript";
+import {
+  readClaudeReplay,
+  readClaudeRewindUserMessageIds,
+  type ReplayUserTextRestore,
+} from "./claude-transcript";
 import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration, claudeForkEnvironment } from "./claude-fork-coordinator";
 import { findClaudeTranscriptConfigDir, resolveClaudeConfigDir, resolveConfiguredClaudeConfigDir } from "./claude-project-dir";
 import { replayTimelineEvent } from "./provider-replay-timestamps";
@@ -1311,9 +1315,13 @@ async function executeLocalRewind(
     throw new Error("Invalid message UUID. Usage: /rewind <user_message_uuid> or /rewind");
   }
   if (!requested && session.claudeSessionId && session.rewindUserMessageIds.length === 0) {
-    const history = await readClaudeReplay(session.config.cwd, session.claudeSessionId, undefined, session.config.env.CLAUDE_CONFIG_DIR);
-    session.rewindUserMessageIds = history.rootItems.flatMap((item) =>
-      item.type === "user_message" && typeof item.revertToken === "string" ? [item.revertToken] : []);
+    // Anchors only: the full replay this used to run paid for every timeline
+    // item (and every subagent sidecar) just to read these uuids.
+    session.rewindUserMessageIds = await readClaudeRewindUserMessageIds(
+      session.config.cwd,
+      session.claudeSessionId,
+      session.config.env.CLAUDE_CONFIG_DIR,
+    );
   }
   const candidates = requested ? [requested] : [...new Set(session.rewindUserMessageIds)].reverse();
   if (session.closed || session.active !== active) return;
