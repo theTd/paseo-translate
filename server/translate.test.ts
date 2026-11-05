@@ -1407,7 +1407,7 @@ describe("upstream concurrency gate", () => {
     await Promise.all(pending);
   });
 
-  it("lets an agent-bound prompt jump the queued display jobs", async () => {
+  it("starts an agent-bound prompt in a reserved slot while display jobs fill the cap", async () => {
     const calls: GatedCall[] = [];
     const upstream = createUpstreamGate();
     const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls), upstream };
@@ -1415,18 +1415,35 @@ describe("upstream concurrency gate", () => {
     const display = Array.from({ length: MAX_CONCURRENT_UPSTREAM }, (_, index) => `Display ${index}`);
     const displayPending = display.map((text) => translator.translate(text, "agent-to-user"));
     await until(() => calls.length === MAX_CONCURRENT_UPSTREAM);
-    // The display job queues first; the prompt arrives second but must start
-    // first once a slot frees.
+    // A further display job waits for a slot; the prompt must not wait for
+    // any running display stream to finish.
     const queuedDisplay = translator.translate("Display queued", "agent-to-user");
+    await until(() => upstream.stats().queued === 1);
     const prompt = translator.translate("Prompt jump", "user-to-agent", { priority: true });
-    await until(() => upstream.stats().queued === 2);
-    calls[0]?.release();
     await until(() => calls.length === MAX_CONCURRENT_UPSTREAM + 1);
     expect(calls[MAX_CONCURRENT_UPSTREAM]?.source).toBe("Prompt jump");
+    expect(upstream.stats()).toMatchObject({ active: MAX_CONCURRENT_UPSTREAM + 1, queued: 1 });
     for (const call of calls) call.release();
     await until(() => calls.length === MAX_CONCURRENT_UPSTREAM + 2);
     for (const call of calls) call.release();
     await Promise.all([...displayPending, queuedDisplay, prompt]);
+  });
+
+  it("never refuses an agent-bound prompt as busy", async () => {
+    const calls: GatedCall[] = [];
+    const upstream = createUpstreamGate({ maxConcurrent: 1, maxQueued: 0, priorityHeadroom: 0 });
+    const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls), upstream };
+    const translator = createTranslator(deps);
+    const running = translator.translate("Display running", "agent-to-user");
+    await until(() => calls.length === 1);
+    await expect(translator.translate("Display overflow", "agent-to-user")).rejects.toThrow(TRANSLATION_BUSY_MESSAGE);
+    const prompt = translator.translate("Prompt waits", "user-to-agent", { priority: true });
+    await until(() => upstream.stats().priorityQueued === 1);
+    calls[0]?.release();
+    await until(() => calls.length === 2);
+    expect(calls[1]?.source).toBe("Prompt waits");
+    calls[1]?.release();
+    await Promise.all([running, prompt]);
   });
 
   it("drops an aborted queued waiter without freeing its slot", async () => {

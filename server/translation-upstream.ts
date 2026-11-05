@@ -28,10 +28,18 @@ export const MAX_CONCURRENT_UPSTREAM = 6;
  * `busy` error lets the renderer back off instead of growing the queue.
  */
 export const MAX_QUEUED_UPSTREAM = 64;
+/**
+ * Extra slots only agent-bound prompt work may use. Display streams can hold a
+ * slot for minutes (their timeout bounds gaps, not the whole stream), so a
+ * queue jump alone would still leave a prompt waiting behind six of them while
+ * the agent turn stalls.
+ */
+export const PRIORITY_UPSTREAM_HEADROOM = 2;
 
 export interface UpstreamGateOptions {
   maxConcurrent?: number;
   maxQueued?: number;
+  priorityHeadroom?: number;
 }
 
 export interface UpstreamWaitOptions {
@@ -75,6 +83,7 @@ interface QueueEntry {
 export function createUpstreamGate(options: UpstreamGateOptions = {}): UpstreamGate {
   const maxConcurrent = Math.max(1, options.maxConcurrent ?? MAX_CONCURRENT_UPSTREAM);
   const maxQueued = Math.max(0, options.maxQueued ?? MAX_QUEUED_UPSTREAM);
+  const priorityLimit = maxConcurrent + Math.max(0, options.priorityHeadroom ?? PRIORITY_UPSTREAM_HEADROOM);
   const priorityQueue: QueueEntry[] = [];
   const displayQueue: QueueEntry[] = [];
   let active = 0;
@@ -116,11 +125,16 @@ export function createUpstreamGate(options: UpstreamGateOptions = {}): UpstreamG
     })();
   }
 
+  function limitFor(priority: boolean): number {
+    return priority ? priorityLimit : maxConcurrent;
+  }
+
   function drain(): void {
-    while (active < maxConcurrent) {
-      const entry = priorityQueue.shift() ?? displayQueue.shift();
-      if (entry === undefined) return;
-      start(entry);
+    while (active < priorityLimit && priorityQueue.length > 0) {
+      start(priorityQueue.shift() as QueueEntry);
+    }
+    while (active < maxConcurrent && displayQueue.length > 0) {
+      start(displayQueue.shift() as QueueEntry);
     }
   }
 
@@ -137,11 +151,13 @@ export function createUpstreamGate(options: UpstreamGateOptions = {}): UpstreamG
           priority: waitOptions?.priority === true,
           queued: true,
         };
-        if (active < maxConcurrent) {
+        if (active < limitFor(entry.priority)) {
           start(entry);
           return;
         }
-        if (queuedCount() >= maxQueued) {
+        // The prompt path fails closed, so a busy refusal there would fail the
+        // user's send; only display work is turned away.
+        if (!entry.priority && displayQueue.length >= maxQueued) {
           reject(new Error(TRANSLATION_BUSY_MESSAGE));
           return;
         }
