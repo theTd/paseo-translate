@@ -13,9 +13,17 @@ vi.mock("./claude-cache-preferences", () => ({ createClaudeCachePreferenceStore:
 describe("Claude new-session defaults", () => {
   it("snapshots defaults only at creation and preserves explicit configuration", async () => {
     let defaults = claudeCachePreferencesSchema.parse({ enabled: false });
+    type DefaultsState = { status: "ready"; values: typeof defaults };
+    const listeners = new Set<(state: DefaultsState) => void>();
+    const readDefaults = (): DefaultsState => ({ status: "ready", values: defaults });
     const hooks = new Map<string, (input: { request: { config: AgentSessionConfig } }) => Promise<{ config: AgentSessionConfig } | undefined>>();
     const server = { registerSettings: (definition: { id: string }) => ({
-      read: async () => ({ status: "ready", values: definition.id === "claude-cache" ? defaults : {} }),
+      read: async () => definition.id === "claude-cache" ? readDefaults() : { status: "ready", values: {} },
+      subscribe: (listener: (state: DefaultsState) => void) => {
+        if (definition.id !== "claude-cache") return () => {};
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
     }), before: (name: string, handler: typeof hooks extends Map<string, infer H> ? H : never) => {
       hooks.set(name, handler); return vi.fn();
     }, on: vi.fn(() => vi.fn()), handle: vi.fn(), registerProvider: vi.fn() } as unknown as PluginServerContext;
@@ -25,7 +33,8 @@ describe("Claude new-session defaults", () => {
       const config: AgentSessionConfig = { provider: "translate-claude", cwd: "/repo", providerOptions: { custom: "keep" } };
       const first = (await create({ request: { config } }))!;
       expect(first.config.providerOptions).toEqual({ custom: "keep", translateClaudeCache: defaults });
-      defaults = { enabled: true, thresholdTokens: 300_000, leadSeconds: 300 };
+      defaults = claudeCachePreferencesSchema.parse({ enabled: true, thresholdTokens: 300_000 });
+      for (const listener of listeners) listener(readDefaults());
       const second = (await create({ request: { config } }))!;
       expect(second.config.providerOptions?.translateClaudeCache).toEqual(defaults);
       expect(first.config.providerOptions?.translateClaudeCache).toMatchObject({ enabled: false, thresholdTokens: 200_000 });

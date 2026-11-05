@@ -28,6 +28,7 @@ import {
 import { createTranslationContextManager } from "./server/translation-context";
 import { createPromptCacheKeyManager } from "./server/prompt-cache-key";
 import { promptCacheKeySetRpc, promptCacheKeyStatusRpc } from "./shared/prompt-cache-key";
+import { createCachedSettingsReader } from "./server/settings-cache";
 import { createFileDiagnosticSink, createMemoryProbe, createStepTracer, diagnosticProbesEnabled,
   memoryProbeOptionsFromEnv, setDiagnosticSink } from "./server/memory-probe";
 import { installProcessDiagnostics } from "./server/process-diagnostics";
@@ -51,10 +52,14 @@ const CONTEXT_MEMORY_CAPACITY = 500;
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(translateSettings);
+  // Keep one in-memory snapshot per settings definition: the host re-reads the
+  // settings JSON from disk on every read(), and those reads queue behind
+  // libuv's small thread pool, so a translation can wait on unrelated fs work.
+  const settingsReader = createCachedSettingsReader(settings);
   // Fail closed at use time: incomplete settings reject here with a clear
   // error instead of letting untranslated text reach the agent.
   const loadConfig = async () => {
-    const state = await settings.read();
+    const state = await settingsReader.read();
     if (state.status !== "ready") {
       throw new Error(`Translate plugin settings are invalid: ${state.error}`);
     }
@@ -121,12 +126,13 @@ export default function contribute(server: PluginServerContext) {
   const deps = { loadConfig, cacheStore, context, inflight, promptCacheKeys };
   const forkCoordinator = new ClaudeForkCoordinator();
   const cacheDefaults = server.registerSettings(claudeCacheSettings);
+  const cacheDefaultsReader = createCachedSettingsReader(cacheDefaults);
   const cacheCoordinator = new ClaudeCacheCompactionCoordinator(createClaudeCachePreferenceStore(
     path.join(defaultTranslationCacheDirectory(), "claude-cache-preferences")));
   // Snapshot only at creation. Old/resumed agents without this seed stay off.
   const offCacheCreate = server.before("agent.create", async ({ request }) => {
     if (request.config.provider !== "translate-claude" || request.config.internal) return;
-    const defaults = await cacheDefaults.read();
+    const defaults = await cacheDefaultsReader.read();
     if (defaults.status !== "ready") throw new Error("Claude cache defaults are invalid");
     const options = request.config.providerOptions ?? {};
     return { ...request, config: { ...request.config, providerOptions: { ...options,
@@ -166,6 +172,8 @@ export default function contribute(server: PluginServerContext) {
   server.handle(promptCacheKeySetRpc, ({ sessionKey, action }) =>
     promptCacheKeys.configure(sessionKey, action));
   return () => {
+    settingsReader.dispose();
+    cacheDefaultsReader.dispose();
     void cpuProfile?.dispose();
     void heapProfile?.dispose();
     memoryProbe?.dispose();
