@@ -14,6 +14,10 @@ import {
   type TranslationInflightRegistry,
 } from "./translation-inflight";
 import {
+  createUpstreamGate,
+  type UpstreamGate,
+} from "./translation-upstream";
+import {
   createMemoryTranslationCacheStore,
   type TranslationCacheStore,
 } from "./translation-cache-store";
@@ -51,6 +55,8 @@ import {
   wrapTranslationBatch,
 } from "./translate-batch";
 
+export { MAX_CONCURRENT_UPSTREAM, MAX_QUEUED_UPSTREAM } from "./translation-upstream";
+
 /**
  * Step markers for the translation path. A step that never finishes leaves one
  * dangling `enter` as the last line before a crash, which is the only way to
@@ -82,6 +88,14 @@ export interface TranslatorDeps {
    */
   inflight?: TranslationInflightRegistry;
   /**
+   * Endpoint concurrency gate shared by every translator built from these
+   * deps (see translation-upstream.ts). The plugin entry injects one
+   * process-wide gate so the prompt path and display jobs compete for the
+   * same slots; absent means a gate cached per deps object, which keeps
+   * tests hermetic.
+   */
+  upstream?: UpstreamGate;
+  /**
    * `prompt_cache_key` resolution for the request prefix (see
    * server/prompt-cache-key.ts). Absent means no key is sent, which keeps
    * tests hermetic and gateways that reject the parameter untouched.
@@ -109,6 +123,12 @@ export interface TranslateCallOptions {
    * when no other caller still waits for the same text.
    */
   signal?: AbortSignal;
+  /**
+   * Agent-bound prompt work: its endpoint call queues ahead of display jobs
+   * when every upstream slot is busy (see translation-upstream.ts), so a
+   * send is not stuck behind a session reopen's display translation.
+   */
+  priority?: boolean;
   /** Per-index cancellation for translateMany (same rules as `signal`). */
   signals?: readonly (AbortSignal | undefined)[];
 }
@@ -280,6 +300,24 @@ function legacyCacheKey(key: string): string | undefined {
 }
 
 /**
+ * One endpoint gate per deps object. The plugin entry builds every translator
+ * from the same deps instance, so this is the process-wide upstream cap
+ * there; a test that builds fresh deps keeps its own gate. An injected gate
+ * always wins.
+ */
+const sharedUpstreamGates = new WeakMap<TranslatorDeps, UpstreamGate>();
+
+function upstreamGateFor(deps: TranslatorDeps): UpstreamGate {
+  if (deps.upstream !== undefined) return deps.upstream;
+  let gate = sharedUpstreamGates.get(deps);
+  if (gate === undefined) {
+    gate = createUpstreamGate();
+    sharedUpstreamGates.set(deps, gate);
+  }
+  return gate;
+}
+
+/**
  * Cached translation service shared by the prompt path (fail closed, unary),
  * the timeline renderer path (display only, unary fallback), and the
  * streaming renderer path (display only, stream-first). Settings are re-read
@@ -289,6 +327,7 @@ function legacyCacheKey(key: string): string | undefined {
 export function createTranslator(deps: TranslatorDeps): Translator {
   const cache = legacyAwareStore(deps.cacheStore ?? createMemoryTranslationCacheStore());
   const inflight = deps.inflight ?? createTranslationInflightRegistry();
+  const upstream = upstreamGateFor(deps);
 
   type PreparedMiss = {
     key: string;
@@ -472,20 +511,24 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     prepared: PreparedMiss,
     source: string,
     direction: TranslateDirection,
+    priority = false,
   ): (context: InflightProducerContext) => Promise<string> {
     return async ({ signal, progress }) => {
       let accumulated = "";
       const done = step.start("endpoint.stream", `chars=${prepared.requestContent.length}`);
-      const translated = await completeStreamFirst(
-        prepared.client,
-        requestMessages(prepared),
-        (delta) => {
-          const doneDelta = step.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
-          accumulated += delta;
-          progress(accumulated);
-          doneDelta();
-        },
-        { signal },
+      const translated = await upstream.run(
+        () => completeStreamFirst(
+          prepared.client,
+          requestMessages(prepared),
+          (delta) => {
+            const doneDelta = step.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
+            accumulated += delta;
+            progress(accumulated);
+            doneDelta();
+          },
+          { signal },
+        ),
+        { signal, priority },
       ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
@@ -502,12 +545,14 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     prepared: PreparedMiss,
     source: string,
     direction: TranslateDirection,
+    priority = false,
   ): (context: InflightProducerContext) => Promise<string> {
     return async ({ signal }) => {
       const done = step.start("endpoint.complete", `chars=${prepared.requestContent.length}`);
-      const translated = await prepared.client
-        .complete(requestMessages(prepared), { signal })
-        .finally(done);
+      const translated = await upstream.run(
+        () => prepared.client.complete(requestMessages(prepared), { signal }),
+        { signal, priority },
+      ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
     };
@@ -577,6 +622,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     packTexts: readonly string[],
     direction: TranslateDirection,
     signal: AbortSignal,
+    priority: boolean,
   ): Promise<string[] | null> {
     const first = packPrepared[0];
     if (first === undefined) throw new Error("Invariant: empty translation pack");
@@ -607,7 +653,10 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         }),
       },
     ];
-    const output = await completeStreamFirst(first.client, messages, () => undefined, { signal });
+    const output = await upstream.run(
+      () => completeStreamFirst(first.client, messages, () => undefined, { signal }),
+      { signal, priority },
+    );
     const parsed = parseTranslationBatch(output, packTexts.length, nonce);
     if (parsed === null) return null;
     parsed.forEach((translated, offset) => {
@@ -719,7 +768,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         if (joined !== undefined) return joined;
       }
       // Still synchronous since setup: nothing can start this key meanwhile.
-      return joinOrStart(prepared, completeProducer(prepared, text, direction), {
+      return joinOrStart(prepared, completeProducer(prepared, text, direction, options?.priority === true), {
         signal: options?.signal,
       });
     },
@@ -730,7 +779,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         if (direction === "user-to-agent") rememberOriginalFragment(cache, prepared.cached, text);
         return prepared.cached;
       }
-      return joinOrStart(prepared, streamProducer(prepared, text, direction), {
+      return joinOrStart(prepared, streamProducer(prepared, text, direction, options?.priority === true), {
         onProgress: deltaForwarder(onDelta),
         signal: options?.signal,
       });
@@ -738,6 +787,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     async translateMany(texts, direction, options) {
       const onItem = options?.onItem;
       const signals = options?.signals;
+      const priority = options?.priority === true;
       if (texts.length === 0) return [];
       const preparedList: SetupResult[] = [];
       for (const text of texts) {
@@ -809,7 +859,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
           // A lone miss streams, so the renderer shows progress.
           const index = packIndexes[0] as number;
           const prepared = misses.get(index) as PreparedMiss;
-          const produce = streamProducer(prepared, texts[index] ?? "", direction);
+          const produce = streamProducer(prepared, texts[index] ?? "", direction, priority);
           track(
             index,
             inflight.start(prepared.key, (context) => packLane(() => produce(context)), {
@@ -830,10 +880,10 @@ export function createTranslator(deps: TranslatorDeps): Translator {
           livePackItems -= 1;
           if (livePackItems === 0) packAbort.abort();
         };
-        const upstream = packLane(() =>
-          runPackUpstream(packPrepared, packTexts, direction, packAbort.signal),
+        const packWork = packLane(() =>
+          runPackUpstream(packPrepared, packTexts, direction, packAbort.signal, priority),
         );
-        upstream.catch(() => undefined);
+        packWork.catch(() => undefined);
         packIndexes.forEach((index, position) => {
           const prepared = packPrepared[position] as PreparedMiss;
           const source = packTexts[position] ?? "";
@@ -845,11 +895,11 @@ export function createTranslator(deps: TranslatorDeps): Translator {
               prepared.key,
               async (context) => {
                 context.signal.addEventListener("abort", leavePack, { once: true });
-                const parsed = await upstream;
+                const parsed = await packWork;
                 const translated = parsed?.[position];
                 if (translated !== undefined) return translated;
                 // The model dropped the item tags: this item streams alone.
-                return fallbackLane(() => streamProducer(prepared, source, direction)(context));
+                return fallbackLane(() => streamProducer(prepared, source, direction, priority)(context));
               },
               { onProgress: progressFor(index), signal: signals?.[index] },
             ),
@@ -904,25 +954,73 @@ function createSequentialLane(): <T>(task: () => Promise<T>) => Promise<T> {
 
 export type TranslateHandlerInput = RpcInput<typeof translateTextRpc>;
 
+/**
+ * Unary invoke deadline. The host times every plugin RPC out at 30s with one
+ * generic message ("Plugin RPC timed out: translate.invoke") whatever the
+ * method, and gives custom handlers no AbortSignal. The handler therefore
+ * stops waiting first, with an error the client can classify and retry; the
+ * waiter is cancellable, so the endpoint request is aborted once no other
+ * caller still needs it (see translation-inflight.ts).
+ */
+export const TRANSLATE_INVOKE_DEADLINE_MS = 25_000;
+
+export interface TranslateHandlerOptions {
+  /** Wall-clock bound for one unary invoke; defaults to TRANSLATE_INVOKE_DEADLINE_MS. */
+  deadlineMs?: number;
+}
+
 /** Plugin RPC handler: used by the client renderer for display translation. */
-export function createTranslateHandler(deps: TranslatorDeps) {
+export function createTranslateHandler(
+  deps: TranslatorDeps,
+  options?: TranslateHandlerOptions | number,
+) {
   const translator = createTranslator(deps);
+  const deadlineMs = typeof options === "number"
+    ? options
+    : options?.deadlineMs ?? TRANSLATE_INVOKE_DEADLINE_MS;
   return async function handleTranslate(input: TranslateHandlerInput) {
-    const values = await deps.loadConfig();
-    if (!displayTranslationDirectionEnabled(values, input.direction)) {
-      // Matching display switch off: the renderer keeps the original text.
-      return { text: input.text };
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        // Reject before aborting: the abort synchronously rejects the shared
+        // wait with the canceled error, and this race must surface the
+        // deadline message instead of that generic cancellation.
+        reject(new Error(
+          `Translation did not finish within ${deadlineMs}ms; this request stopped waiting`
+          + " (the translation keeps running only while another caller shares it)",
+        ));
+        controller.abort();
+      }, deadlineMs);
+    });
+    // A signal makes this waiter cancellable instead of pinned: on timeout it
+    // leaves the shared translation, and the registry aborts the endpoint only
+    // when nobody else waits for the same text.
+    const callOptions = { contextKey: input.sessionKey, signal: controller.signal };
+    const work = (async () => {
+      const values = await deps.loadConfig();
+      if (!displayTranslationDirectionEnabled(values, input.direction)) {
+        // Matching display switch off: the renderer keeps the original text.
+        return { text: input.text };
+      }
+      if (input.direction === "user-to-agent") {
+        const restored = await translator.restorePromptDisplay(input.text, callOptions);
+        return {
+          text: restored ?? await translatePromptDisplay(
+            input.text,
+            (fragment) => translator.translate(fragment, input.direction, callOptions),
+          ),
+        };
+      }
+      return { text: await translator.translate(input.text, input.direction, callOptions) };
+    })();
+    // Race rather than relying on every await to honor the signal: settings
+    // and cache reads do not take one, and none of them may outlive the host.
+    try {
+      return await Promise.race([work, expired]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
-    const options = { contextKey: input.sessionKey };
-    let text: string;
-    if (input.direction === "user-to-agent") {
-      text = await translator.restorePromptDisplay(input.text, options) ?? await translatePromptDisplay(
-        input.text, (fragment) => translator.translate(fragment, input.direction, options),
-      );
-    } else {
-      text = await translator.translate(input.text, input.direction, options);
-    }
-    return { text };
   };
 }
 

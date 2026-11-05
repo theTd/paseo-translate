@@ -35,7 +35,8 @@ export function createTranslateProvider(deps: TranslatorDeps): ProviderRegistrat
         ...(sessionEnv !== undefined ? { sessionEnv } : {}),
         ...(scopeKey.length > 0 ? { scopeKey } : {}),
         translate: values.translatePrompts
-          ? (text, contextKey) => translator.translate(text, "user-to-agent", { contextKey })
+          ? (text, contextKey) =>
+              translator.translate(text, "user-to-agent", { contextKey, priority: true })
           : passThrough,
         rememberPromptDisplay: values.translatePrompts
           ? (fragments, contextKey) => translator.rememberPromptDisplay(fragments, { contextKey })
