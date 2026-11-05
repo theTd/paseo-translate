@@ -7,7 +7,16 @@ import {
   createTranslateHandler,
   createTranslateStreamManager,
   createTranslator,
+  MAX_CONCURRENT_UPSTREAM,
+  MAX_QUEUED_UPSTREAM,
+  TRANSLATE_INVOKE_DEADLINE_MS,
 } from "./translate";
+import { createUpstreamGate } from "./translation-upstream";
+import { isTranslationCanceled } from "./llm-client";
+import {
+  TRANSLATION_BUSY_MESSAGE,
+  classifyTranslationError,
+} from "../shared/translation-retry";
 import {
   createMemoryTranslationCacheStore,
   createPersistentTranslationCacheStore,
@@ -1274,5 +1283,200 @@ describe("display translation batching", () => {
     await translator.translate("Next", "agent-to-user", { contextKey: "s" });
     expect(calls).toHaveLength(2);
     expect(calls[1]?.user).toBe(requestFor("Next", "agent-to-user"));
+  });
+});
+
+interface GatedCall {
+  source: string;
+  stream: boolean;
+  signal: AbortSignal | undefined;
+  release: () => void;
+}
+
+/** Endpoint whose answer stays pending until the call is released; honors aborts. */
+function gatedFetch(
+  calls: GatedCall[],
+  map: (text: string) => string = (text) => `DE:${text}`,
+): typeof fetch {
+  return (async (_input: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body)) as {
+      stream?: boolean;
+      messages: Array<{ role: string; content: string }>;
+    };
+    const user = body.messages.filter((message) => message.role === "user").at(-1);
+    const source = unwrapTranslationInput(user?.content ?? "");
+    const signal = (init?.signal ?? undefined) as AbortSignal | undefined;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const aborted = new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), {
+        once: true,
+      });
+    });
+    calls.push({ source, stream: body.stream === true, signal, release });
+    await Promise.race([gate, aborted]);
+    return new Response(JSON.stringify({ choices: [{ message: { content: map(source) } }] }), {
+      status: 200,
+    });
+  }) as typeof fetch;
+}
+
+async function until(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 4_000;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error("condition not reached");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+/** Releases started calls until every one of `target` has started, then all. */
+async function releaseUntilAllStarted(calls: GatedCall[], target: number): Promise<void> {
+  while (calls.length < target) {
+    for (const call of calls) call.release();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  for (const call of calls) call.release();
+}
+
+describe("unary invoke deadline", () => {
+  it("stays below the host's 30s RPC timeout", () => {
+    expect(TRANSLATE_INVOKE_DEADLINE_MS).toBeLessThan(30_000);
+  });
+
+  it("rejects before the host timeout and aborts the unshared upstream", async () => {
+    const calls: GatedCall[] = [];
+    const handler = createTranslateHandler(
+      { loadConfig: async () => values, fetchFn: gatedFetch(calls) },
+      { deadlineMs: 60 },
+    );
+    // The prompt path (restore + translatePromptDisplay) carries the same
+    // signal as the plain path.
+    const pending = handler({ text: "Slow prompt", direction: "user-to-agent" });
+    await until(() => calls.length === 1);
+    const startedAt = Date.now();
+    await expect(pending).rejects.toThrow(/did not finish within 60ms/);
+    expect(Date.now() - startedAt).toBeLessThan(TRANSLATE_INVOKE_DEADLINE_MS);
+    await until(() => calls[0]?.signal?.aborted === true);
+    calls[0]?.release();
+  });
+
+  it("keeps a shared upstream running for the other waiter", async () => {
+    const calls: GatedCall[] = [];
+    const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls) };
+    const translator = createTranslator(deps);
+    // A waiter without a signal pins the translation, like the provider's
+    // fail-closed prompt path.
+    const other = translator.translate("Shared reply", "agent-to-user");
+    await until(() => calls.length === 1);
+    const handler = createTranslateHandler(deps, { deadlineMs: 60 });
+    await expect(
+      handler({ text: "Shared reply", direction: "agent-to-user" }),
+    ).rejects.toThrow(/did not finish within 60ms/);
+    // The timed-out waiter left, but the pinned one still needs the answer.
+    expect(calls[0]?.signal?.aborted).toBe(false);
+    calls[0]?.release();
+    await expect(other).resolves.toBe("DE:Shared reply");
+  });
+});
+
+describe("upstream concurrency gate", () => {
+  it("caps concurrent endpoint calls", async () => {
+    const calls: GatedCall[] = [];
+    const upstream = createUpstreamGate();
+    const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls), upstream };
+    const translator = createTranslator(deps);
+    const texts = Array.from({ length: MAX_CONCURRENT_UPSTREAM + 2 }, (_, index) => `Row ${index}`);
+    const pending = texts.map((text) => translator.translate(text, "agent-to-user"));
+    await until(() => calls.length === MAX_CONCURRENT_UPSTREAM);
+    await until(() => upstream.stats().queued === texts.length - MAX_CONCURRENT_UPSTREAM);
+    expect(calls).toHaveLength(MAX_CONCURRENT_UPSTREAM);
+    for (const call of calls) call.release();
+    await until(() => calls.length === texts.length);
+    for (const call of calls) call.release();
+    await expect(Promise.all(pending)).resolves.toEqual(texts.map((text) => `DE:${text}`));
+  });
+
+  it("rejects queue overflow with the client's busy error", async () => {
+    const calls: GatedCall[] = [];
+    const upstream = createUpstreamGate();
+    const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls), upstream };
+    const translator = createTranslator(deps);
+    const backlog = Array.from(
+      { length: MAX_CONCURRENT_UPSTREAM + MAX_QUEUED_UPSTREAM },
+      (_, index) => `Backlog ${index}`,
+    );
+    const pending = backlog.map((text) => translator.translate(text, "agent-to-user"));
+    await until(() => upstream.stats().queued === MAX_QUEUED_UPSTREAM);
+    const overflow = translator.translate("Overflow", "agent-to-user");
+    await expect(overflow).rejects.toThrow(TRANSLATION_BUSY_MESSAGE);
+    expect(classifyTranslationError(await overflow.catch((error: unknown) => error))).toBe("busy");
+    expect(calls).toHaveLength(MAX_CONCURRENT_UPSTREAM);
+    await releaseUntilAllStarted(calls, backlog.length);
+    await Promise.all(pending);
+  });
+
+  it("starts an agent-bound prompt in a reserved slot while display jobs fill the cap", async () => {
+    const calls: GatedCall[] = [];
+    const upstream = createUpstreamGate();
+    const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls), upstream };
+    const translator = createTranslator(deps);
+    const display = Array.from({ length: MAX_CONCURRENT_UPSTREAM }, (_, index) => `Display ${index}`);
+    const displayPending = display.map((text) => translator.translate(text, "agent-to-user"));
+    await until(() => calls.length === MAX_CONCURRENT_UPSTREAM);
+    // A further display job waits for a slot; the prompt must not wait for
+    // any running display stream to finish.
+    const queuedDisplay = translator.translate("Display queued", "agent-to-user");
+    await until(() => upstream.stats().queued === 1);
+    const prompt = translator.translate("Prompt jump", "user-to-agent", { priority: true });
+    await until(() => calls.length === MAX_CONCURRENT_UPSTREAM + 1);
+    expect(calls[MAX_CONCURRENT_UPSTREAM]?.source).toBe("Prompt jump");
+    expect(upstream.stats()).toMatchObject({ active: MAX_CONCURRENT_UPSTREAM + 1, queued: 1 });
+    for (const call of calls) call.release();
+    await until(() => calls.length === MAX_CONCURRENT_UPSTREAM + 2);
+    for (const call of calls) call.release();
+    await Promise.all([...displayPending, queuedDisplay, prompt]);
+  });
+
+  it("never refuses an agent-bound prompt as busy", async () => {
+    const calls: GatedCall[] = [];
+    const upstream = createUpstreamGate({ maxConcurrent: 1, maxQueued: 0, priorityHeadroom: 0 });
+    const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls), upstream };
+    const translator = createTranslator(deps);
+    const running = translator.translate("Display running", "agent-to-user");
+    await until(() => calls.length === 1);
+    await expect(translator.translate("Display overflow", "agent-to-user")).rejects.toThrow(TRANSLATION_BUSY_MESSAGE);
+    const prompt = translator.translate("Prompt waits", "user-to-agent", { priority: true });
+    await until(() => upstream.stats().priorityQueued === 1);
+    calls[0]?.release();
+    await until(() => calls.length === 2);
+    expect(calls[1]?.source).toBe("Prompt waits");
+    calls[1]?.release();
+    await Promise.all([running, prompt]);
+  });
+
+  it("drops an aborted queued waiter without freeing its slot", async () => {
+    const calls: GatedCall[] = [];
+    const upstream = createUpstreamGate();
+    const deps = { loadConfig: async () => values, fetchFn: gatedFetch(calls), upstream };
+    const translator = createTranslator(deps);
+    const active = Array.from({ length: MAX_CONCURRENT_UPSTREAM }, (_, index) => `Active ${index}`);
+    const pending = active.map((text) => translator.translate(text, "agent-to-user"));
+    await until(() => calls.length === MAX_CONCURRENT_UPSTREAM);
+    const controller = new AbortController();
+    const aborted = translator.translate("Aborted while queued", "agent-to-user", {
+      signal: controller.signal,
+    });
+    await until(() => upstream.stats().queued === 1);
+    controller.abort();
+    await expect(aborted).rejects.toSatisfy(isTranslationCanceled);
+    await until(() => upstream.stats().queued === 0);
+    // Waiting never held a slot: the six running calls are untouched.
+    expect(upstream.stats()).toMatchObject({ active: MAX_CONCURRENT_UPSTREAM, queued: 0 });
+    for (const call of calls) call.release();
+    await Promise.all(pending);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(calls).toHaveLength(MAX_CONCURRENT_UPSTREAM);
   });
 });

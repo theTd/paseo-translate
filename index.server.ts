@@ -1,5 +1,7 @@
 import path from "node:path";
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginRpcContract } from "@getpaseo/plugin";
+import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
+import type { ZodType, input as ZodInput, output as ZodOutput } from "zod";
 import { createProvidersHandler } from "./server/providers";
 import { createTranslateProvider } from "./server/provider";
 // Pre-bundled: keeps the claude-agent-sdk (and its defensive type fallbacks)
@@ -21,6 +23,7 @@ import {
   createTranslateStreamStartHandler,
 } from "./server/translate";
 import { createTranslationInflightRegistry } from "./server/translation-inflight";
+import { createUpstreamGate } from "./server/translation-upstream";
 import {
   createPersistentTranslationCacheStore,
   defaultTranslationCacheDirectory,
@@ -30,7 +33,7 @@ import { createPromptCacheKeyManager } from "./server/prompt-cache-key";
 import { promptCacheKeySetRpc, promptCacheKeyStatusRpc } from "./shared/prompt-cache-key";
 import { createCachedSettingsReader } from "./server/settings-cache";
 import { createFileDiagnosticSink, createMemoryProbe, createStepTracer, diagnosticProbesEnabled,
-  memoryProbeOptionsFromEnv, setDiagnosticSink } from "./server/memory-probe";
+  memoryProbeOptionsFromEnv, setDiagnosticSink, type StepTracer } from "./server/memory-probe";
 import { installProcessDiagnostics } from "./server/process-diagnostics";
 import { createCpuProfileRecorder } from "./server/cpu-profile";
 import { createHeapProfileRecorder } from "./server/heap-profile";
@@ -50,7 +53,35 @@ import {
 /** Persisted terminology memories share the cache directory, in their own file. */
 const CONTEXT_MEMORY_CAPACITY = 500;
 
+/**
+ * Registers one RPC handler behind a step marker named after its contract
+ * (`rpc.` + the contract's method name), so a handler that stalls leaves the
+ * offending method as the last `step enter` line. The host reports every
+ * stalled RPC as one generic "Plugin RPC timed out: translate.invoke" whatever
+ * the method was, and this marker is what tells them apart. The tracer no-ops
+ * unless diagnostic probes are enabled.
+ */
+function handleTraced<InputSchema extends ZodType, OutputSchema extends ZodType>(
+  server: PluginServerContext,
+  step: StepTracer,
+  contract: PluginRpcContract<InputSchema, OutputSchema>,
+  handler: (
+    input: ZodOutput<InputSchema>,
+    context: PluginHandlerContext,
+  ) => ZodInput<OutputSchema> | Promise<ZodInput<OutputSchema>>,
+): void {
+  server.handle(contract, async (input, context) => {
+    const done = step.start(`rpc.${contract.name}`);
+    try {
+      return await handler(input, context);
+    } finally {
+      done();
+    }
+  });
+}
+
 export default function contribute(server: PluginServerContext) {
+  const step = createStepTracer();
   const settings = server.registerSettings(translateSettings);
   // Keep one in-memory snapshot per settings definition: the host re-reads the
   // settings JSON from disk on every read(), and those reads queue behind
@@ -104,6 +135,10 @@ export default function contribute(server: PluginServerContext) {
   // display jobs of every client and the notification previews join one
   // running request per text instead of each billing their own.
   const inflight = createTranslationInflightRegistry();
+  // One upstream gate for the whole process: a reopened long session's display
+  // jobs would otherwise fire one endpoint request per visible row and bury
+  // the agent-bound prompt translation behind them.
+  const upstream = createUpstreamGate();
   // Diagnostics for the one failure this host cannot report itself: when the
   // plugin process dies of V8 heap exhaustion the daemon records only "Plugin
   // process exited", so the growth has to be visible before the fatal GC. The
@@ -128,9 +163,10 @@ export default function contribute(server: PluginServerContext) {
   const memoryProbe = probesEnabled ? createMemoryProbe(memoryProbeOptionsFromEnv()) : undefined;
   memoryProbe?.track({ name: "cache", read: () => cacheStore.stats() });
   memoryProbe?.track({ name: "inflight", read: () => inflight.stats() });
+  memoryProbe?.track({ name: "upstream", read: () => upstream.stats() });
   memoryProbe?.track({ name: "context", read: () => context.stats() });
   memoryProbe?.start();
-  const deps = { loadConfig, cacheStore, context, inflight, promptCacheKeys };
+  const deps = { loadConfig, cacheStore, context, inflight, upstream, promptCacheKeys };
   const forkCoordinator = new ClaudeForkCoordinator();
   const cacheDefaults = server.registerSettings(claudeCacheSettings);
   const cacheDefaultsReader = createCachedSettingsReader(cacheDefaults);
@@ -147,8 +183,9 @@ export default function contribute(server: PluginServerContext) {
   });
   const offCacheArchive = server.on("agent.archived", ({ agent }) => cacheCoordinator.suspend(agent.id));
   const offCacheClose = server.on("agent.closed", ({ agent }) => cacheCoordinator.suspend(agent.id));
-  server.handle(claudeCacheStatusRpc, ({ agentId }) => cacheCoordinator.status(agentId));
-  server.handle(claudeCacheConfigureRpc, ({ agentId, preferences }) => cacheCoordinator.configure(agentId, preferences));
+  handleTraced(server, step, claudeCacheStatusRpc, ({ agentId }) => cacheCoordinator.status(agentId));
+  handleTraced(server, step, claudeCacheConfigureRpc, ({ agentId, preferences }) =>
+    cacheCoordinator.configure(agentId, preferences));
   // Bridge the agent id into our providers' session env: the daemon assigns
   // providers a fresh random session id per open, so without this the prompt
   // path could not share a transcript with the client display path (which
@@ -159,24 +196,16 @@ export default function contribute(server: PluginServerContext) {
   });
   server.registerProvider(withNotificationTranslation(createTranslateProvider(deps), deps));
   server.registerProvider(withNotificationTranslation(createTranslateClaudeProvider({ ...deps, forkCoordinator, cacheCoordinator }), deps));
-  server.handle(forkClaudeSessionRpc, createClaudeSessionForkHandler({ coordinator: forkCoordinator }));
+  handleTraced(server, step, forkClaudeSessionRpc, createClaudeSessionForkHandler({ coordinator: forkCoordinator }));
   server.registerProvider(withNotificationTranslation(createTranslateCodexProvider(deps), deps));
-  const step = createStepTracer();
-  const translateHandler = createTranslateHandler(deps);
-  // The daemon's `Plugin RPC timed out: translate.invoke` is the only signal a
-  // stalled translation leaves today; pairing it with a step marker says
-  // whether the handler itself is stuck or the plugin never got to it.
-  server.handle(translateTextRpc, (input) => {
-    const done = step.start("rpc.translate.invoke", `chars=${input.text.length}`);
-    return translateHandler(input).finally(done);
-  });
+  handleTraced(server, step, translateTextRpc, createTranslateHandler(deps));
   const streamManager = createTranslateStreamManager(deps);
-  server.handle(translateStreamStartRpc, createTranslateStreamStartHandler(streamManager));
-  server.handle(translateStreamPollRpc, createTranslateStreamPollHandler(streamManager));
-  server.handle(translateStreamCancelRpc, createTranslateStreamCancelHandler(streamManager));
-  server.handle(translateProvidersRpc, createProvidersHandler());
-  server.handle(promptCacheKeyStatusRpc, ({ sessionKey }) => promptCacheKeys.resolve(sessionKey));
-  server.handle(promptCacheKeySetRpc, ({ sessionKey, action }) =>
+  handleTraced(server, step, translateStreamStartRpc, createTranslateStreamStartHandler(streamManager));
+  handleTraced(server, step, translateStreamPollRpc, createTranslateStreamPollHandler(streamManager));
+  handleTraced(server, step, translateStreamCancelRpc, createTranslateStreamCancelHandler(streamManager));
+  handleTraced(server, step, translateProvidersRpc, createProvidersHandler());
+  handleTraced(server, step, promptCacheKeyStatusRpc, ({ sessionKey }) => promptCacheKeys.resolve(sessionKey));
+  handleTraced(server, step, promptCacheKeySetRpc, ({ sessionKey, action }) =>
     promptCacheKeys.configure(sessionKey, action));
   return () => {
     settingsReader.dispose();

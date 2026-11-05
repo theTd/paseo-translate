@@ -751,7 +751,7 @@ async function openSession(
         translatedSystemPrompt = await context.translator.translate(
           input.config.systemPrompt,
           "user-to-agent",
-          { contextKey },
+          { contextKey, priority: true },
         );
       } catch (error) {
         context.emit({
@@ -1259,7 +1259,10 @@ async function promptSession(
       original = `/${prompt.name}${prompt.arguments.trim() ? ` ${prompt.arguments}` : ""}`;
       const values = await context.loadValues();
       const args = values.translatePrompts && prompt.arguments.trim()
-        ? await context.translator.translate(prompt.arguments, "user-to-agent", { contextKey: session.contextKey })
+        ? await context.translator.translate(prompt.arguments, "user-to-agent", {
+            contextKey: session.contextKey,
+            priority: true,
+          })
         : prompt.arguments;
       blocks = [{ type: "text", text: `/${prompt.name}${args.trim() ? ` ${args}` : ""}` }];
     } else {
@@ -1540,7 +1543,7 @@ async function buildMessageBlocks(
   const values = await context.loadValues();
   const translate = values.translatePrompts
     ? (text: string) =>
-        context.translator.translate(text, "user-to-agent", { contextKey })
+        context.translator.translate(text, "user-to-agent", { contextKey, priority: true })
     : async (text: string) => text;
   const blocks: SdkContentBlock[] = [];
   const displayFragments: PromptTranslationFragment[] = [];
@@ -2364,7 +2367,7 @@ async function resolveQuestionAllow(
     const values = await context.loadValues();
     const translate = values.translatePrompts
       ? (text: string) =>
-          context.translator.translate(text, "user-to-agent", { contextKey })
+          context.translator.translate(text, "user-to-agent", { contextKey, priority: true })
       : async (text: string) => text;
     const answers = await resolveQuestionAnswers(
       question.translatedQuestions,
