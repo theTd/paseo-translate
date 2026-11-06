@@ -555,6 +555,44 @@ async function readReplayInner(
   return { rootItems: root.items, children };
 }
 
+/** A replayed sub-agent keeps its opening item (the task prompt)... */
+export const REPLAY_CHILD_HEAD_ITEMS = 1;
+/** ...and its latest items, which carry the result. */
+export const REPLAY_CHILD_TAIL_ITEMS = 40;
+
+/**
+ * Bounds one sub-agent's replayed timeline; a single notice stands in for the
+ * items between its head and tail.
+ *
+ * Sub-agent sidecars are most of a long session's replay: a forked session
+ * copies its ancestors' sidecars, and one reopen replayed 22k sub-agent items
+ * next to 3.5k root ones. Every replayed item crosses the plugin's IPC pipe
+ * and the daemon's event loop, so the root timeline stays complete and each
+ * sub-agent shows how it started and how it ended.
+ */
+export function trimReplayedChildItems(
+  items: ReplayedTimelineItem[],
+  canonicalId: string,
+): ReplayedTimelineItem[] {
+  const kept = REPLAY_CHILD_HEAD_ITEMS + REPLAY_CHILD_TAIL_ITEMS;
+  // The notice takes one slot, so omitting a single item would save nothing.
+  if (items.length <= kept + 1) return items;
+  const omitted = items.length - kept;
+  const firstOmitted = items[REPLAY_CHILD_HEAD_ITEMS];
+  const notice: ReplayedTimelineItem = {
+    type: "notification",
+    id: `replay-${canonicalId}-omitted`,
+    level: "info",
+    message: `${omitted} earlier items of this subagent are not shown in reopened history.`,
+    ...(firstOmitted?.timestamp !== undefined ? { timestamp: firstOmitted.timestamp } : {}),
+  };
+  return [
+    ...items.slice(0, REPLAY_CHILD_HEAD_ITEMS),
+    notice,
+    ...items.slice(items.length - REPLAY_CHILD_TAIL_ITEMS),
+  ];
+}
+
 async function readReplayChildren(
   projectDir: string,
   claudeSessionId: string,
@@ -599,6 +637,8 @@ async function readReplayChildren(
         restore?.restoreChildBlock,
       );
       if (stagedChild) {
+        // Trimmed per child as it is read, so a long fork never holds every sidecar's items at once.
+        stagedChild.collector.items = trimReplayedChildItems(stagedChild.collector.items, stagedChild.canonicalId);
         staged.push(stagedChild);
         for (const [toolUseId, owner] of stagedChild.collector.ownerCanonicalByToolUseId) {
           root.ownerCanonicalByToolUseId.set(toolUseId, owner);

@@ -17,6 +17,7 @@ import {
   type CatalogProbeTiming,
 } from "./claude-provider";
 import { ClaudeForkCoordinator } from "./claude-fork-coordinator";
+import { EMIT_BATCH_SIZE } from "./provider-emit-pacing";
 import { ClaudeCacheCompactionCoordinator } from "./claude-cache-compaction";
 import { createTranslateHandler, createTranslator } from "./translate";
 import { createMemoryTranslationCacheStore } from "./translation-cache-store";
@@ -2616,6 +2617,37 @@ describe("translate claude provider extended protocol", () => {
     } finally {
       if (previous === undefined) delete process.env["CLAUDE_CONFIG_DIR"];
       else process.env["CLAUDE_CONFIG_DIR"] = previous;
+      await fsp.rm(configDir, { recursive: true, force: true });
+      await fsp.rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it("replays a history spanning several paced batches whole and in order", async () => {
+    const configDir = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-config-"));
+    const cwd = await fsp.mkdtemp(pathP.join(osP.tmpdir(), "claude-cwd-"));
+    try {
+      const projectDir = claudeProjectDirOf(cwd, configDir);
+      await fsp.mkdir(projectDir, { recursive: true });
+      const total = EMIT_BATCH_SIZE * 3 + 7;
+      const lines = Array.from({ length: total }, (_, i) => JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: `paced-${i}` }] },
+        timestamp: "2025-01-01T00:00:00Z",
+      }));
+      await fsp.writeFile(pathP.join(projectDir, "cs-paced.jsonl"), `${lines.join("\n")}\n`);
+      const { events, send } = await createHarness({ claudeConfigDir: configDir });
+      await send({
+        ...openInput,
+        config: { ...openInput.config, cwd },
+        persistence: { version: 1, data: { claudeSessionId: "cs-paced" } },
+        history: "replay",
+      });
+      await waitFor(events, (event) => event.type === "session.ready");
+      const ready = events.findIndex((event) => event.type === "session.ready");
+      const replayed = events.slice(0, ready).flatMap((event) =>
+        event.type === "timeline.item" && event.item.type === "assistant_message" ? [event.item.text] : []);
+      expect(replayed).toEqual(Array.from({ length: total }, (_, i) => `paced-${i}`));
+    } finally {
       await fsp.rm(configDir, { recursive: true, force: true });
       await fsp.rm(cwd, { recursive: true, force: true });
     }

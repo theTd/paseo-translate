@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   readClaudeReplay,
   readClaudeRewindUserMessageIds,
+  REPLAY_CHILD_HEAD_ITEMS,
+  REPLAY_CHILD_TAIL_ITEMS,
+  trimReplayedChildItems,
   type ReplayResult,
   type ReplayUserTextRestore,
 } from "./claude-transcript";
@@ -211,9 +214,12 @@ describe("complete Claude transcript replay", () => {
     expect(result.rootItems).toContainEqual(expect.objectContaining({ type: "assistant_message", text: expect.stringContaining("paseo-attachments") }));
   });
 
-  it("preserves every child timeline beyond the former shared budget", async () => {
+  it("keeps every root item while bounding each long child timeline", async () => {
     const fixture = createFixture();
-    writeRootSession(fixture, [userText("hello")]);
+    const rootTotal = FORMER_MAX_REPLAY_ITEMS + 500;
+    const rootLines: string[] = [];
+    for (let i = 0; i < rootTotal; i++) rootLines.push(assistantText(`root-${i}`));
+    writeRootSession(fixture, rootLines);
     const perChild = Math.floor(FORMER_MAX_REPLAY_CHILD_ITEMS / 2) + 500;
     const childLines = (prefix: string): string[] => {
       const lines: string[] = [];
@@ -225,17 +231,49 @@ describe("complete Claude transcript replay", () => {
     writeSidecar(fixture, "aaa", "tu-aaa", childLines("child-a"), Date.now() - 60_000);
     writeSidecar(fixture, "bbb", "tu-bbb", childLines("child-b"), Date.now());
     const result = await replay(fixture);
+    expect(result.rootItems).toHaveLength(rootTotal);
     expect(result.children).toHaveLength(2);
-    const total = result.children.reduce((sum, child) => sum + child.items.length, 0);
-    expect(total).toBe(perChild * 2);
-    expect(textsOf(result.rootItems)).toEqual(["hello"]);
-    const byId = new Map(result.children.map((child) => [child.canonicalId, child]));
-    expect(textsOf(byId.get("tu-bbb")?.items ?? [])).toHaveLength(perChild);
-    const olderTexts = textsOf(byId.get("tu-aaa")?.items ?? []);
-    expect(olderTexts).toHaveLength(perChild);
-    expect(olderTexts[olderTexts.length - 1]).toBe(
-      `child-a-${String(perChild - 1).padStart(4, "0")}`,
-    );
+    for (const [id, prefix] of [["tu-aaa", "child-a"], ["tu-bbb", "child-b"]] as const) {
+      const items = result.children.find((child) => child.canonicalId === id)?.items ?? [];
+      expect(items).toHaveLength(REPLAY_CHILD_HEAD_ITEMS + 1 + REPLAY_CHILD_TAIL_ITEMS);
+      expect(items[0]).toMatchObject({ type: "assistant_message", text: `${prefix}-0000` });
+      expect(items[REPLAY_CHILD_HEAD_ITEMS]).toMatchObject({
+        type: "notification",
+        level: "info",
+        message: `${perChild - REPLAY_CHILD_HEAD_ITEMS - REPLAY_CHILD_TAIL_ITEMS} earlier items of this subagent are not shown in reopened history.`,
+      });
+      expect(items[items.length - 1]).toMatchObject({ text: `${prefix}-${String(perChild - 1).padStart(4, "0")}` });
+      expect(items[REPLAY_CHILD_HEAD_ITEMS + 1]).toMatchObject({
+        text: `${prefix}-${String(perChild - REPLAY_CHILD_TAIL_ITEMS).padStart(4, "0")}`,
+      });
+    }
+  });
+
+  it("keeps a child timeline whole while it fits the bound", async () => {
+    const fixture = createFixture();
+    writeRootSession(fixture, [userText("hello")]);
+    // One past head + tail: dropping a single item for a notice would save nothing.
+    const fits = REPLAY_CHILD_HEAD_ITEMS + REPLAY_CHILD_TAIL_ITEMS + 1;
+    const lines: string[] = [];
+    for (let i = 0; i < fits; i++) lines.push(assistantText(`child-${i}`));
+    writeSidecar(fixture, "aaa", "tu-aaa", lines);
+    const result = await replay(fixture);
+    expect(textsOf(result.children[0]?.items ?? [])).toEqual(lines.map((_, i) => `child-${i}`));
+  });
+
+  it("dates the omission notice at the first item it stands in for", () => {
+    const items = Array.from({ length: 100 }, (_, i) => ({
+      type: "assistant_message" as const,
+      id: `m${i}`,
+      text: `m${i}`,
+      timestamp: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+    }));
+    const trimmed = trimReplayedChildItems(items, "tu-x");
+    expect(trimmed[REPLAY_CHILD_HEAD_ITEMS]).toMatchObject({
+      type: "notification",
+      id: "replay-tu-x-omitted",
+      timestamp: items[REPLAY_CHILD_HEAD_ITEMS]?.timestamp,
+    });
   });
 
   it("replays every sidecar beyond the former sidecar window", async () => {

@@ -61,6 +61,7 @@ import {
 } from "./claude-transcript";
 import { ClaudeForkCoordinator, claudeForkConfigurationSchema, claudeForkConfiguration, claudeForkEnvironment } from "./claude-fork-coordinator";
 import { findClaudeTranscriptConfigDir, resolveClaudeConfigDir, resolveConfiguredClaudeConfigDir } from "./claude-project-dir";
+import { createEmitPacer } from "./provider-emit-pacing";
 import { replayTimelineEvent } from "./provider-replay-timestamps";
 import {
   TRANSLATE_CLAUDE_PROVIDER_ID,
@@ -954,6 +955,10 @@ function readConfigured(value: string | undefined): string | null {
 /**
  * Best-effort history replay from Claude's own transcript files. Failures
  * read as empty replay: the session still opens and stays fully usable live.
+ *
+ * A forked session can replay tens of thousands of items. Emits are paced
+ * against the IPC send backlog (see provider-emit-pacing), so the plugin's
+ * RPC replies never queue behind a whole replay.
  */
 async function replayHistory(
   session: ClaudeSession,
@@ -963,10 +968,15 @@ async function replayHistory(
   if (history !== "replay" || session.claudeSessionId === null || session.closed) return;
   const restore = await buildReplayRestore(context, session.contextKey);
   const replay = await readClaudeReplay(session.config.cwd, session.claudeSessionId, restore, session.config.env["CLAUDE_CONFIG_DIR"]);
+  const pacer = createEmitPacer({ shouldStop: () => session.closed });
+  const emit = async (event: ProviderEvent): Promise<void> => {
+    context.emit(event);
+    await pacer.afterEmit();
+  };
   for (const item of replay.rootItems) {
     if (session.closed) return;
     if (item.type === "user_message" && typeof item.revertToken === "string") session.rewindUserMessageIds.push(item.revertToken);
-    context.emit(replayTimelineEvent(session.id, item));
+    await emit(replayTimelineEvent(session.id, item));
   }
   for (const child of orderReplayedChildren(replay.children)) {
     if (session.closed) return;
@@ -975,7 +985,8 @@ async function replayHistory(
       // content flattened into the parent timeline (see
       // flattenSubagentItemForParent).
       for (const item of child.items) {
-        context.emit(replayTimelineEvent(session.id, {
+        if (session.closed) return;
+        await emit(replayTimelineEvent(session.id, {
           ...flattenSubagentItemForParent(child.title ?? "Subagent", item), timestamp: item.timestamp,
         }));
       }
@@ -989,7 +1000,7 @@ async function replayHistory(
       ? `subagent:${session.id}:${child.parentCanonicalId}`
       : session.id;
     const turnId = randomUUID();
-    context.emit({
+    await emit({
       type: "session.opened",
       sessionId: providerId,
       parentSessionId: parentProviderId,
@@ -1002,19 +1013,20 @@ async function replayHistory(
       ...(child.description !== undefined ? { description: child.description } : {}),
       cwd: session.config.cwd,
     });
-    context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
+    await emit({ type: "session.turn", sessionId: providerId, turnId, state: "started" });
     for (const item of child.items) {
-      context.emit(replayTimelineEvent(providerId, item));
+      if (session.closed) return;
+      await emit(replayTimelineEvent(providerId, item));
     }
     if (child.totalTokens !== undefined) {
-      context.emit({
+      await emit({
         type: "session.usage",
         sessionId: providerId,
         turnId,
         usage: { contextWindowUsedTokens: child.totalTokens },
       });
     }
-    context.emit({ type: "session.turn", sessionId: providerId, turnId, state: "completed" });
+    await emit({ type: "session.turn", sessionId: providerId, turnId, state: "completed" });
   }
 }
 
