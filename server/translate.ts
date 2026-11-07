@@ -24,6 +24,8 @@ import {
 import type { TranslationContextManager } from "./translation-context";
 import { createStepTracer } from "./memory-probe";
 import type { PromptCacheKeyManager } from "./prompt-cache-key";
+import type { TranslationSessionManager } from "./translation-session";
+import type { TranslationBackend, TranslationBackendFactory } from "./translation-backend";
 import {
   TRANSLATION_TEXT_LIMIT,
   displayTranslationDirectionEnabled,
@@ -101,6 +103,10 @@ export interface TranslatorDeps {
    * tests hermetic and gateways that reject the parameter untouched.
    */
   promptCacheKeys?: PromptCacheKeyManager;
+  /** Per-agent translation session scheduler. Absent keeps standalone callers hermetic. */
+  sessionManager?: TranslationSessionManager;
+  /** Optional provider-specific hidden session backend. HTTP remains the fallback. */
+  backendFactory?: TranslationBackendFactory;
 }
 
 /** Per-call options for translate/translateStream. */
@@ -328,6 +334,17 @@ export function createTranslator(deps: TranslatorDeps): Translator {
   const cache = legacyAwareStore(deps.cacheStore ?? createMemoryTranslationCacheStore());
   const inflight = deps.inflight ?? createTranslationInflightRegistry();
   const upstream = upstreamGateFor(deps);
+  const backendCache = new Map<string, Promise<TranslationBackend>>();
+
+  async function backendFor(scopeKey: string | undefined): Promise<TranslationBackend | undefined> {
+    if (scopeKey === undefined || deps.backendFactory === undefined) return undefined;
+    let backend = backendCache.get(scopeKey);
+    if (backend === undefined) {
+      backend = Promise.resolve(deps.backendFactory.create(scopeKey));
+      backendCache.set(scopeKey, backend);
+    }
+    return backend;
+  }
 
   type PreparedMiss = {
     key: string;
@@ -340,6 +357,8 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     requestContent: string;
     /** Endpoint timeout; also bounds the fail-closed path's wait on a shared translation. */
     timeoutMs: number;
+    direction: TranslateDirection;
+    contextMaxChars: number;
     recordContext?: { scopeKey: string };
   };
   type SetupResult = { trivial: string } | { cached: string } | PreparedMiss;
@@ -374,6 +393,20 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     const context = deps.context;
     const useContext =
       context !== undefined && contextKey !== undefined && values.translationContextEnabled;
+    if (useContext && deps.sessionManager !== undefined) {
+      deps.sessionManager.ensureConfiguration(
+        contextKey,
+        JSON.stringify({
+          source: pair.source,
+          target: pair.target,
+          systemPrompt,
+          endpoint: values.endpointBaseUrl,
+          model: values.endpointModel,
+          protocol: values.endpointProtocol,
+          effort: values.translationReasoningEffort,
+        }),
+      );
+    }
     // The key covers everything that changes the output: direction,
     // language pair, effective system prompt, endpoint (base URL + model +
     // wire protocol, so switching providers invalidates), reasoning effort,
@@ -430,6 +463,8 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       if (scopeKey !== undefined) deps.context?.touch(scopeKey);
       return { cached } as const;
     }
+    const promptCacheKey = scopeKey === undefined ? undefined : resolveSessionPromptCacheKey(scopeKey);
+    if (scopeKey !== undefined) await backendFor(scopeKey);
     const client = createLlmClient(
       {
         baseUrl: values.endpointBaseUrl,
@@ -442,8 +477,8 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         // same prefix, so a stable key is what makes an endpoint's prompt
         // cache reachable at all. Standalone translations have no replayable
         // prefix, so they send no key.
-        ...(scopeKey !== undefined && deps.promptCacheKeys !== undefined
-          ? { promptCacheKey: deps.promptCacheKeys.resolve(scopeKey).key }
+        ...(promptCacheKey !== undefined
+          ? { promptCacheKey }
           : {}),
       },
       { fetchFn: deps.fetchFn },
@@ -470,6 +505,8 @@ export function createTranslator(deps: TranslatorDeps): Translator {
       userContent,
       requestContent: translationRequestMessage(userContent, pair),
       timeoutMs: values.translationTimeoutMs,
+      direction,
+      contextMaxChars: values.translationContextMaxChars,
       ...(scopeKey !== undefined ? { recordContext: { scopeKey } } : {}),
     } as const;
   }
@@ -480,6 +517,24 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     requestContent: string;
   }): ChatMessage[] {
     return [...prepared.prefixMessages, { role: "user", content: prepared.requestContent }];
+  }
+
+  function requestMessagesAtExecution(prepared: PreparedMiss): ChatMessage[] {
+    const scopeKey = prepared.recordContext?.scopeKey;
+    if (scopeKey === undefined || deps.context === undefined) return requestMessages(prepared);
+    const snapshot = deps.context.snapshot(scopeKey, prepared.direction, {
+      hardCapChars: prepared.contextMaxChars * 2,
+    });
+    const messages: ChatMessage[] = [];
+    const systemContent = snapshot.memory.length > 0
+      ? `${prepared.systemPrompt}\n\nEstablished translation conventions for this session (apply consistently):\n${snapshot.memory}`
+      : prepared.systemPrompt;
+    messages.push({ role: "system", content: systemContent });
+    for (const turn of snapshot.turns) {
+      messages.push({ role: "user", content: turn.user }, { role: "assistant", content: turn.assistant });
+    }
+    messages.push({ role: "user", content: prepared.requestContent });
+    return messages;
   }
 
   function commitTranslation(
@@ -506,6 +561,23 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     done();
   }
 
+  function runInTranslationSession<T>(
+    prepared: { recordContext?: { scopeKey: string } },
+    lane: "prompt" | "display",
+    task: (signal: AbortSignal) => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    const scopeKey = prepared.recordContext?.scopeKey;
+    if (scopeKey === undefined || deps.sessionManager === undefined) return task(signal);
+    return deps.sessionManager.run(scopeKey, lane, task, signal);
+  }
+
+  function resolveSessionPromptCacheKey(scopeKey: string): string | undefined {
+    const sessionKey = deps.sessionManager?.getOrCreate(scopeKey).promptCacheKey;
+    if (sessionKey !== undefined) return sessionKey;
+    return deps.promptCacheKeys?.resolve(scopeKey).key;
+  }
+
   /** Endpoint work for one streamed miss; publishes progress, commits on success. */
   function streamProducer(
     prepared: PreparedMiss,
@@ -516,19 +588,38 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     return async ({ signal, progress }) => {
       let accumulated = "";
       const done = step.start("endpoint.stream", `chars=${prepared.requestContent.length}`);
-      const translated = await upstream.run(
-        () => completeStreamFirst(
-          prepared.client,
-          requestMessages(prepared),
-          (delta) => {
-            const doneDelta = step.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
-            accumulated += delta;
-            progress(accumulated);
-            doneDelta();
+      const translated = await runInTranslationSession(
+        prepared,
+        "display",
+        (sessionSignal) => upstream.run(
+          async () => {
+            const backend = await backendFor(prepared.recordContext?.scopeKey);
+            const onDelta = (delta: string) => {
+              const doneDelta = step.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
+              accumulated += delta;
+              progress(accumulated);
+              doneDelta();
+            };
+            const request = {
+              client: prepared.client,
+              messages: requestMessagesAtExecution(prepared),
+              signal: sessionSignal,
+              onDelta,
+            };
+            if (backend === undefined) return completeStreamFirst(request.client, [...request.messages], onDelta, { signal: sessionSignal });
+            try {
+              return await backend.stream(request);
+            } catch (error) {
+              // Provider-specific hidden sessions are best effort. A failed
+              // hidden query must never make the visible translation path
+              // unusable; retry through the configured HTTP endpoint.
+              if (accumulated.length > 0) throw error;
+              return completeStreamFirst(request.client, [...request.messages], onDelta, { signal: sessionSignal });
+            }
           },
-          { signal },
+          { signal: sessionSignal, priority },
         ),
-        { signal, priority },
+        signal,
       ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
@@ -549,9 +640,27 @@ export function createTranslator(deps: TranslatorDeps): Translator {
   ): (context: InflightProducerContext) => Promise<string> {
     return async ({ signal }) => {
       const done = step.start("endpoint.complete", `chars=${prepared.requestContent.length}`);
-      const translated = await upstream.run(
-        () => prepared.client.complete(requestMessages(prepared), { signal }),
-        { signal, priority },
+      const translated = await runInTranslationSession(
+        prepared,
+        "prompt",
+        (sessionSignal) => upstream.run(
+          async () => {
+            const backend = await backendFor(prepared.recordContext?.scopeKey);
+            const request = {
+              client: prepared.client,
+              messages: requestMessagesAtExecution(prepared),
+              signal: sessionSignal,
+            };
+            if (backend === undefined) return request.client.complete([...request.messages], { signal: request.signal });
+            try {
+              return await backend.complete(request);
+            } catch {
+              return request.client.complete([...request.messages], { signal: request.signal });
+            }
+          },
+          { signal: sessionSignal, priority },
+        ),
+        signal,
       ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
@@ -630,7 +739,7 @@ export function createTranslator(deps: TranslatorDeps): Translator {
     const values = await deps.loadConfig();
     const pair = resolveLanguagePair(values, direction);
     const batchPrompt = resolveTranslationBatchSystemPrompt(values, pair);
-    const prefix = first.prefixMessages;
+    const prefix = requestMessagesAtExecution(first).slice(0, -1);
     const system = prefix[0];
     const withBatchSystem: ChatMessage[] =
       system !== undefined && system.role === "system"
@@ -653,9 +762,14 @@ export function createTranslator(deps: TranslatorDeps): Translator {
         }),
       },
     ];
-    const output = await upstream.run(
-      () => completeStreamFirst(first.client, messages, () => undefined, { signal }),
-      { signal, priority },
+    const output = await runInTranslationSession(
+      first,
+      "display",
+      (sessionSignal) => upstream.run(
+        () => completeStreamFirst(first.client, messages, () => undefined, { signal: sessionSignal }),
+        { signal: sessionSignal, priority },
+      ),
+      signal,
     );
     const parsed = parseTranslationBatch(output, packTexts.length, nonce);
     if (parsed === null) return null;

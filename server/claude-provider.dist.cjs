@@ -53379,6 +53379,16 @@ function createTranslator(deps) {
   const cache = legacyAwareStore(deps.cacheStore ?? createMemoryTranslationCacheStore());
   const inflight = deps.inflight ?? createTranslationInflightRegistry();
   const upstream = upstreamGateFor(deps);
+  const backendCache = /* @__PURE__ */ new Map();
+  async function backendFor(scopeKey) {
+    if (scopeKey === void 0 || deps.backendFactory === void 0) return void 0;
+    let backend = backendCache.get(scopeKey);
+    if (backend === void 0) {
+      backend = Promise.resolve(deps.backendFactory.create(scopeKey));
+      backendCache.set(scopeKey, backend);
+    }
+    return backend;
+  }
   async function prepareCacheLookup(text, direction, contextKey) {
     if (text.trim().length === 0) return { trivial: text };
     const doneConfig = step4.start("lookup.config");
@@ -53395,6 +53405,20 @@ function createTranslator(deps) {
     const systemPrompt = resolveTranslationSystemPrompt(values, pair);
     const context = deps.context;
     const useContext = context !== void 0 && contextKey !== void 0 && values.translationContextEnabled;
+    if (useContext && deps.sessionManager !== void 0) {
+      deps.sessionManager.ensureConfiguration(
+        contextKey,
+        JSON.stringify({
+          source: pair.source,
+          target: pair.target,
+          systemPrompt,
+          endpoint: values.endpointBaseUrl,
+          model: values.endpointModel,
+          protocol: values.endpointProtocol,
+          effort: values.translationReasoningEffort
+        })
+      );
+    }
     const doneKey = step4.start("lookup.key", `chars=${text.length}`);
     const key = cacheKey({
       text,
@@ -53426,6 +53450,8 @@ function createTranslator(deps) {
       if (scopeKey !== void 0) deps.context?.touch(scopeKey);
       return { cached: cached2 };
     }
+    const promptCacheKey = scopeKey === void 0 ? void 0 : resolveSessionPromptCacheKey(scopeKey);
+    if (scopeKey !== void 0) await backendFor(scopeKey);
     const client = createLlmClient(
       {
         baseUrl: values.endpointBaseUrl,
@@ -53438,7 +53464,7 @@ function createTranslator(deps) {
         // same prefix, so a stable key is what makes an endpoint's prompt
         // cache reachable at all. Standalone translations have no replayable
         // prefix, so they send no key.
-        ...scopeKey !== void 0 && deps.promptCacheKeys !== void 0 ? { promptCacheKey: deps.promptCacheKeys.resolve(scopeKey).key } : {}
+        ...promptCacheKey !== void 0 ? { promptCacheKey } : {}
       },
       { fetchFn: deps.fetchFn }
     );
@@ -53464,11 +53490,31 @@ ${snapshot.memory}` : systemPrompt;
       userContent,
       requestContent: translationRequestMessage(userContent, pair),
       timeoutMs: values.translationTimeoutMs,
+      direction,
+      contextMaxChars: values.translationContextMaxChars,
       ...scopeKey !== void 0 ? { recordContext: { scopeKey } } : {}
     };
   }
   function requestMessages(prepared) {
     return [...prepared.prefixMessages, { role: "user", content: prepared.requestContent }];
+  }
+  function requestMessagesAtExecution(prepared) {
+    const scopeKey = prepared.recordContext?.scopeKey;
+    if (scopeKey === void 0 || deps.context === void 0) return requestMessages(prepared);
+    const snapshot = deps.context.snapshot(scopeKey, prepared.direction, {
+      hardCapChars: prepared.contextMaxChars * 2
+    });
+    const messages = [];
+    const systemContent = snapshot.memory.length > 0 ? `${prepared.systemPrompt}
+
+Established translation conventions for this session (apply consistently):
+${snapshot.memory}` : prepared.systemPrompt;
+    messages.push({ role: "system", content: systemContent });
+    for (const turn of snapshot.turns) {
+      messages.push({ role: "user", content: turn.user }, { role: "assistant", content: turn.assistant });
+    }
+    messages.push({ role: "user", content: prepared.requestContent });
+    return messages;
   }
   function commitTranslation(prepared, source, translated, direction) {
     const done = step4.start("commit", `chars=${translated.length}`);
@@ -53484,23 +53530,49 @@ ${snapshot.memory}` : systemPrompt;
     }
     done();
   }
+  function runInTranslationSession(prepared, lane, task, signal) {
+    const scopeKey = prepared.recordContext?.scopeKey;
+    if (scopeKey === void 0 || deps.sessionManager === void 0) return task(signal);
+    return deps.sessionManager.run(scopeKey, lane, task, signal);
+  }
+  function resolveSessionPromptCacheKey(scopeKey) {
+    const sessionKey = deps.sessionManager?.getOrCreate(scopeKey).promptCacheKey;
+    if (sessionKey !== void 0) return sessionKey;
+    return deps.promptCacheKeys?.resolve(scopeKey).key;
+  }
   function streamProducer(prepared, source, direction, priority = false) {
     return async ({ signal, progress }) => {
       let accumulated = "";
       const done = step4.start("endpoint.stream", `chars=${prepared.requestContent.length}`);
-      const translated = await upstream.run(
-        () => completeStreamFirst(
-          prepared.client,
-          requestMessages(prepared),
-          (delta) => {
-            const doneDelta = step4.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
-            accumulated += delta;
-            progress(accumulated);
-            doneDelta();
+      const translated = await runInTranslationSession(
+        prepared,
+        "display",
+        (sessionSignal) => upstream.run(
+          async () => {
+            const backend = await backendFor(prepared.recordContext?.scopeKey);
+            const onDelta = (delta) => {
+              const doneDelta = step4.start("translate.accumulate", `chars=${accumulated.length} delta=${delta.length}`);
+              accumulated += delta;
+              progress(accumulated);
+              doneDelta();
+            };
+            const request = {
+              client: prepared.client,
+              messages: requestMessagesAtExecution(prepared),
+              signal: sessionSignal,
+              onDelta
+            };
+            if (backend === void 0) return completeStreamFirst(request.client, [...request.messages], onDelta, { signal: sessionSignal });
+            try {
+              return await backend.stream(request);
+            } catch (error62) {
+              if (accumulated.length > 0) throw error62;
+              return completeStreamFirst(request.client, [...request.messages], onDelta, { signal: sessionSignal });
+            }
           },
-          { signal }
+          { signal: sessionSignal, priority }
         ),
-        { signal, priority }
+        signal
       ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
@@ -53509,9 +53581,27 @@ ${snapshot.memory}` : systemPrompt;
   function completeProducer(prepared, source, direction, priority = false) {
     return async ({ signal }) => {
       const done = step4.start("endpoint.complete", `chars=${prepared.requestContent.length}`);
-      const translated = await upstream.run(
-        () => prepared.client.complete(requestMessages(prepared), { signal }),
-        { signal, priority }
+      const translated = await runInTranslationSession(
+        prepared,
+        "prompt",
+        (sessionSignal) => upstream.run(
+          async () => {
+            const backend = await backendFor(prepared.recordContext?.scopeKey);
+            const request = {
+              client: prepared.client,
+              messages: requestMessagesAtExecution(prepared),
+              signal: sessionSignal
+            };
+            if (backend === void 0) return request.client.complete([...request.messages], { signal: request.signal });
+            try {
+              return await backend.complete(request);
+            } catch {
+              return request.client.complete([...request.messages], { signal: request.signal });
+            }
+          },
+          { signal: sessionSignal, priority }
+        ),
+        signal
       ).finally(done);
       commitTranslation(prepared, source, translated, direction);
       return translated;
@@ -53556,7 +53646,7 @@ ${snapshot.memory}` : systemPrompt;
     const values = await deps.loadConfig();
     const pair = resolveLanguagePair(values, direction);
     const batchPrompt = resolveTranslationBatchSystemPrompt(values, pair);
-    const prefix = first.prefixMessages;
+    const prefix = requestMessagesAtExecution(first).slice(0, -1);
     const system = prefix[0];
     const withBatchSystem = system !== void 0 && system.role === "system" ? [
       {
@@ -53574,9 +53664,14 @@ ${snapshot.memory}` : systemPrompt;
         })
       }
     ];
-    const output2 = await upstream.run(
-      () => completeStreamFirst(first.client, messages, () => void 0, { signal }),
-      { signal, priority }
+    const output2 = await runInTranslationSession(
+      first,
+      "display",
+      (sessionSignal) => upstream.run(
+        () => completeStreamFirst(first.client, messages, () => void 0, { signal: sessionSignal }),
+        { signal: sessionSignal, priority }
+      ),
+      signal
     );
     const parsed = parseTranslationBatch(output2, packTexts.length, nonce);
     if (parsed === null) return null;
@@ -56353,6 +56448,82 @@ function createEmitPacer(options = {}) {
   };
 }
 
+// server/claude-translation-backend.ts
+function createClaudeHiddenTranslationBackendFactory(options) {
+  return {
+    create(sessionKey) {
+      let query = null;
+      let closed = false;
+      async function run(request) {
+        if (closed) throw new Error("Claude translation session is closed");
+        const prompt = toUserMessage(request.messages);
+        let sent = false;
+        const input2 = {
+          [Symbol.asyncIterator]: async function* () {
+            if (!sent) {
+              sent = true;
+              yield prompt;
+            }
+          }
+        };
+        query = options.queryFactory({ prompt: input2, options: options.optionsFactory(sessionKey, request.signal) });
+        let text = "";
+        try {
+          for await (const message of query) {
+            if (isUnsafeMessage(message)) throw new Error("Claude translation session emitted a tool or permission event");
+            const delta = messageText(message);
+            if (delta.length > 0) {
+              text += delta;
+              request.onDelta?.(delta);
+            }
+            if (message.type === "result") {
+              const subtype = message.subtype;
+              if (typeof subtype === "string" && subtype !== "success") throw new Error(`Claude translation session failed: ${subtype}`);
+              break;
+            }
+          }
+        } catch (error62) {
+          query = null;
+          throw error62;
+        }
+        if (text.trim().length === 0) throw new Error("Claude translation session returned no text");
+        return text.trim();
+      }
+      return {
+        kind: "claude",
+        complete: run,
+        stream: run,
+        close: async () => {
+          closed = true;
+          await query?.interrupt();
+        }
+      };
+    }
+  };
+}
+function isUnsafeMessage(message) {
+  const value = message;
+  if (value.type === "permission_request" || value.type === "tool_use" || value.type === "tool_result") return true;
+  const content = value.message?.content;
+  return Array.isArray(content) && content.some(
+    (block) => typeof block === "object" && block !== null && ["tool_use", "tool_result", "server_tool_use"].includes(String(block.type))
+  );
+}
+function toUserMessage(messages) {
+  const text = messages.map((message) => `${message.role}:
+${message.content}`).join("\n\n");
+  return { type: "user", message: { role: "user", content: text }, parent_tool_use_id: null, session_id: "translation" };
+}
+function messageText(message) {
+  const value = message;
+  if (value.type === "result" && typeof value.result === "string") return value.result;
+  const content = value.message?.content;
+  if (!Array.isArray(content)) return "";
+  return content.filter(
+    (block) => typeof block === "object" && block !== null && block.type === "text" && typeof block.text === "string"
+  ).map((block) => block.text).join("");
+}
+
 // server/claude-provider.ts
 var streamStep = createStepTracer();
 var DEFAULT_CATALOG_PROBE_TIMING = {
@@ -56401,11 +56572,42 @@ function resolvePathClaude() {
   return cachedPathClaude;
 }
 function createTranslateClaudeProvider(deps) {
-  const translator = createTranslator(deps);
   const queryFactory = deps.queryFactory ?? PGt;
   const forkClaudeSession = deps.forkSession ?? ((id2, options) => forkSession.forkSession(id2, options));
   const listeners = /* @__PURE__ */ new Set();
   const sessions = /* @__PURE__ */ new Map();
+  const hiddenBackends = /* @__PURE__ */ new Map();
+  const hiddenBackendFactory = createClaudeHiddenTranslationBackendFactory({
+    queryFactory: (params) => queryFactory(params),
+    optionsFactory: (sessionKey, signal) => {
+      const session = sessions.get(sessionKey);
+      if (session === void 0) throw new Error("Claude translation session is not open");
+      const values = session.config;
+      const providerOptions = resolveProviderOptions(session);
+      const options = {
+        cwd: values.cwd,
+        env: { ...process.env, ...omitTranslationBridgeEnv(values.env) },
+        abortController: abortControllerFor(signal),
+        includePartialMessages: true,
+        persistSession: false,
+        settingSources: ["user", "project", "local"],
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        allowDangerouslySkipPermissions: true,
+        permissionMode: "dontAsk",
+        ...session.desiredModel !== null ? { model: session.desiredModel } : {},
+        ...providerOptions.spread,
+        ...Object.keys(providerOptions.settings).length > 0 ? { settings: providerOptions.settings } : {}
+      };
+      return options;
+    }
+  });
+  const translator = createTranslator({ ...deps, backendFactory: {
+    create: async (sessionKey) => {
+      const backend = await hiddenBackendFactory.create(sessionKey);
+      hiddenBackends.set(sessionKey, backend);
+      return backend;
+    }
+  } });
   const unregisterForks = /* @__PURE__ */ new Map();
   const context = {
     sessions,
@@ -56421,6 +56623,7 @@ function createTranslateClaudeProvider(deps) {
     }),
     forkClaudeSession,
     forkCoordinator: deps.forkCoordinator,
+    hiddenBackends,
     cacheCoordinator: deps.cacheCoordinator,
     unregisterForks,
     loadValues: () => deps.loadConfig(),
@@ -56466,6 +56669,8 @@ function createTranslateClaudeProvider(deps) {
           for (const session of sessions.values()) {
             const close = async () => {
               unregisterForks.get(session.id)?.();
+              await hiddenBackends.get(session.id)?.close().catch(() => void 0);
+              hiddenBackends.delete(session.id);
               await teardownSession(session);
             };
             if (deps.forkCoordinator) await deps.forkCoordinator.exclusive(session.contextKey, close);
@@ -56509,7 +56714,11 @@ async function dispatch(input2, context, capabilities) {
       context.unregisterForks.get(input2.sessionId)?.();
       context.unregisterForks.delete(input2.sessionId);
       context.sessions.delete(input2.sessionId);
-      if (session !== void 0) await teardownSession(session);
+      if (session !== void 0) {
+        await context.hiddenBackends.get(input2.sessionId)?.close().catch(() => void 0);
+        context.hiddenBackends.delete(input2.sessionId);
+        await teardownSession(session);
+      }
       context.emit({ type: "session.closed", sessionId: input2.sessionId });
       context.emit({ type: "request.completed", requestId: input2.requestId });
       return;
@@ -58751,6 +58960,12 @@ async function teardownSession(session) {
 }
 function describe3(error62) {
   return error62 instanceof Error ? error62.message : String(error62);
+}
+function abortControllerFor(signal) {
+  const controller = new AbortController();
+  if (signal.aborted) controller.abort();
+  else signal.addEventListener("abort", () => controller.abort(), { once: true });
+  return controller;
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {

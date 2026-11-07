@@ -72,6 +72,7 @@ import {
   type TranslateSettingsValues,
 } from "../shared/translate";
 import { createStepTracer } from "./memory-probe";
+import { createClaudeHiddenTranslationBackendFactory } from "./claude-translation-backend";
 
 const streamStep = createStepTracer();
 
@@ -333,12 +334,43 @@ interface ClaudeSession {
  * capability-gated off: the daemon handles their absence gracefully.
  */
 export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): ProviderRegistration {
-  const translator = createTranslator(deps);
   const queryFactory = deps.queryFactory ?? claudeQuery;
   const forkClaudeSession = deps.forkSession ?? ((id: string, options: { upToMessageId: string }) =>
     sdkForkSession.forkSession(id, options));
   const listeners = new Set<(event: ProviderEvent) => void>();
   const sessions = new Map<string, ClaudeSession>();
+  const hiddenBackends = new Map<string, import("./translation-backend").TranslationBackend>();
+  const hiddenBackendFactory = createClaudeHiddenTranslationBackendFactory({
+    queryFactory: (params) => queryFactory(params) as import("./claude-translation-backend").ClaudeQuery,
+    optionsFactory: (sessionKey, signal) => {
+      const session = sessions.get(sessionKey);
+      if (session === undefined) throw new Error("Claude translation session is not open");
+      const values = session.config;
+      const providerOptions = resolveProviderOptions(session);
+      const options: Options = {
+        cwd: values.cwd,
+        env: { ...process.env, ...omitTranslationBridgeEnv(values.env) },
+        abortController: abortControllerFor(signal),
+        includePartialMessages: true,
+        persistSession: false,
+        settingSources: ["user", "project", "local"],
+        systemPrompt: { type: "preset", preset: "claude_code" },
+        allowDangerouslySkipPermissions: true,
+        permissionMode: "dontAsk",
+        ...(session.desiredModel !== null ? { model: session.desiredModel } : {}),
+        ...providerOptions.spread,
+        ...(Object.keys(providerOptions.settings).length > 0 ? { settings: providerOptions.settings } : {}),
+      };
+      return options;
+    },
+  });
+  const translator = createTranslator({ ...deps, backendFactory: {
+    create: async (sessionKey) => {
+      const backend = await hiddenBackendFactory.create(sessionKey);
+      hiddenBackends.set(sessionKey, backend);
+      return backend;
+    },
+  } });
   const unregisterForks = new Map<string, () => void>();
   const context: DispatchContext = {
     sessions,
@@ -352,6 +384,7 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
     }),
     forkClaudeSession,
     forkCoordinator: deps.forkCoordinator,
+    hiddenBackends,
     cacheCoordinator: deps.cacheCoordinator,
     unregisterForks,
     loadValues: () => deps.loadConfig(),
@@ -407,6 +440,8 @@ export function createTranslateClaudeProvider(deps: ClaudeProviderDeps): Provide
           for (const session of sessions.values()) {
             const close = async () => {
               unregisterForks.get(session.id)?.();
+              await hiddenBackends.get(session.id)?.close().catch(() => undefined);
+              hiddenBackends.delete(session.id);
               await teardownSession(session);
             };
             if (deps.forkCoordinator) await deps.forkCoordinator.exclusive(session.contextKey, close);
@@ -425,6 +460,7 @@ interface DispatchContext {
   catalogProbeTiming: CatalogProbeTiming;
   cacheCoordinator?: import("./claude-cache-compaction").ClaudeCacheCompactionCoordinator;
   forkCoordinator?: ClaudeForkCoordinator;
+  hiddenBackends: Map<string, import("./translation-backend").TranslationBackend>;
   unregisterForks: Map<string, () => void>;
   sessions: Map<string, ClaudeSession>;
   translator: ReturnType<typeof createTranslator>;
@@ -472,7 +508,11 @@ async function dispatch(
       context.unregisterForks.get(input.sessionId)?.();
       context.unregisterForks.delete(input.sessionId);
       context.sessions.delete(input.sessionId);
-      if (session !== undefined) await teardownSession(session);
+      if (session !== undefined) {
+        await context.hiddenBackends.get(input.sessionId)?.close().catch(() => undefined);
+        context.hiddenBackends.delete(input.sessionId);
+        await teardownSession(session);
+      }
       context.emit({ type: "session.closed", sessionId: input.sessionId });
       context.emit({ type: "request.completed", requestId: input.requestId });
       return;
@@ -3376,4 +3416,11 @@ async function teardownSession(session: ClaudeSession): Promise<void> {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function abortControllerFor(signal: AbortSignal): AbortController {
+  const controller = new AbortController();
+  if (signal.aborted) controller.abort();
+  else signal.addEventListener("abort", () => controller.abort(), { once: true });
+  return controller;
 }

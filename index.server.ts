@@ -29,6 +29,8 @@ import {
   defaultTranslationCacheDirectory,
 } from "./server/translation-cache-store";
 import { createTranslationContextManager } from "./server/translation-context";
+import { createTranslationSessionManager } from "./server/translation-session";
+import { createHttpTranslationBackend } from "./server/translation-backend";
 import { createPromptCacheKeyManager } from "./server/prompt-cache-key";
 import { promptCacheKeySetRpc, promptCacheKeyStatusRpc } from "./shared/prompt-cache-key";
 import { createCachedSettingsReader } from "./server/settings-cache";
@@ -141,6 +143,14 @@ export default function contribute(server: PluginServerContext) {
     promptCacheKeys,
     memoryStore: contextMemoryStore,
   });
+  const sessionManager = createTranslationSessionManager({
+    promptCacheKey: (sessionKey, cacheEpoch) => {
+      const base = promptCacheKeys.resolve(sessionKey).key;
+      // Keep rotated keys inside the shared RPC/provider limit even when a
+      // user pinned the maximum-length key.
+      return cacheEpoch === 0 ? base : `${base.slice(0, 112)}:e${cacheEpoch}`;
+    },
+  });
   // One single-flight registry, shared like the cache: the prompt path, the
   // display jobs of every client and the notification previews join one
   // running request per text instead of each billing their own.
@@ -175,8 +185,18 @@ export default function contribute(server: PluginServerContext) {
   memoryProbe?.track({ name: "inflight", read: () => inflight.stats() });
   memoryProbe?.track({ name: "upstream", read: () => upstream.stats() });
   memoryProbe?.track({ name: "context", read: () => context.stats() });
+  memoryProbe?.track({ name: "translation-sessions", read: () => sessionManager.stats() });
   memoryProbe?.start();
-  const deps = { loadConfig, cacheStore, context, inflight, upstream, promptCacheKeys };
+  const deps = {
+    loadConfig,
+    cacheStore,
+    context,
+    inflight,
+    upstream,
+    promptCacheKeys,
+    sessionManager,
+    backendFactory: { create: () => createHttpTranslationBackend() },
+  };
   const forkCoordinator = new ClaudeForkCoordinator();
   const cacheDefaults = server.registerSettings(claudeCacheSettings);
   const cacheDefaultsReader = createCachedSettingsReader(cacheDefaults);
@@ -229,6 +249,7 @@ export default function contribute(server: PluginServerContext) {
     offCacheClose();
     cacheCoordinator.dispose();
     streamManager.dispose();
+    sessionManager.close();
     context.dispose();
   };
 }
